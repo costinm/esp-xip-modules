@@ -1,0 +1,27 @@
+# Same baseline as esp-wifi-loader's Main images (docs/app-integration.md there):
+# the loader's Stage2 boots us in DIO or QIO; the driver must stay DIO.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# Lets a module (or the loader) ask for the loader on the next boot; reserve the RTC area like the loader does.
+CONFIG_BOOTLOADER_RESERVE_RTC_MEM=y
+CONFIG_BOOTLOADER_RESERVE_RTC_SIZE=0x10
+CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC=y
+CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC_SIZE=0x20
+# The loader maps module pages itself and writes the module partition through the partition API.
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_WIFI_NVS_ENABLED=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+# esp-wifi-loader's Wi-Fi (esp_wifi_loader_net_*) sets up link-local IPv6
+CONFIG_LWIP_IPV6=y
+# esp-wifi-loader as a library: this application owns the network and hands upload sockets to it
+CONFIG_WL_MODE_LIBRARY=y
