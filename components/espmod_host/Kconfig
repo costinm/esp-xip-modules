@@ -1,0 +1,49 @@
+menu "esp-xip-modules host"
+
+    config ESPMOD_REQUEST_MAX
+        int "Largest request a module can receive"
+        default 1024
+        help
+            Size of the per-module inbox (espmod_instance_post / espmod_instance_request).
+
+    config ESPMOD_RESPONSE_MAX
+        int "Largest answer a module can give with respond()"
+        default 1024
+
+    config ESPMOD_WORKER_STACK
+        int "Stack of the worker task that runs every module's handlers, bytes"
+        default 12288
+        help
+            Must cover the deepest handler of any installed module (a module image states its need in stack_bytes).
+
+    config ESPMOD_WORKER_PRIORITY
+        int "Priority of the worker task"
+        default 5
+
+    config ESPMOD_HANDLER_MS
+        int "Handler time budget, ms"
+        default 20
+        help
+            A handler that runs longer is logged and counted (espmod_stats_t.overruns).
+
+    config ESPMOD_EVENT_QUEUE
+        int "Events queued for the worker (interrupts, alarms, requests)"
+        default 32
+
+    config ESPMOD_ARENA_SIZE
+        int "Scratch memory per module (alloc), bytes"
+        default 32768
+        help
+            Allocated on the first alloc() call, freed when the module returns.
+
+    config ESPMOD_SERIAL_STACK
+        int "Stack of the serial reader task (it runs the line handler), bytes"
+        default 8192
+
+    config ESPMOD_SPI_MAX_TRANSFER
+        int "Largest SPI transfer, bytes"
+        default 272
+        help
+            An SX126x read of a 255-byte packet needs 255 + 4.
+
+endmenu
