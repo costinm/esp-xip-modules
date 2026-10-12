@@ -1,0 +1,43 @@
+# The current lab. Boards for tests/device_test.py and provision.py; edit for yours (docs/flashing.md).
+# The test and the provisioning tool use only what is listed here, and refuse a board whose MAC differs.
+# adb, when it is not on the PATH (DMesh's environment has one)
+adb = "/ws/dmesh/target/nix/profile/bin/adb"
+
+[[board]]
+name = "e8"
+chip = "esp32c6"             # esp32 | esp32s3 | esp32c6: which build and which packages to use
+mac = "10:bd:a3:ac:5a:20"    # checked before anything is written; the port is only a way to reach the board
+port = "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:AC:5A:20-if00"   # native USB-Serial/JTAG
+phone = "94AAY0LALC"         # adb serial of the flasher phone (Pixel 3a, Android 15, esp-wifi-loader app installed)
+kind = "espmod"              # package kind on the phone: files/packages/<chip>-<kind>.wlpkg
+host = "192.168.49.150"       # main's address on the flash network (DHCP from the phone; `net` on the console prints it)
+via = "adb"                  # "adb": the phone joins that access point and carries the bytes (this computer has no free Wi-Fi)
+key = "~/.ssh/esp_modules/modules-signing-key.pem"   # whose public half is in main
+# Optional wiring for the interrupt and SPI checks of mod_test:
+# gpio = [4, 5]              # two pins jumpered together
+# spi = [6, 2, 7, 10]        # SCK MISO MOSI CS, MOSI wired to MISO
+
+# ESP32 LoRa boards (TTGO-style SX127x on SPI3, UART bridge CP2102; reset and the loader entry go through RTS/DTR).
+[[board]]
+name = "lora1"
+chip = "esp32"
+mac = "84:0d:8e:07:41:70"
+baud = 460800                # esptool speed for the CP2102 bridge
+port = "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_DMESH-LORA1-840D8E074170-if00-port0"
+phone = "94AAY0LALC"
+kind = "espmod"
+host = "192.168.49.215"      # DHCP from the phone; `net` on the console prints the current one
+via = "adb"
+key = "~/.ssh/esp_modules/modules-signing-key.pem"
+
+[[board]]
+name = "lora3"
+chip = "esp32"
+mac = "84:0d:8e:07:42:c4"
+baud = 115200                # esptool speed: this CP2102 corrupts reads at higher speeds
+port = "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_DMESH-LORA3-D8A01D4C5E1C-if00-port0"
+phone = "94AAY0LALC"
+kind = "espmod"
+host = "192.168.49.44"
+via = "adb"
+key = "~/.ssh/esp_modules/modules-signing-key.pem"

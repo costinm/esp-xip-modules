@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Build a module image (DMOD) from C sources (or a Rust bin with --cargo): compile, link, check, pack.
+
+  mkmod.py --chip esp32c6 --slot test --out target/modules/esp32c6/mod_test.dmod modules/mod_test/mod_test.c
+  mkmod.py --chip esp32 --list-slots
+
+The toolchain comes from the PATH (an ESP-IDF shell: `. ./env.sh`). Checks that a module must pass
+before it is worth signing: no relocations, no undefined symbols, no .data/.bss (the image is read-only
+flash), and it fits its slot. docs/writing-modules.md explains why.
+"""
+import argparse
+import os
+import shutil
+import re
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dmod  # noqa: E402
+
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+# Where each chip runs modules. Must match components/espmod_loader/src/loader.c (tests/test_tools.py checks).
+CHIPS = {
+    "esp32":   dict(prefix="xtensa-esp32-elf", fixed=True, code_base=0x40300000, data_base=0x3F700000,
+                    arch=["-mtext-section-literals"], rust_target="xtensa-esp32-espidf"),
+    "esp32s3": dict(prefix="xtensa-esp32s3-elf", fixed=True, code_base=0x43000000, data_base=0x3D000000,
+                    arch=["-mtext-section-literals"], rust_target="xtensa-esp32s3-espidf"),
+    "esp32c6": dict(prefix="riscv32-esp-elf", fixed=False, code_base=0, data_base=0,
+                    arch=["-march=rv32imac_zicsr_zifencei", "-mabi=ilp32", "-fPIE", "-mno-relax"],
+                    rust_target="riscv32imac-unknown-none-elf"),
+}
+CFLAGS = ["-std=gnu11", "-Os", "-Wall", "-Wextra", "-Werror", "-ffreestanding", "-fno-builtin", "-nostdlib",
+          "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-unwind-tables", "-ffunction-sections",
+          "-fdata-sections", "-fno-common", "-fno-jump-tables", "-fvisibility=hidden",
+          "-fno-tree-loop-distribute-patterns"]
+
+
+def slots(path=os.path.join(ROOT, "main", "main.c")):
+    """The slot table of main: {name: (tag, offset, size)}. A C main lists {"name", tag, offset, size} in main_slots[];
+    a Rust one lists slot!("name", tag, offset, size) (espmod-host), anywhere in the file."""
+    text = open(path).read()
+    if "main_slots[]" in text:
+        block = text[text.index("main_slots[]"):]
+        block = block[:block.index("};")]
+        pattern = r'\{\s*"(\w+)"\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\}'
+    else:
+        block = text
+        pattern = r'slot!\(\s*"(\w+)"\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)'
+    return {m[0]: (int(m[1], 0), int(m[2], 0), int(m[3], 0)) for m in re.findall(pattern, block)}
+
+
+def run(cmd, **kw):
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kw)
+    if r.returncode:
+        sys.exit(f"{' '.join(cmd[:2])} ... failed:\n{r.stdout}")
+    return r.stdout
+
+
+def section_size(tool, elf, name):
+    for line in run([tool + "size", "-A", elf]).splitlines():
+        parts = line.split()
+        if parts and parts[0] == name:
+            return int(parts[1])
+    return 0
+
+
+def cargo_link(cfg, cargo, window, link_script, tmp):
+    """Return link(data_vma) -> elf for a Rust module: `cargo rustc` of the bin with the module linker script.
+
+    cargo = (manifest, bin, features). Needs the Rust toolchain with the ESP targets on the PATH (rust-src for
+    -Zbuild-std). Xtensa Rust cannot produce PIC: it is linked at the slot's fixed address (like C).
+    """
+    manifest, binname, features = cargo
+    target = cfg["rust_target"]
+    tool = cfg["prefix"] + "-"
+    srcdir = os.path.join(os.path.dirname(os.path.abspath(manifest)), "src")
+    elf = os.path.join(os.path.abspath(tmp), "module.elf")
+
+    def link(data_vma):
+        extra = ["-C", "relocation-model=static", "-C", "llvm-args=--jump-table-density=1000000",
+                 "-C", "llvm-args=--min-jump-table-entries=1000000"] if cfg["fixed"] else ["-C", "relocation-model=pic"]
+        rustflags = ["-C", "opt-level=s", "-C", "lto=fat", "-C", "codegen-units=1", *extra,
+                     "-C", f"link-arg=-Wl,--defsym=MODULE_VMA={window + dmod.HEADER_SIZE}",
+                     "-C", "link-arg=-Wl,-e,espmod_handle", "-C", "link-arg=-Wl,-u,espmod_handle",
+                     "-C", f"link-arg=-T{link_script}", "-C", "link-arg=-nostdlib", "-C", "link-arg=-Wl,--gc-sections"]
+        if cfg["fixed"]:
+            rustflags += ["-C", f"link-arg=-Wl,--defsym=MODULE_DATA_VMA={data_vma}"]
+        # cargo fingerprints linker arguments poorly: make the second pass really relink.
+        os.utime(os.path.join(srcdir, "bin", binname + ".rs"))
+        env = dict(os.environ)
+        if env.get("EM_RUST_ESP_BIN"):   # env.sh: the esp toolchain (nightly with rust-src) shared with the ESP-IDF install
+            env["PATH"] = env["EM_RUST_ESP_BIN"] + os.pathsep + env["PATH"]
+        run(["cargo", "rustc", "--manifest-path", manifest, "--bin", binname, "--features", features,
+             "--target", target, "--release", "-Zbuild-std=core,compiler_builtins",
+             "-Zbuild-std-features=compiler-builtins-mem", "--config", f'target.{target}.linker="{tool}gcc"',
+             "--", *rustflags], env=env)
+        built = os.path.join(os.path.dirname(os.path.abspath(manifest)), "target", target, "release", binname)
+        target_dir = os.environ.get("CARGO_TARGET_DIR")
+        if target_dir:
+            built = os.path.join(target_dir, target, "release", binname)
+        shutil.copy(built, elf)
+        return elf
+
+    return link
+
+
+def build(chip, slot, sources, out, stack=8192, features=0, state=0, defines=(), keep_elf=None, cargo=None, slot_file=None):
+    cfg = CHIPS[chip]
+    tag, offset, slot_size = (slots(slot_file) if slot_file else slots())[slot]
+    tool = cfg["prefix"] + "-"
+    window = (cfg["code_base"] + offset) if cfg["fixed"] else 0          # image start
+    data_window = (cfg["data_base"] + offset) if cfg["fixed"] else 0
+    link_script = os.path.join(ROOT, "modules", "common", "link-fixed.x" if cfg["fixed"] else "link.x")
+    with tempfile.TemporaryDirectory() as tmp:
+        objs = []
+        for src in ([] if cargo else list(sources) + [os.path.join(ROOT, "modules", "common", "espmod_rt.c")]):
+            obj = os.path.join(tmp, os.path.basename(src) + ".o")
+            run([tool + "gcc", *CFLAGS, *cfg["arch"], *[f"-D{d}" for d in defines],
+                 "-I", os.path.join(ROOT, "include"), "-I", os.path.join(ROOT, "modules", "common"),
+                 "-c", src, "-o", obj])
+            objs.append(obj)
+        elf = os.path.join(tmp, "module.elf")
+
+        def link_c(data_vma):
+            args = [tool + "gcc", *cfg["arch"], "-nostdlib", "-static", "-Wl,--gc-sections", "-Wl,--no-relax",
+                    "-Wl,-z,norelro", "-Wl,--build-id=none", "-Wl,-e,espmod_handle", "-Wl,-u,espmod_handle",
+                    f"-Wl,-T,{link_script}", f"-Wl,--defsym=MODULE_VMA={window + dmod.HEADER_SIZE}"]
+            if cfg["fixed"]:
+                args.append(f"-Wl,--defsym=MODULE_DATA_VMA={data_vma}")
+            run(args + objs + ["-o", elf])
+            return elf
+
+        link = cargo_link(cfg, cargo, window, link_script, tmp) if cargo else link_c
+
+        link(data_window + dmod.HEADER_SIZE)
+        if cfg["fixed"]:
+            # The read-only data follows .text in flash, so its data-bus address is known only now.
+            text = section_size(tool, elf, ".text")
+            link(data_window + dmod.HEADER_SIZE + text)
+            if section_size(tool, elf, ".text") != text:
+                sys.exit("the size of .text changed between link passes")
+
+        reloc = run([tool + "readelf", "-r", elf])
+        if "no relocations" not in reloc.lower():
+            sys.exit("module has relocations (it must be position independent or fixed-address):\n" + reloc)
+        undefined = "\n".join(l for l in run([tool + "nm", "-u", elf]).splitlines() if "no symbols" not in l).strip()  # a stripped ELF has none
+        if undefined:
+            sys.exit("module needs symbols it does not define (a module links no libc; use the host table):\n" + undefined)
+        for line in run([tool + "size", "-A", elf]).splitlines():
+            p = line.split()
+            if p and re.match(r"\.(s?data|s?bss|tdata|tbss|init_array|fini_array|ctors|dtors|got|dynamic)(\.|$)", p[0]) and int(p[1]):
+                sys.exit(f"module has {p[0]} ({p[1]} bytes): the image is read-only flash, no .data/.bss; keep state in the state block (--state)")
+        if keep_elf:
+            shutil.copy(elf, keep_elf)
+        raw = os.path.join(tmp, "module.bin")
+        run([tool + "objcopy", "-O", "binary", elf, raw])
+        entry = None
+        for line in run([tool + "readelf", "-h", elf]).splitlines():
+            if "Entry point address" in line:
+                entry = int(line.split()[-1], 16)
+        code = open(raw, "rb").read()
+        image = dmod.pack(code, entry - window, tag, code_vma=window, data_vma=data_window, stack_bytes=stack,
+                          required_features=features, fixed_vma=cfg["fixed"], state_bytes=state)
+    if len(image) > slot_size:
+        sys.exit(f"image is {len(image)} bytes, slot '{slot}' holds {slot_size}")
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    with open(out, "wb") as f:
+        f.write(image)
+    print(f"{out}: {len(image)} bytes, slot {slot} (tag {tag}), entry +0x{entry - window:x}")
+    return image
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    ap.add_argument("--chip", required=True, choices=sorted(CHIPS))
+    ap.add_argument("--slot", help="module slot of main (see --list-slots)")
+    ap.add_argument("--out")
+    ap.add_argument("--stack", type=int, default=8192, help="stack the deepest handler needs, bytes")
+    ap.add_argument("--state", type=int, default=0, help="size of the zeroed state block passed to every call, bytes (<= 4096)")
+    ap.add_argument("--features", default="0", help="ESPMOD_FEAT_* bits the module needs, e.g. SPI,SETTINGS")
+    ap.add_argument("--slots", metavar="FILE",
+                    help="C file with the main_slots[] table of the application (default: main/main.c)")
+    ap.add_argument("--list-slots", action="store_true")
+    ap.add_argument("--elf", help="also keep the linked ELF here (objdump -d)")
+    ap.add_argument("--cargo", metavar="MANIFEST:BIN[:FEATURES]",
+                    help="build a Rust module: the bin BIN of the crate at MANIFEST (e.g. fw/mod_lora/Cargo.toml:mod_lora:flat-image)")
+    ap.add_argument("sources", nargs="*")
+    a = ap.parse_args()
+    if a.list_slots:
+        for name, (tag, off, size) in (slots(a.slots) if a.slots else slots()).items():
+            print(f"{name}: tag {tag} offset 0x{off:x} size 0x{size:x}")
+        return
+    cargo = None
+    if a.cargo:
+        parts = a.cargo.split(":")
+        if len(parts) < 2:
+            ap.error("--cargo wants MANIFEST:BIN[:FEATURES]")
+        cargo = (os.path.abspath(parts[0]), parts[1], parts[2] if len(parts) > 2 else "")
+    if not (a.slot and a.out and (a.sources or cargo)):
+        ap.error("--slot, --out and at least one source (or --cargo) are required")
+    feat = 0
+    for item in a.features.split(","):
+        feat |= dmod.FEATURES[item.upper()] if item.upper() in dmod.FEATURES else int(item, 0)
+    build(a.chip, a.slot, a.sources, a.out, a.stack, feat, a.state, keep_elf=a.elf, cargo=cargo, slot_file=a.slots)
+
+
+if __name__ == "__main__":
+    main()
