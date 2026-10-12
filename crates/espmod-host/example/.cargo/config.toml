@@ -1,0 +1,17 @@
+# Build with the ESP Rust toolchain (the one DMesh's env.sh finds): cargo build --release
+# The chip is the target: riscv32imac-esp-espidf (ESP32-C6), xtensa-esp32-espidf, xtensa-esp32s3-espidf.
+[build]
+target = "riscv32imac-esp-espidf"
+
+[env]
+CARGO_WORKSPACE_DIR = { value = "", relative = true }
+
+[target.xtensa-esp32-espidf]
+linker = "ldproxy"
+[target.xtensa-esp32s3-espidf]
+linker = "ldproxy"
+[target.riscv32imac-esp-espidf]
+linker = "ldproxy"
+
+[unstable]
+build-std = ["std", "panic_abort"]

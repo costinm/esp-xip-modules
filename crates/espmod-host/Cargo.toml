@@ -1,0 +1,19 @@
+[package]
+name = "espmod-host"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rust side of an esp-xip-modules application: run, stop and call the modules of a slot table; the pieces DMesh and the example main share"
+publish = false
+
+# Built by the application that uses it (ESP-IDF, or a PC for the tests); not part of a Cargo workspace.
+[workspace]
+
+[dependencies]
+espmod-abi = { path = "../espmod-abi" }
+
+[features]
+# The console module (modules/mod_console) starter.
+console = []
+# wifi_*, loader_* and installing uploads through esp-wifi-loader's C component and components/espmod_install.
+network = []

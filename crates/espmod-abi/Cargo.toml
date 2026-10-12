@@ -1,0 +1,9 @@
+[package]
+name = "espmod-abi"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rust mirror of the esp-xip-modules host table (generated) and a safe wrapper for module code"
+publish = false
+
+[workspace]
