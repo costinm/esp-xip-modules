@@ -1,0 +1,35 @@
+[package]
+name = "esp-mod-hw"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Hardware-policy module for the esp-xip-modules host: battery level, ADC probe, button"
+publish = false
+
+# Standalone: built by tools/mkmod.py --cargo (scripts/build.sh), not as part of a cargo workspace.
+[workspace]
+
+[dependencies]
+espmod-abi = { path = "../../crates/espmod-abi" }
+
+[package.metadata]
+# Options for tools/mkmod.py (scripts/build.sh).
+mkmod = "--stack 3072 --state 128 --features ADC,SETTINGS"
+
+[features]
+flat-image = []
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "mod_hw"
+required-features = ["flat-image"]
+
+[profile.release]
+codegen-units = 1
+debug = false
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = "symbols"

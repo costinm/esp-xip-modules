@@ -1,0 +1,7 @@
+menu "esp-xip-modules main"
+
+    config ESPMOD_AUTOSTART
+        string "Modules started at boot (space separated names), with an empty request"
+        default ""
+
+endmenu

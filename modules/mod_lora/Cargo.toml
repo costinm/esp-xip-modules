@@ -1,0 +1,35 @@
+[package]
+name = "esp-mod-lora"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "LoRa/FSK radio module (SX127x, SX126x) for the esp-xip-modules host"
+publish = false
+
+# Standalone: built by tools/mkmod.py --cargo (scripts/build.sh), not as part of a cargo workspace.
+[workspace]
+
+[dependencies]
+espmod-abi = { path = "../../crates/espmod-abi" }
+
+[package.metadata]
+# Options for tools/mkmod.py (scripts/build.sh): stack the deepest handler needs, state block, host features used.
+mkmod = "--stack 6144 --state 768 --features SPI,SPI_READY"
+
+[features]
+flat-image = []
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "mod_lora"
+required-features = ["flat-image"]
+
+[profile.release]
+codegen-units = 1
+debug = false
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = "symbols"
