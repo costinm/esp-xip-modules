@@ -52,6 +52,8 @@ Success is 0 or positive, errors are negative.
 | `ERR_NOMEM` | -6 | Out of memory. |
 | `ERR_NOTFOUND` | -7 | No such setting, handle or service. |
 | `ERR_SIZE` | -8 | The buffer is too small (`*len` says how much is needed). |
+| `ERR_LEAK` | -9 | A module ended holding packets (the host gets them back) or memory (`mem_alloc`: not recoverable, the slot needs a reboot to be replaced) it had not given back. The stop is reported as failed. |
+| `ERR_AGAIN` | -10 | A nonblocking socket operation would block; wait for another readiness event. |
 
 # Constants
 
@@ -123,6 +125,27 @@ Flags of `alarm_set`.
 | `CONNECTED` | 2 | Do not fire while `connected()` is 0 (JobScheduler's network constraint). The alarm becomes due when connectivity returns and fires in the next wake window. |
 | `WINDOW` | 4 | Also deliver `HOST_WAKE` whenever a wake window opens (a module that batches its work on windows). |
 
+## `PKT`
+
+Packets: the unit of every message between modules, and between a module and the application. A packet is a fixed
+buffer from the host's pool with room in front of the payload for whoever frames it next (a network header, an envelope)
+and behind it for a tag; a module writes only the payload window. The numbers are the contract of every host, whatever
+its pool (the C pool of this repository, QUIC-lite's pool in a Rust host): see `docs/packets.md`.
+
+| Name | Value | Description |
+|---|---:|---|
+| `HEADROOM` | 144 | Bytes in front of the payload window: 80 for link and relay headers, 13 short header, 3 frame header, 36 tagged-CBOR envelope, rounded up to 16. |
+| `MAX` | 1000 | Largest payload a module can write or send. Larger records are refused with `ERR_SIZE`. |
+| `SLOT_MIN` | 1204 | Smallest pool slot that holds `HEADROOM`, `MAX` and a 60-byte tail (AEAD tag, FCS). |
+
+## `ADDR`
+
+Where a packet is sent. A module is addressed by its component (the slot tag), which is also the `from` of what it sends.
+
+| Name | Value | Description |
+|---|---:|---|
+| `MAIN` | 0 | The application (its packet hook). As `from`: the message came from the application, or the sender cannot be answered. |
+
 ## `FEAT`
 
 Bits of `espmod_host.features`: what the host really implements.
@@ -137,11 +160,33 @@ Bits of `espmod_host.features`: what the host really implements.
 | `RGBLED` | 32 | `rgbled_write`. |
 | `SERVICE` | 64 | `call_service`. |
 | `ALARM_FLEX` | 128 | `ALARM_FLEXIBLE` windows are real (the host has a sleepy mode); otherwise a flexible alarm fires at its delay. |
-| `WIFI` | 256 | `wifi_start` / `wifi_stop` / `wifi_info`. |
+| `WIFI` | 256 | `wifi_start` / `wifi_stop` / `wifi_config` / `wifi_info` / `wifi_scan`. |
 | `LOADER` | 512 | `loader_start` / `loader_stop`. |
 | `SERIAL` | 1024 | `serial_open` / `serial_write` / `serial_close`. |
-| `CALL` | 2048 | `call`. |
 | `MODULES` | 4096 | `modules_info`, `module_start`, `module_stop`, `events_info`, `reset`. |
+| `PACKETS` | 8192 | `pkt_*` and `send`, `call.pkt` / `call.from` / `call.id`. |
+| `MEMORY` | 16384 | `mem_alloc` / `mem_free`. |
+| `SOCKET` | 32768 | Nonblocking TCP sockets and packet writes. |
+| `FLASH` | 65536 | Module-slot flash erase, pool-packet write, and short read; writes also require a signed manifest declaration. |
+
+## `SOCKET_MODE`
+
+| Name | Value | Description |
+|---|---:|---|
+| `DIRECT` | 0 | Readiness callback; the module calls nonblocking `socket_read` or `socket_write`. |
+| `BUFFERED` | 1 | The runtime reads directly into pool packets and queues one packet per callback. |
+
+## `SOCKET_EVENT`
+
+| Name | Value | Description |
+|---|---:|---|
+| `OPEN` | 1 | Accepted socket; `call.id` is its handle, `call.pkt` and `call.len` are zero. |
+| `READABLE` | 2 | Direct mode: `socket_read` may make progress. |
+| `WRITABLE` | 3 | A direct write may progress or a refused packet write may be retried. |
+| `DATA` | 4 | Buffered mode: `call.pkt` holds bytes from one TCP read; TCP message boundaries are not implied. |
+| `EOF` | 5 | Peer closed its write half; distinct from the zero-length OPEN event. |
+| `CLOSED` | 6 | Socket closed or errored; handle no longer valid after callback. |
+| `WRITE_DONE` | 7 | A previously accepted packet has been fully submitted to the socket. |
 
 ## `DMOD`
 
@@ -181,9 +226,13 @@ Pins are GPIO numbers, -1 = unused.
 | `component` | `int32_t` | Chosen by the creator of the event (0 = the host, see `HOST`). |
 | `method` | `int32_t` | Chosen by the creator of the event. |
 | `value` | `int32_t` | IRQ: the pin level. Alarm: how late it fired, in ms (saturated). `HOST_NETWORK`: 1 or 0. Request: 0. |
-| `flags` | `uint32_t` | Bit 0: the call is a request that expects `respond`. |
+| `flags` | `uint32_t` | Bit 0: the call is a request that expects an answer (`respond`, or `send` to `from` with the same `id`). |
 | `data` | `const uint8_t *` | Payload, valid during the call only. |
 | `len` | `size_t` | Length of `data`. |
+| `pkt` | `uint32_t` | The packet `data` lives in, lent for this call (0: none, as for alarms and interrupts). Keep it with `pkt_keep`, pass it on with `send`; otherwise it goes back to the pool when the handler returns. |
+| `from` | `uint32_t` | Who sent it: a component (`ADDR_MAIN` = 0: the application). Answer with `send` to this address. |
+| `reserved` | `uint32_t` | Zero; keeps `id` aligned the same on every target. |
+| `id` | `uint64_t` | The sender's correlation number, returned in the answer. |
 
 ## `dmod_header` — first 64 bytes of a module image
 
@@ -204,7 +253,9 @@ Packed. The code follows directly.
 | `required_features` | `uint32_t` | `FEAT_*` the module cannot run without. |
 | `flags` | `uint32_t` | `DMOD_FLAG_*`. |
 | `state_bytes` | `uint32_t` | Size of the zeroed state block passed to every call (at most 4096). |
-| `reserved` | `uint8_t[20]` | Zero. |
+| `manifest_offset` | `uint32_t` | Offset from the start of the image of the module's manifest (a multiple of 4, after the code); 0: none. |
+| `manifest_size` | `uint32_t` | Its length. |
+| `reserved` | `uint8_t[12]` | Zero. |
 
 # Host calls
 
@@ -226,30 +277,11 @@ The host truncates the line and adds no newline. A module's log is its only way 
 | `data` | `const uint8_t *` | Text. |
 | `len` | `size_t` | Length. |
 
-## 2. `alloc` — scratch memory for this call
-
-TODO: we can also add proper alloc/free - along with borrowing packets from the pool. Modules must free everything before 'stop' and have limits, but it is ok to have memory that survives. 
-TODO: we can document the available stack - not clear if we need a separate short-lived memory.
-
-**Returns:** `void *` — NULL when out of memory.
-
-**Tier:** internal
-
-Bump allocation owned by the host; there is no free: everything is released when the handler returns. Use the
-state block for anything that must survive the call.
-
-### Arguments
-
-| Name | Type | Description |
-|---|---|---|
-| `size` | `size_t` | Bytes. |
-| `align` | `size_t` | Power of two. |
-
-## 3. `now_ms` — monotonic milliseconds since boot
+## 2. `now_ms` — monotonic milliseconds since boot
 
 **Returns:** `uint64_t` — the time.
 
-## 4. `respond` — answer the current request
+## 3. `respond` — answer the current request
 
 TODO: not sure about this. The struct passed to the entrypint can take a return value, but 'data' is wrong - no copy if we can avoid it. Top priority is to port the packet pool from dmesh - so module can send messages. I don't think they need to 'respond', just send (like they do for log).
 
@@ -265,7 +297,7 @@ request), delivered to whoever posted the request. No answer means an empty one.
 | `data` | `const uint8_t *` | The answer (copied). |
 | `len` | `size_t` | Length. |
 
-## 5. `emit` — send an event to the application
+## 4. `emit` — send an event to the application
 
 TODO: rename, like log and response it is a case of message send() - with component, method and data, and should use a borrowed packet from the pool for reduced copy. The modules receive and send messages - to other modules or remote.
 
@@ -282,7 +314,7 @@ The module's output channel besides `respond` and `log`; main receives `(module,
 | `value` | `const uint8_t *` | Payload (copied). |
 | `len` | `size_t` | Length. |
 
-## 6. `call_service` — call a service of the application by tag
+## 5. `call_service` — call a service of the application by tag
 
 TODO: would be great if we can avoid this or discourage it. First because of 'synchronous', also complicates upgrades and other things. If messages can be used - would be great.
 
@@ -303,7 +335,7 @@ answer later through a request to this module.
 | `response_len` | `size_t *` | Answer length. |
 | `timeout_ms` | `uint32_t` | Longest wait. |
 
-## 7. `get_setting` — read a persistent setting of this module
+## 6. `get_setting` — read a persistent setting of this module
 
 **Returns:** `int` — `OK`, `ERR_NOTFOUND` if absent, `ERR_SIZE` if the buffer is small.
 
@@ -319,7 +351,7 @@ Own namespace; the key is up to 15 bytes, the value up to 256.
 | `capacity` | `size_t` | Its size. |
 | `value_len` | `size_t *` | Value length. |
 
-## 8. `set_setting` — write a persistent setting of this module
+## 7. `set_setting` — write a persistent setting of this module
 
 **Returns:** `int` — `OK` or an error.
 
@@ -334,7 +366,7 @@ An empty value erases the setting.
 | `value` | `const uint8_t *` | Value. |
 | `value_len` | `size_t` | Length. |
 
-## 9. `gpio_config` — configure a pin
+## 8. `gpio_config` — configure a pin
 
 **Returns:** `int` — `OK`, `ERR_BUSY` if another module owns it, `ERR_UNSUPPORTED` if main reserved it.
 
@@ -349,7 +381,7 @@ Also sets the initial level of an output. The pin belongs to the module until th
 | `pull` | `int` | `GPIO_PULL_*`. |
 | `level` | `int` | Initial output level. |
 
-## 10. `gpio_read` — read a pin
+## 9. `gpio_read` — read a pin
 
 **Returns:** `int` — level 0/1, or a negative error.
 
@@ -359,7 +391,7 @@ Also sets the initial level of an output. The pin belongs to the module until th
 |---|---|---|
 | `pin` | `int` | A pin configured by this module. |
 
-## 11. `gpio_write` — set an output level
+## 10. `gpio_write` — set an output level
 
 **Returns:** `int` — `OK` or an error.
 
@@ -370,7 +402,7 @@ Also sets the initial level of an output. The pin belongs to the module until th
 | `pin` | `int` | A pin configured by this module. |
 | `level` | `int` | 0 or 1. |
 
-## 13. `irq_unregister` — stop reporting a pin
+## 12. `irq_unregister` — stop reporting a pin
 
 **Returns:** `int` — `OK`, `ERR_NOTFOUND`.
 
@@ -380,7 +412,7 @@ Also sets the initial level of an output. The pin belongs to the module until th
 |---|---|---|
 | `pin` | `int` | The pin. |
 
-## 12. `irq_register` — report the edges of a pin
+## 11. `irq_register` — report the edges of a pin
 
 **Returns:** `int` — `OK` or an error.
 
@@ -396,7 +428,7 @@ module code; edges that arrive while the queue is full are counted and dropped.
 | `component` | `int` | Returned in the call. |
 | `method` | `int` | Returned in the call. |
 
-## 14. `irq_enable` — mask or unmask a registered pin
+## 13. `irq_enable` — mask or unmask a registered pin
 
 **Returns:** `int` — `OK`, `ERR_NOTFOUND`.
 
@@ -407,7 +439,7 @@ module code; edges that arrive while the queue is full are counted and dropped.
 | `pin` | `int` | The pin. |
 | `enabled` | `int` | 1 unmask, 0 mask. |
 
-## 15. `spi_open` — open a full-duplex SPI device
+## 14. `spi_open` — open a full-duplex SPI device
 
 **Returns:** `int` — a handle (>= 0) or a negative error.
 
@@ -420,7 +452,7 @@ pins. A controller that main initialised is shared as is.
 |---|---|---|
 | `config` | `const espmod_spi_config *` | See `spi_config`. |
 
-## 16. `spi_transfer` — one chip-select cycle
+## 15. `spi_transfer` — one chip-select cycle
 
 **Returns:** `int` — `OK`, `ERR_BUSY` when `ready_pin` never became ready, `ERR_IO`.
 
@@ -435,7 +467,7 @@ pins. A controller that main initialised is shared as is.
 | `rx` | `uint8_t *` | Bytes received, or NULL. |
 | `len` | `size_t` | Length. |
 
-## 21. `alarm_set` — call me later, once or periodically
+## 20. `alarm_set` — call me later, once or periodically
 
 **Returns:** `int` — an alarm id (>= 0) or a negative error (`ERR_NOMEM` when the module has 8 alarms).
 
@@ -462,7 +494,7 @@ instance are cancelled when it is destroyed.
 host->alarm_set(host->user, 60000, 30000, 60000, ESPMOD_ALARM_FLEXIBLE, MY_BATTERY, POLL);
 ```
 
-## 22. `alarm_cancel` — cancel an alarm
+## 21. `alarm_cancel` — cancel an alarm
 
 **Returns:** `int` — `OK`, `ERR_NOTFOUND`.
 
@@ -472,13 +504,13 @@ host->alarm_set(host->user, 60000, 30000, 60000, ESPMOD_ALARM_FLEXIBLE, MY_BATTE
 |---|---|---|
 | `alarm` | `int` | An id from `alarm_set`. |
 
-## 23. `connected` — does main have a network path
+## 22. `connected` — does main have a network path
 
 **Returns:** `int` — 1 yes, 0 no.
 
 Cheap. Use `ALARM_CONNECTED` to defer work until it is true.
 
-## 17. `spi_close` — release an SPI device
+## 16. `spi_close` — release an SPI device
 
 **Returns:** `int` — `OK`, `ERR_ARG`.
 
@@ -490,7 +522,7 @@ Also done when the instance is destroyed.
 |---|---|---|
 | `handle` | `int` | From `spi_open`. |
 
-## 18. `i2c_transfer` — write then read on an I2C bus
+## 17. `i2c_transfer` — write then read on an I2C bus
 
 **Returns:** `int` — `OK` or an error.
 
@@ -511,7 +543,7 @@ Either direction may be empty. The pins are held for the call only.
 | `rx_len` | `size_t` | Length. |
 | `timeout_ms` | `uint32_t` | Longest wait. |
 
-## 19. `adc_read` — one-shot 12-bit reading
+## 18. `adc_read` — one-shot 12-bit reading
 
 **Returns:** `int` — `OK` or an error.
 
@@ -528,7 +560,7 @@ Either direction may be empty. The pins are held for the call only.
 | `unit` | `int *` | ADC unit used. |
 | `channel` | `int *` | ADC channel used. |
 
-## 20. `rgbled_write` — set a WS2812-style LED
+## 19. `rgbled_write` — set a WS2812-style LED
 
 **Returns:** `int` — `OK` or an error.
 
@@ -541,13 +573,13 @@ Either direction may be empty. The pins are held for the call only.
 | `green` | `uint8_t` | 0..255. |
 | `blue` | `uint8_t` | 0..255. |
 
-## 24. `wifi_start` — join a Wi-Fi network
+## 23. `wifi_start` — join a Wi-Fi network
 
 **Returns:** `int` — `OK` (joining continues in the background), `ERR_UNSUPPORTED` without Wi-Fi, `ERR_BUSY` if already started.
 
 Joins the named network and keeps rejoining until `wifi_stop`. The call returns at once (joining takes seconds); poll
-`wifi_info`. The caller keeps the name and passphrase in its own settings, never in an image: an empty `ssid` means the flash
-network (`DIRECT-xy-flash`, hosted by the flashing phone); an empty `psk` means that network's public passphrase. Nothing is on
+`wifi_info`. The caller keeps the name and passphrase in its own settings, never in an image: an empty `ssid` means the network set with
+`wifi_config` if a scan sees it, else the flash network (`DIRECT-xy-flash`, hosted by the flashing phone); an empty `psk` means that network's public passphrase. Nothing is on
 the network until a module asks.
 
 ### Arguments
@@ -559,16 +591,16 @@ the network until a module asks.
 | `psk` | `const uint8_t *` | Passphrase, or empty. |
 | `psk_len` | `size_t` | Length (at most 63). |
 
-## 25. `wifi_stop` — leave the network and switch the radio off
+## 24. `wifi_stop` — leave the network and switch the radio off
 
 **Returns:** `int` — `OK`; the radio is released in the background.
 
-## 26. `wifi_info` — state of the Wi-Fi
+## 25. `wifi_info` — state of the Wi-Fi
 
 **Returns:** `int` — the length of the answer, or a negative error (`ERR_SIZE`: the buffer is too small).
 
-One CBOR map: `{1: state, 2: ssid, 3: ip, 4: rssi}`: `state` is 0 off, 1 joining, 2 up; the other fields are present once
-up (`ip` is the IPv4 address as text, `rssi` is signed dBm).
+One CBOR map: `{1: state, 2: ssid, 3: ip, 4: rssi, 5: saved ssid, 6: psk set}`: `state` is 0 off, 1 joining, 2 up; 2 to 4 are present once
+up (`ip` is the IPv4 address as text, `rssi` is signed dBm); 5 and 6 are present when a network is configured (`wifi_config`).
 
 ### Arguments
 
@@ -576,6 +608,24 @@ up (`ip` is the IPv4 address as text, `rssi` is signed dBm).
 |---|---|---|
 | `out` | `uint8_t *` | Buffer. |
 | `capacity` | `size_t` | Its size. |
+
+## 26. `wifi_config` — the network this device uses when it is not told one
+
+**Returns:** `int` — `OK`, `ERR_UNSUPPORTED` without Wi-Fi, `ERR_ARG` for a name over 32 or a passphrase over 63 bytes, `ERR_IO` if it cannot be stored.
+
+Stores the device's own network (SSID and passphrase, in the loader's settings, not in any module's and never in an image). An
+empty `ssid` clears it. It is **optional**: `wifi_start` with an empty `ssid`, and the loader that installs `main` and modules,
+join this network when a scan sees it and use the flash network (`DIRECT-xy-flash`) when it does not or when none is configured, so
+a device installs signed code with no network of the user's. `wifi_info` reports it (keys 5 and 6).
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `ssid` | `const uint8_t *` | Network name, or empty to clear. |
+| `ssid_len` | `size_t` | Length (at most 32). |
+| `psk` | `const uint8_t *` | Passphrase, or empty (open network). |
+| `psk_len` | `size_t` | Length (at most 63). |
 
 ## 27. `loader_start` — accept a signed package called `name`
 
@@ -602,9 +652,9 @@ the call stays. The host closes nothing by itself: stop it with `loader_stop`, o
 **Returns:** `int` — `OK`, `ERR_UNSUPPORTED`, `ERR_BUSY` if another module has the port, `ERR_IO` if there is no port.
 
 The host owns the port: it picks USB-Serial/JTAG or UART0, runs the driver tuned for the board, edits the line (backspace)
-and starts and stops all of it. Each line becomes a request `(component, method)` to this module, `data` the line without
-a newline. Whatever the handler `respond`s is written back to the port as text. The port is released by `serial_close` or
-when the module ends.
+and starts and stops all of it. Each line becomes a packet `(component, method)` to this module (`call.pkt`, `from` = `ADDR_MAIN`, `id` 0), `data` the line without
+a newline. Nothing is answered: the module writes what it has to say with `serial_write`, whenever it has it. The port is
+released by `serial_close` or when the module ends.
 
 ### Arguments
 
@@ -630,27 +680,7 @@ For output that is not the answer to a line.
 
 **Returns:** `int` — `OK`; the driver is released in the background.
 
-## 32. `call` — send a request to another running module and take its answer
-
-**Returns:** `int` — `OK`, `ERR_NOTFOUND` (no running module has that component), `ERR_BUSY` (it is already inside a request), `ERR_SIZE` (the answer did not fit).
-
-The target's handler runs now, inside this call, on the same worker: one handler at a time is still true, they only nest.
-So it is bounded like any handler, and the stack of the worker has to hold both. `component` is the target's slot tag; the
-request and the answer are whatever bytes that module's `API.md` defines (this host moves them and reads neither).
-
-### Arguments
-
-| Name | Type | Description |
-|---|---|---|
-| `component` | `int` | The target module's component (slot tag). |
-| `method` | `int` | Its method. |
-| `data` | `const uint8_t *` | Request. |
-| `len` | `size_t` | Length. |
-| `response` | `uint8_t *` | Buffer for the answer. |
-| `response_capacity` | `size_t` | Its size. |
-| `response_len` | `size_t *` | Answer length. |
-
-## 33. `modules_info` — every module slot
+## 32. `modules_info` — every module slot
 
 **Returns:** `int` — the length of the answer, or a negative error.
 
@@ -664,7 +694,7 @@ version, last result, runs, duration of the last run, stack high-water mark, res
 | `out` | `uint8_t *` | Buffer. |
 | `capacity` | `size_t` | Its size. |
 
-## 34. `module_start` — start the module installed in a slot
+## 33. `module_start` — start the module installed in a slot
 
 **Returns:** `int` — `OK` (the module starts in the background), `ERR_NOTFOUND` for an unknown name, or the loader's error.
 
@@ -679,7 +709,7 @@ version, last result, runs, duration of the last run, stack high-water mark, res
 | `request` | `const uint8_t *` | Start request, may be empty. |
 | `request_len` | `size_t` | Length. |
 
-## 35. `module_stop` — ask a module to end
+## 34. `module_stop` — ask a module to end
 
 **Returns:** `int` — `OK` (it ends in the background; poll `modules_info`), `ERR_NOTFOUND`.
 
@@ -690,7 +720,7 @@ version, last result, runs, duration of the last run, stack high-water mark, res
 | `name` | `const uint8_t *` | Slot name. |
 | `name_len` | `size_t` | Length. |
 
-## 36. `events_info` — the last events modules emitted
+## 35. `events_info` — the last events modules emitted
 
 **Returns:** `int` — the length of the answer.
 
@@ -704,9 +734,374 @@ value as text (a text value as it is, any other as hex). The host keeps the last
 | `out` | `uint8_t *` | Buffer. |
 | `capacity` | `size_t` | Its size. |
 
-## 37. `reset` — restart the device
+## 36. `reset` — restart the device
 
 **Returns:** `int` — `OK`; the restart follows in 300 ms.
+
+## 37. `pkt_alloc` — take an empty packet
+
+**Returns:** `int` — `OK` and the handle in `*pkt`; `ERR_NOMEM` when the pool is down to the network's reserve; `ERR_BUSY` when the module already holds its quota.
+
+The packet is **held** by this module: it counts against a small fixed quota (`CONFIG_ESPMOD_PKT_HELD`, default 4) and is
+returned to the pool when the module sends or frees it, or ends. The handle is an opaque number that is never 0 and
+stops being valid when the packet leaves the module (a stale handle gets `ERR_ARG`, not someone else's packet).
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `pkt` | `uint32_t *` | The new handle. |
+
+## 38. `pkt_buf` — the payload window of a packet
+
+**Returns:** `int` — `OK`; `ERR_ARG` for a handle that is not valid; `ERR_BUSY` when the packet is shared (a received packet that something else still reads cannot be written).
+
+`*ptr` points at the payload window, `*max` is how many bytes may be written (at most `PKT_MAX`). For a packet received
+in a call the window is the received payload.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `pkt` | `uint32_t` | The handle. |
+| `ptr` | `uint8_t **` | The window. |
+| `max` | `size_t *` | Its size. |
+
+## 39. `pkt_keep` — keep the packet of this call after the handler returns
+
+**Returns:** `int` — `OK` (the packet is now held, like one from `pkt_alloc`), `ERR_ARG`, `ERR_BUSY` when the module holds its quota.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `pkt` | `uint32_t` | `call.pkt`. |
+
+## 40. `pkt_free` — give a packet back
+
+**Returns:** `int` — `OK` or `ERR_ARG`.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `pkt` | `uint32_t` | A held packet. |
+
+## 41. `send` — hand a packet to a module or to the application
+
+**Returns:** `int` — `OK`; `ERR_NOTFOUND` (no running module has that component), `ERR_BUSY` (its inbox is full), `ERR_SIZE`, `ERR_ARG`.
+
+The packet moves: **the handle is consumed on success and on failure**, so there is never a doubt who owns it. The first
+`len` bytes of the payload window are the message. The receiver gets a call `(component, method)` with `call.pkt`,
+`call.from` = this module's component and `call.id` = `id`. A non-zero `id` asks for an answer, and the receiver sees
+`flags` bit 0: it answers with a `send` to that `from` with the same `id` (or with `respond`, which the host turns into the
+same message). The answer is an ordinary message, and so is every other one the module sends the asker: any number of them,
+any time, the same `id` or another. Nobody waits for an answer, and a module with nothing to say says nothing.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `pkt` | `uint32_t` | A held packet, or the packet of this call. |
+| `len` | `size_t` | Message length, at most `PKT_MAX`. |
+| `dst` | `uint32_t` | `ADDR_MAIN` or a module's component. |
+| `component` | `int` | Returned in the receiver's call. |
+| `method` | `int` | Returned in the receiver's call. |
+| `id` | `uint64_t` | Correlation number, returned in the call. |
+
+## 42. `pkt_info` — the geometry of this host's packets
+
+**Returns:** `int` — `OK`.
+
+For a host whose slots are larger than `SLOT_MIN`; `*headroom` is at least `PKT_HEADROOM` and `*max` at most what the
+payload window offers.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `headroom` | `uint32_t *` | Bytes in front of the window. |
+| `max` | `uint32_t *` | Largest payload. |
+
+## 43. `mem_alloc` — memory that outlives a call
+
+**Returns:** `void *` — NULL when the module's quota (`CONFIG_ESPMOD_MEM_QUOTA` bytes) or the heap is exhausted.
+
+The heap is managed by balance: the host adds up the bytes a module takes and gives back. A message belongs in a packet
+(`pkt_alloc`); this is for what a module keeps between calls and does not fit in its state block (a reassembly buffer, a
+queue of frames). **A module frees everything it allocated before it stops.** If the balance is not zero when it ends, the
+stop is reported as failed (`ERR_LEAK`, bytes in `espmod_stats_t.mem_leaked`) and the module **cannot be replaced live**:
+the host does not know which blocks are left, so the slot is marked `needs_reboot` and an install into it is refused until the
+device restarts. A leak therefore shows up in the first test rather than as a slow loss of memory in the field. The block is
+aligned for any type.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `size` | `size_t` | Bytes. |
+
+## 44. `mem_free` — give a block back
+
+**Returns:** `int` — `OK`, or `ERR_ARG` for a pointer this module did not allocate or already freed.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `ptr` | `void *` | From `mem_alloc`. |
+
+## 45. `module_manifest` — what an installed module says about itself
+
+**Returns:** `int` — the length of the manifest (0: the module has none), `ERR_NOTFOUND` for an unknown name, `ERR_SIZE` when the buffer is too small.
+
+A module image carries a **manifest** at the offset its header gives (`manifest_offset`, `manifest_size`), read from flash
+without starting the module, so it is available for an installed module that is not running and for one installed after the
+console was built. It is the module's `API.md` as a compact CBOR catalog, written by `tools/mkmod.py`: the module's name and
+component, its methods (id, name, and which request and response field list each uses), the field lists (tag, name, kind
+and, for a record, its type) and the record types. It is the equivalent of an MCP `tools.json` and carries what a text or
+JSON front end needs to turn `NAME.METHOD key=value` into the module's request without any ID compiled into it: the
+component of a module is found by name in `modules_info`, everything below it in the manifest. The module's own code never
+reads it. (Format: `tools/mkmod.py`, `manifest_of_api`.)
+
+Manifest key 7 is an optional array of module slot indices the image may erase or write. The packer sets it with
+`--flash-slots=INDEX[,INDEX...]` and requires `FEAT_FLASH`; this declaration must be covered by the verified signed
+install package. A host must never grant write access based only on `required_features` or an unverified manifest.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `name` | `const uint8_t *` | Slot name. |
+| `name_len` | `size_t` | Length. |
+| `out` | `uint8_t *` | Buffer. |
+| `capacity` | `size_t` | Its size. |
+
+## 46. `wifi_scan` — the networks in range
+
+**Returns:** `int` — the length of the answer, `ERR_BUSY` while the scan is running, `ERR_UNSUPPORTED` without Wi-Fi, `ERR_IO` if the driver refused, `ERR_SIZE` when the buffer is too small.
+
+Never blocks: a scan takes seconds and a handler has a budget of milliseconds. The first call starts the scan and returns `ERR_BUSY`;
+poll with an alarm (about every second) and the call that finds it done returns the answer, once. The radio is switched on for the scan
+and off again when it was off; when a join is up it is scanned from the running station (`ERR_BUSY` also while a join is under way). The
+answer is one CBOR array, strongest first, of maps `{1: ssid, 2: bssid, 3: rssi, 4: channel, 5: auth}`: `ssid` and `bssid` are byte strings (the
+name is not always text), `rssi` is signed dBm, `auth` is 0 open, 1 WEP, 2 WPA, 3 WPA2, 4 WPA/WPA2, 5 enterprise, 6 WPA3 (others: the
+driver's number). A network that is in range but not listed was missed (a scan can); scan again.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `out` | `uint8_t *` | Buffer. |
+| `capacity` | `size_t` | Its size. |
+
+## 47. `heap_info` — free memory of the device
+
+**Returns:** `int` — the length of the answer, `ERR_SIZE` when the buffer is too small.
+
+RAM is the scarce resource on these chips, so the host reports it to any module that asks (the console's `heap`). One CBOR map of
+byte counts: `{1: free, 2: largest block, 3: lowest free since boot, 4: total, 5: free internal RAM, 6: largest internal block}`.
+"Largest block" is the biggest single allocation that would succeed now; a heap can have plenty free and still refuse a
+request (fragmentation). Free memory is **tracked**, not only reported: a build that logs it on a change or at boot has the
+history, and the lowest value (3) shows the worst moment since boot, which is the number to size things by.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `out` | `uint8_t *` | Buffer. |
+| `capacity` | `size_t` | Its size. |
+
+## 48. `nv` — a device setting by name
+
+**Returns:** `int` — reading: the length of the text put in `out`; writing: `OK`. `ERR_NOTFOUND` for a name the device does not have (or
+that is not set), `ERR_ARG` for a bad value, `ERR_IO` if it cannot be stored, `ERR_SIZE` when `out` is too small, `ERR_UNSUPPORTED`
+when the application offers none.
+
+The settings of the *device*, kept in its NVS by the application and the loader, as text: `wifi.rx_static`, `wifi.rx_dynamic`,
+`wifi.tx_dynamic`, `wifi.rx_ba` (the Wi-Fi driver's buffer counts, which are RAM) from the loader, and whatever else the application
+lists (DMesh: `uart.mode`, `quic.pool`, ...). The host knows no names: it passes them on, and the application answers for its own. This is for a
+console or a tool; a module's own settings are `get_setting` / `set_setting`. With `value` NULL it reads; with a value it writes
+(an empty value restores the default). Most settings apply at the next start of the thing they configure, or after a reboot.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `key` | `const uint8_t *` | Setting name. |
+| `key_len` | `size_t` | Its length. |
+| `value` | `const uint8_t *` | New value, or NULL to read. |
+| `value_len` | `size_t` | Its length. |
+| `out` | `uint8_t *` | Buffer for the value that is read. |
+| `capacity` | `size_t` | Its size. |
+
+## 49. `heap_dump` — print where the memory is, to the device log
+
+**Returns:** `int` — `OK`, `ERR_ARG` for an unknown `kind`, `ERR_UNSUPPORTED` when the build lacks what the kind needs.
+
+`heap_info` says how much is free; this says what is there. The output goes to the **device log** (the port's text output, never
+into a reply), because it is long and for a person. `kind`: 0 the heap regions (size, free, largest block, block counts), 1 every block
+of the heap (address, size, free or used: the picture of fragmentation), 2 the tasks (name, priority, stack left; needs FreeRTOS
+trace facility), 3 start recording who allocates (`CONFIG_HEAP_TRACING_STANDALONE`; slows allocation, for a bench), 4 print what is
+still allocated with the call sites (the owners: this is the one that answers "who holds the RAM"), 5 stop recording.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `kind` | `int` | What to print (above). |
+
+## 50. `tcp_accept` — register a nonblocking TCP listener
+
+**Returns:** `int` — `OK`; `ERR_ARG`, `ERR_BUSY`, `ERR_IO`, `ERR_UNSUPPORTED`.
+
+The host owns the listener and accepted sockets. It calls `(component, method)` on the module worker for socket events; `call.value` is `SOCKET_EVENT_*` and `call.id` is the opaque socket handle. The first accepted-socket event is `OPEN` with zero data length. A handle belongs to this instance and is closed when it stops. The listener can be closed with `socket_close`. `SOCKET_MODE_DIRECT` reports readiness only. `SOCKET_MODE_BUFFERED` reads into pool packets and reports `DATA`; the module must release or keep each packet. No callback runs on the poll task.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `port` | `uint16_t` | TCP listen port. |
+| `mode` | `uint32_t` | `SOCKET_MODE_DIRECT` or `SOCKET_MODE_BUFFERED`. |
+| `component` | `int32_t` | Component of socket events. |
+| `method` | `int32_t` | Method of socket events. |
+| `listener` | `uint32_t *` | Receives an opaque listener handle. |
+
+## 51. `socket_read` — nonblocking read into module memory or a packet span
+
+**Returns:** `int` — bytes read, 0 at EOF, `ERR_AGAIN` if no bytes are ready; `ERR_ARG`, `ERR_IO`.
+
+Only for direct-mode accepted sockets. One call may read fewer than `len` bytes. The buffer is borrowed for this call only. A packet span may be passed as `out` while the module owns its mutable lease.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `socket` | `uint32_t` | Accepted socket handle. |
+| `out` | `uint8_t *` | Destination. |
+| `len` | `size_t` | Maximum bytes to read. |
+
+## 52. `socket_write` — nonblocking POSIX-style write
+
+**Returns:** `int` — bytes written, `ERR_AGAIN` if no bytes were written; `ERR_ARG`, `ERR_IO`.
+
+The host does not keep `data` after return. A short write leaves the rest with the caller. The module requests another `WRITABLE` event by returning to the worker; it never waits in the handler.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `socket` | `uint32_t` | Accepted socket handle. |
+| `data` | `const uint8_t *` | Bytes to write. |
+| `len` | `size_t` | Byte count. |
+
+## 53. `socket_close` — close a listener or accepted socket
+
+**Returns:** `int` — `OK`, `ERR_ARG`.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `socket` | `uint32_t` | Handle to close. |
+
+## 54. `socket_peer` — peer address metadata
+
+**Returns:** `int` — `OK`, `ERR_ARG`, `ERR_IO`.
+
+The output is an IPv6 address (IPv4 is represented as IPv4-mapped IPv6), port in host byte order, and IPv6 scope. The socket handle is not a raw lwIP descriptor.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `socket` | `uint32_t` | Accepted socket handle. |
+| `address` | `uint8_t *` | Exactly 16 writable bytes. |
+| `port` | `uint16_t *` | Peer port. |
+| `scope` | `uint32_t *` | IPv6 interface scope. |
+
+## 55. `pkt_span` — full mutable pool slot for framing
+
+**Returns:** `int` — `OK`, `ERR_ARG`, `ERR_BUSY` when shared.
+
+Returns the full slot and capacity while the packet is uniquely owned. The caller chooses a valid prefix, payload and suffix range; `socket_write_pkt` validates the selected range. Pointers do not survive packet release or transfer.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `pkt` | `uint32_t` | Held packet. |
+| `base` | `uint8_t **` | Receives the slot base pointer. |
+| `capacity` | `size_t *` | Receives its byte capacity. |
+
+## 56. `socket_write_pkt` — transfer a pool packet for runtime-buffered output
+
+**Returns:** `int` — `OK`, `ERR_BUSY`, `ERR_ARG`, `ERR_SIZE`, `ERR_IO`.
+
+On `OK` the runtime owns the packet until the whole selected range has been submitted, then emits `WRITE_DONE`. On every error the caller retains the exact packet. TCP may write part of it; the runtime retains the remaining range. The runtime admits at most one pending packet per socket. This differs from `send`, which consumes on failure.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `socket` | `uint32_t` | Accepted socket handle. |
+| `pkt` | `uint32_t` | Held packet. |
+| `start` | `uint32_t` | First byte within the slot. |
+| `len` | `uint32_t` | Bytes to submit. |
+
+## 57. `flash_erase` — enqueue a module-slot erase
+
+**Returns:** `int` — `OK` when queued; `ERR_BUSY`, `ERR_ARG`, `ERR_IO`, `ERR_UNSUPPORTED`.
+
+`slot` is an index in the host's module slot table, and `offset` is relative to that slot. The host resolves it through the configured data partition; physical addresses are never supplied by a module. Unknown slots, zero length, overflow, a range beyond the slot or data partition, and non-4096-byte-aligned erase ranges return `ERR_ARG`. Main, Stage2, the loader, NVS, and bytes outside a configured module slot are inaccessible. The signed image manifest must list the target slot in key 7 (`flash_slots`); `FEAT_FLASH` only announces host availability. A missing or untrusted declaration returns `ERR_ARG`. The host rejects an erase of a mapped/running XIP target with `ERR_BUSY`; the target must be stopped and unmapped first.
+
+Erase runs on a flash worker, never on the module or poll worker. At most one flash job per caller and one device-wide flash job may be pending. On completion, a still-running caller receives `(component, method)` with `call.id = id`, `call.value = OK` or a negative error, and no payload. A caller stop cancels a queued job. If the worker has started it, stop waits for that job to finish before destroying the instance or reusing its slot; no callback is delivered after stop. The host rechecks the target's XIP mapping immediately before erase. A stopped caller cannot submit another job.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `slot` | `uint32_t` | Target index in the configured module slot table. |
+| `offset` | `uint32_t` | Byte offset within that slot. |
+| `len` | `uint32_t` | Erase byte count. |
+| `component` | `int32_t` | Completion component. |
+| `method` | `int32_t` | Completion method. |
+| `id` | `uint64_t` | Caller correlation number. |
+
+## 58. `flash_write` — transfer a pool packet for a module-slot write
+
+**Returns:** `int` — `OK` when queued; `ERR_BUSY`, `ERR_ARG`, `ERR_SIZE`, `ERR_IO`, `ERR_UNSUPPORTED`.
+
+The same slot range and signed-manifest checks as `flash_erase` apply. `start + len` must fit the uniquely held pool slot and `len` must be nonzero; invalid ranges return `ERR_ARG`. The host writes directly from the packet's selected span. On `OK` it takes ownership of the exact packet until the write completes or is canceled, then releases it; it allocates no separate 4096-byte job buffer. On any error the caller retains ownership. The pool slot capacity is the maximum job payload, so larger upload blocks are split by the module. Completion and stop follow `flash_erase`; no callback is delivered after the caller stops. The host rejects writes to a mapped/running target with `ERR_BUSY`, including a caller's own XIP slot.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `slot` | `uint32_t` | Target index in the configured module slot table. |
+| `offset` | `uint32_t` | Byte offset within that slot. |
+| `pkt` | `uint32_t` | Uniquely held pool packet; transferred only on `OK`. |
+| `start` | `uint32_t` | First byte within the pool slot. |
+| `len` | `uint32_t` | Byte count, at most the pool slot capacity. |
+| `component` | `int32_t` | Completion component. |
+| `method` | `int32_t` | Completion method. |
+| `id` | `uint64_t` | Caller correlation number. |
+
+## 59. `flash_read` — read a module slot into module memory
+
+**Returns:** `int` — bytes read; `ERR_ARG`, `ERR_IO`, `ERR_SIZE`, `ERR_UNSUPPORTED`.
+
+A short read is synchronous and limited to 4096 bytes. `slot`, `offset` and `len` must designate an existing configured module slot and fit both that slot and the data partition; invalid ranges return `ERR_ARG`. This call cannot read Main, Stage2, the loader, NVS, or the state log outside module slots. A module should split larger reads over callbacks. Reads do not require the manifest's write permission.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `slot` | `uint32_t` | Source index in the configured module slot table. |
+| `offset` | `uint32_t` | Byte offset within that slot. |
+| `out` | `uint8_t *` | Destination. |
+| `len` | `size_t` | At most 4096 bytes. |
+
 
 # Helpers
 

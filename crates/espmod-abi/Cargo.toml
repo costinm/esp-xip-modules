@@ -6,4 +6,9 @@ license = "Apache-2.0"
 description = "Rust mirror of the esp-xip-modules host table (generated) and a safe wrapper for module code"
 publish = false
 
+[features]
+# `alloc` for modules over the host heap (src/heap.rs): an explicit Allocator value (nightly), and/or the global allocator.
+allocator-api = []
+global-alloc = []
+
 [workspace]

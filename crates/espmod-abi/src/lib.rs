@@ -4,13 +4,17 @@
 //! `generated` mirrors `include/espmod.h` (written by `tools/gen_abi.py`, never edited by hand).
 //! [`Hw`] is the safe, small wrapper a module uses: it keeps the raw table pointer, checks the table `size`
 //! before each call (an older host has fewer slots) and returns [`ERR_UNSUPPORTED`] for a call the host
-//! does not have. Nothing here allocates; the crate is `no_std`.
+//! does not have. Nothing here allocates unless a module asks for `alloc` (features `allocator-api`, `global-alloc`: [`heap`]);
+//! the crate is `no_std`.
 #![no_std]
+#![cfg_attr(feature = "allocator-api", feature(allocator_api))]
+#![cfg_attr(target_arch = "xtensa", feature(asm_experimental_arch))]
 
 #[cfg(test)]
 extern crate std;
 
 pub mod cbor;
+pub mod heap;
 mod generated;
 pub use generated::*;
 
@@ -70,6 +74,106 @@ impl Hw {
     /// Send an event to the application.
     pub fn emit(&self, event_id: u16, value_type: u32, value: &[u8]) -> i32 {
         call!(self, EMIT, emit(event_id, value_type as u8, value.as_ptr(), value.len()))
+    }
+
+    /// `(headroom, max payload)` of this host's packets.
+    pub fn pkt_info(&self) -> Result<(u32, u32), i32> {
+        let (mut headroom, mut max) = (0u32, 0u32);
+        let rc = call!(self, PKT_INFO, pkt_info(&mut headroom, &mut max));
+        if rc == 0 { Ok((headroom, max)) } else { Err(rc) }
+    }
+
+    /// Memory that outlives a call, recorded by the host: free it before the module stops (`ERR_LEAK` otherwise). Null when
+    /// the quota is used.
+    pub fn mem_alloc(&self, size: usize) -> *mut u8 {
+        let h = self.table();
+        if (h.size as usize) < slot::MEM_ALLOC + 4 { return core::ptr::null_mut(); }
+        match h.mem_alloc { Some(f) => unsafe { f(h.user, size) }, None => core::ptr::null_mut() }
+    }
+
+    pub fn mem_free(&self, ptr: *mut u8) -> i32 {
+        call!(self, MEM_FREE, mem_free(ptr))
+    }
+
+    /// A new empty packet held by this module (`ERR_BUSY` at its quota, `ERR_NOMEM` when the pool is low).
+    pub fn pkt_alloc(&self) -> Result<u32, i32> {
+        let mut pkt = 0u32;
+        let rc = call!(self, PKT_ALLOC, pkt_alloc(&mut pkt));
+        if rc == 0 { Ok(pkt) } else { Err(rc) }
+    }
+
+    /// The payload window of a packet: a pointer and how many bytes may be written (`ERR_BUSY` when it is shared). Valid
+    /// until the packet is sent or freed.
+    pub fn pkt_buf(&self, pkt: u32) -> Result<(*mut u8, usize), i32> {
+        let (mut ptr, mut max) = (core::ptr::null_mut(), 0usize);
+        let rc = call!(self, PKT_BUF, pkt_buf(pkt, &mut ptr, &mut max));
+        if rc == 0 { Ok((ptr, max)) } else { Err(rc) }
+    }
+
+    /// Full uniquely owned slot for in-place prefix/suffix framing. Valid until release or transfer.
+    pub fn pkt_span(&self, pkt: u32) -> Result<(*mut u8, usize), i32> {
+        let (mut base, mut cap) = (core::ptr::null_mut(), 0usize);
+        let rc = call!(self, PKT_SPAN, pkt_span(pkt, &mut base, &mut cap));
+        if rc == 0 { Ok((base, cap)) } else { Err(rc) }
+    }
+
+    pub fn tcp_accept(&self, port: u16, mode: u32, component: i32, method: i32) -> Result<u32, i32> {
+        let mut listener = 0;
+        let rc = call!(self, TCP_ACCEPT, tcp_accept(port, mode, component, method, &mut listener));
+        if rc == 0 { Ok(listener) } else { Err(rc) }
+    }
+
+    /// POSIX-like nonblocking read: positive count, zero EOF, negative error including ERR_AGAIN.
+    pub fn socket_read(&self, socket: u32, out: &mut [u8]) -> i32 {
+        call!(self, SOCKET_READ, socket_read(socket, out.as_mut_ptr(), out.len()))
+    }
+
+    /// POSIX-like nonblocking write. The host does not retain the slice after return.
+    pub fn socket_write(&self, socket: u32, data: &[u8]) -> i32 {
+        call!(self, SOCKET_WRITE, socket_write(socket, data.as_ptr(), data.len()))
+    }
+
+    pub fn socket_close(&self, socket: u32) -> i32 {
+        call!(self, SOCKET_CLOSE, socket_close(socket))
+    }
+
+    pub fn socket_peer(&self, socket: u32) -> Result<([u8; 16], u16, u32), i32> {
+        let (mut address, mut port, mut scope) = ([0; 16], 0, 0);
+        let rc = call!(self, SOCKET_PEER, socket_peer(socket, address.as_mut_ptr(), &mut port, &mut scope));
+        if rc == 0 { Ok((address, port, scope)) } else { Err(rc) }
+    }
+
+    /// Transfer a held packet only when the runtime accepts the write. On error the packet remains held.
+    pub fn socket_write_pkt(&self, socket: u32, pkt: u32, start: u32, len: u32) -> i32 {
+        call!(self, SOCKET_WRITE_PKT, socket_write_pkt(socket, pkt, start, len))
+    }
+
+    pub fn flash_erase(&self, slot: u32, offset: u32, len: u32, component: i32, method: i32, id: u64) -> i32 {
+        call!(self, FLASH_ERASE, flash_erase(slot, offset, len, component, method, id))
+    }
+
+    /// Transfer a uniquely held pool packet only when the job is accepted.
+    pub fn flash_write(&self, slot: u32, offset: u32, pkt: u32, start: u32, len: u32, component: i32, method: i32, id: u64) -> i32 {
+        call!(self, FLASH_WRITE, flash_write(slot, offset, pkt, start, len, component, method, id))
+    }
+
+    pub fn flash_read(&self, slot: u32, offset: u32, out: &mut [u8]) -> i32 {
+        call!(self, FLASH_READ, flash_read(slot, offset, out.as_mut_ptr(), out.len()))
+    }
+
+    /// Keep the packet of this call beyond the call.
+    pub fn pkt_keep(&self, pkt: u32) -> i32 {
+        call!(self, PKT_KEEP, pkt_keep(pkt))
+    }
+
+    pub fn pkt_free(&self, pkt: u32) -> i32 {
+        call!(self, PKT_FREE, pkt_free(pkt))
+    }
+
+    /// Hand a packet over: the first `len` payload bytes go to `dst` (`ADDR_MAIN` or a module's component) as a call
+    /// `(component, method)` with `id`. The handle is consumed whether it works or not.
+    pub fn send(&self, pkt: u32, len: usize, dst: u32, component: i32, method: i32, id: u64) -> i32 {
+        call!(self, SEND, send(pkt, len, dst, component, method, id))
     }
 
     /// Call me later: at `delay_ms` the host calls the handler with `(component, method)` and `value` = lateness in
@@ -173,18 +277,27 @@ pub struct CallView<'a> {
     pub value: i32,
     pub flags: u32,
     pub data: &'a [u8],
+    /// The packet `data` lives in (0: none), lent for this call: `Hw::pkt_keep` it or `Hw::send` it on.
+    pub pkt: u32,
+    /// Who sent it (`ADDR_MAIN` = 0: the application): answer with `Hw::send` to this address.
+    pub from: u32,
+    /// The sender's correlation number, returned in the answer.
+    pub id: u64,
 }
 
 impl<'a> CallView<'a> {
     /// # Safety
     /// `call` must be the pointer the host passed to the handler.
     pub unsafe fn new(call: *const Call) -> Option<CallView<'a>> {
-        if call.is_null() || ((*call).size as usize) < core::mem::size_of::<Call>() {
+        // an older host passes a shorter call (no packet fields): read only what its size covers
+        if call.is_null() || ((*call).size as usize) < core::mem::offset_of!(Call, pkt) {
             return None;
         }
         let c = &*call;
+        let has_packet = (c.size as usize) >= core::mem::size_of::<Call>();
         let data = if c.len == 0 || c.data.is_null() { &[][..] } else { core::slice::from_raw_parts(c.data, c.len) };
-        Some(CallView { component: c.component, method: c.method, value: c.value, flags: c.flags, data })
+        let (pkt, from, id) = if has_packet { (c.pkt, c.from, c.id) } else { (0, 0, 0) };
+        Some(CallView { component: c.component, method: c.method, value: c.value, flags: c.flags, data, pkt, from, id })
     }
 
     /// The call is a request that expects [`Hw::respond`].
@@ -217,7 +330,10 @@ macro_rules! export_module {
             let Some(hw) = $crate::Hw::new(host) else { return $crate::ERR_ARG };
             let Some(view) = $crate::CallView::new(call) else { return $crate::ERR_ARG };
             let module = &mut *(state as *mut $ty);
-            <$ty as $crate::Module>::handle(module, &hw, &view)
+            let saved = $crate::heap::enter(host);
+            let rc = <$ty as $crate::Module>::handle(module, &hw, &view);
+            $crate::heap::leave(saved);
+            rc
         }
     };
 }
