@@ -50,14 +50,12 @@ em_loader_t em;
 #define EM_WINDOW_MAX 0xffffffffu
 #endif
 
-#define HOST_FEATURES (ESPMOD_FEAT_SETTINGS | ESPMOD_FEAT_SPI | ESPMOD_FEAT_SPI_READY | ESPMOD_FEAT_I2C | \
-                       ESPMOD_FEAT_ADC | ESPMOD_FEAT_RGBLED | ESPMOD_FEAT_SERVICE)
 
 espmod_slot_rules_t em_rules(int slot)
 {
     const espmod_slot_t *s = &em.cfg.slots[slot];
     return (espmod_slot_rules_t){.tag = s->tag, .slot_offset = s->offset, .slot_size = s->size,
-                                 .host_features = HOST_FEATURES, .max_stack_bytes = CONFIG_ESPMOD_WORKER_STACK,
+                                 .host_features = espmod_host_features(), .max_stack_bytes = CONFIG_ESPMOD_WORKER_STACK,
                                  .fixed_vma = EM_FIXED, .code_base = EM_CODE_BASE, .data_base = EM_DATA_BASE};
 }
 
@@ -182,7 +180,7 @@ static void instance_done(void *ctx, int result, const espmod_stats_t *stats)
     st->st.last_result = result;
     st->st.last_runtime_ms = (uint32_t)((esp_timer_get_time() - st->started_us) / 1000);
     st->st.runs++;
-    (void)stats;
+    if (stats && stats->mem_leaked) st->st.needs_reboot = true;     /* its memory is lost until the device restarts */
     ESP_LOGI(TAG, "%s ended with %d after %u ms", em.cfg.slots[slot].name, result, (unsigned)st->st.last_runtime_ms);
     st->st.running = false;   /* last: espmod_loader_stop() may erase the slot once this is clear */
 }
@@ -357,6 +355,45 @@ int espmod_loader_stop_named(const uint8_t *name, size_t n)
     return slot < 0 ? ESPMOD_ERR_NOTFOUND : espmod_loader_stop(slot, 0);
 }
 
+int espmod_loader_manifest(int slot, uint8_t *out, size_t capacity)
+{
+    if (!espmod_loader_slot(slot)) return ESPMOD_LOADER_ERR_SLOT;
+    espmod_dmod_header h;
+    if (em_read_header(slot, &h) != ESP_OK || h.magic != ESPMOD_DMOD_MAGIC) return ESPMOD_LOADER_ERR_IMAGE;
+    espmod_slot_rules_t rules = em_rules(slot);
+    if (espmod_dmod_check(&h, &rules) != EMD_OK) return ESPMOD_LOADER_ERR_IMAGE;     /* the offsets are only trusted after the check */
+    if (!h.manifest_size) return 0;
+    if (h.manifest_size > capacity) return ESPMOD_ERR_SIZE;
+    if (esp_partition_read(em.part, em.cfg.slots[slot].offset + h.manifest_offset, out, h.manifest_size) != ESP_OK) return ESPMOD_ERR_IO;
+    return (int)h.manifest_size;
+}
+
+int espmod_loader_autostart(void)
+{
+    enum { MAX_MANIFEST = 1024 };
+    uint8_t *m = malloc(MAX_MANIFEST);
+    int started = 0;
+    if (!m) return 0;
+    for (size_t i = 0; i < espmod_loader_slot_count(); i++) {
+        int n = espmod_loader_manifest((int)i, m, MAX_MANIFEST);
+        const uint8_t *request;
+        size_t rn;
+        ESP_LOGD(TAG, "autostart: slot %d manifest %d", (int)i, n);
+        if (n <= 0 || em_cbor_get_str(m, (size_t)n, 6, EM_CBOR_TEXT, &request, &rn) != 0) continue;
+        int rc = espmod_loader_start((int)i, request, rn);
+        ESP_LOGW(TAG, "autostart %s: %d", em.cfg.slots[i].name, rc);
+        if (rc == 0) started++;
+    }
+    free(m);
+    return started;
+}
+
+int espmod_loader_manifest_named(const uint8_t *name, size_t n, uint8_t *out, size_t capacity)
+{
+    int slot = find_named(name, n);
+    return slot < 0 ? ESPMOD_ERR_NOTFOUND : espmod_loader_manifest(slot, out, capacity);
+}
+
 /* CBOR: an array with a map per slot ({1: name, 2: tag, 3: installed, 4: running, 5: version, 6: last result, 7: runs,
  * 8: ms of the last run, 9: stack high-water mark, 10: result of the last image check}; `slot` of mod_console/API.md) */
 int espmod_loader_modules_info(uint8_t *out, size_t cap)
@@ -369,7 +406,7 @@ int espmod_loader_modules_info(uint8_t *out, size_t cap)
         const espmod_slot_t *slot = espmod_loader_slot((int)i);
         espmod_slot_status_t st;
         espmod_loader_status((int)i, &st);
-        em_cbor_map(&w, 10);
+        em_cbor_map(&w, 11);
         em_cbor_uint(&w, 1); em_cbor_text(&w, slot->name, strlen(slot->name));
         em_cbor_uint(&w, 2); em_cbor_uint(&w, slot->tag);
         em_cbor_uint(&w, 3); em_cbor_bool(&w, st.installed);
@@ -380,6 +417,7 @@ int espmod_loader_modules_info(uint8_t *out, size_t cap)
         em_cbor_uint(&w, 8); em_cbor_uint(&w, st.last_runtime_ms);
         em_cbor_uint(&w, 9); em_cbor_uint(&w, st.stack_high_water_bytes);
         em_cbor_uint(&w, 10); em_cbor_int(&w, st.last_check);
+        em_cbor_uint(&w, 11); em_cbor_bool(&w, st.needs_reboot);
     }
     return em_cbor_done(&w);
 }

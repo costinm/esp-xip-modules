@@ -12,12 +12,16 @@
 #include <stdbool.h>
 #include "esp_err.h"
 #include "espmod.h"
+#include "espmod_pool.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* Where a module's output goes. All hooks may be NULL (events dropped, services not found). */
+/* One access point of a scan (the layout of esp_wifi_loader_ap_t). `auth` is the driver's authentication mode number. */
+typedef struct { uint8_t ssid[32]; uint8_t ssid_len; uint8_t bssid[6]; int8_t rssi; uint8_t channel; uint8_t auth; } espmod_ap_t;
+
 typedef struct {
     /* emit(): called on the worker task. */
     int (*emit)(void *ctx, const char *module, uint16_t event_id, uint8_t value_type,
@@ -35,11 +39,32 @@ typedef struct {
     int (*wifi_start)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
     void (*wifi_stop)(void);
     int (*wifi_status)(int *state, char ssid[33], char ip[16], int *rssi);
+    /* Scan for networks (blocking, a few seconds): fills up to `max` entries, strongest first, returns the count or a negative
+     * code (-5 busy, -6 no memory, -7 the driver refused). The host turns it into the CBOR array of wifi_scan. */
+    int (*wifi_scan)(espmod_ap_t *aps, size_t max);
+    /* The device's own (optional) network, kept by esp-wifi-loader in NVS: set (empty ssid clears) and read back (1: configured). */
+    int (*wifi_config)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
+    int (*wifi_saved)(char ssid[33], int *has_psk);
+    /* A named device setting (abi/API.md, nv): value NULL reads into out and returns the length; -1 bad argument, -3 storage,
+     * -4 unknown or unset, -5 buffer too small. The application answers for its own names; esp-wifi-loader's is esp_wifi_loader_nv. */
+    int (*nv)(const char *key, size_t key_len, const uint8_t *value, size_t value_len, uint8_t *out, size_t cap);
+    /* The application's own packet pool (DMesh: the QUIC pool), used for every packet a module takes or is sent, instead of one of
+     * this host's. NULL: the host's dynamic pool (CONFIG_ESPMOD_PKT_*). Must outlive the host; slots at least ESPMOD_PKT_SLOT_MIN. */
+    const espmod_pool_ops *pool;
     int (*loader_start)(const uint8_t *name, size_t name_len);
     void (*loader_stop)(void);
     int (*modules_info)(uint8_t *out, size_t capacity);
     int (*module_start)(const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len);
     int (*module_stop)(const uint8_t *name, size_t name_len);
+    int (*module_manifest)(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
+    /* A module sent a packet to ADDR_MAIN (abi/API.md, send): `from` is its component, `data` the message. The packet is
+     * lent for the call and goes back to the pool when the hook returns: copy what must stay. */
+    int (*packet)(void *ctx, const char *module, uint32_t from, int component, int method, uint64_t id, const uint8_t *data, size_t len);
+    void *packet_ctx;
+    /* Backpressure: a module's inbox was full and has room again (called on the worker, after the module released the packet
+     * it was handling). The application that feeds the module (a stream: espmod_instance_send answered ESPMOD_ERR_BUSY) opens
+     * its window or retries. The queue is on the runtime side; the module takes one packet at a time. */
+    void (*inbox_ready)(void *ctx, int component);
     /* Bit n set: GPIO n is the application's (console UART, its own buses, ...). A module that asks for it gets
      * ESPMOD_ERR_UNSUPPORTED. The flash pins of the classic ESP32 (6-11) are always reserved. */
     uint64_t reserved_pins;
@@ -55,11 +80,26 @@ typedef struct {
     int (*wifi_start)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
     void (*wifi_stop)(void);
     int (*wifi_status)(int *state, char ssid[33], char ip[16], int *rssi);
+    /* Scan for networks (blocking, a few seconds): fills up to `max` entries, strongest first, returns the count or a negative
+     * code (-5 busy, -6 no memory, -7 the driver refused). The host turns it into the CBOR array of wifi_scan. */
+    int (*wifi_scan)(espmod_ap_t *aps, size_t max);
+    /* The device's own (optional) network, kept by esp-wifi-loader in NVS: set (empty ssid clears) and read back (1: configured). */
+    int (*wifi_config)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
+    int (*wifi_saved)(char ssid[33], int *has_psk);
+    /* A named device setting (abi/API.md, nv): value NULL reads into out and returns the length; -1 bad argument, -3 storage,
+     * -4 unknown or unset, -5 buffer too small. The application answers for its own names; esp-wifi-loader's is esp_wifi_loader_nv. */
+    int (*nv)(const char *key, size_t key_len, const uint8_t *value, size_t value_len, uint8_t *out, size_t cap);
+    /* The application's own packet pool (DMesh: the QUIC pool), used for every packet a module takes or is sent, instead of one of
+     * this host's. NULL: the host's dynamic pool (CONFIG_ESPMOD_PKT_*). Must outlive the host; slots at least ESPMOD_PKT_SLOT_MIN. */
+    const espmod_pool_ops *pool;
     int (*loader_start)(const uint8_t *name, size_t name_len);
     void (*loader_stop)(void);
     int (*modules_info)(uint8_t *out, size_t capacity);
     int (*module_start)(const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len);
     int (*module_stop)(const uint8_t *name, size_t name_len);
+    int (*module_manifest)(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
+    int (*packet)(void *ctx, const char *module, uint32_t from, int component, int method, uint64_t id, const uint8_t *data, size_t len);
+    void (*inbox_ready)(void *ctx, int component);
 } espmod_host_ext_t;
 esp_err_t espmod_host_init_simple(espmod_host_emit_fn emit, const espmod_host_ext_t *ext);
 
@@ -75,6 +115,7 @@ typedef struct espmod_instance espmod_instance_t;
 
 typedef struct {
     uint32_t spi_transfers, spi_errors, irq_events, irq_dropped, emitted, logged;
+    uint32_t pkt_sent, pkt_received, pkt_dropped, pkt_leaked, mem_leaked;  /* mem_leaked: bytes still taken when it ended */   /* packets: sent by the module; delivered to it; refused or lost; still held when it ended */
     uint32_t calls, alarms_fired, overruns;   /* handler calls; alarms delivered; calls over CONFIG_ESPMOD_HANDLER_MS */
     uint32_t max_handler_us;
 } espmod_stats_t;
@@ -104,6 +145,9 @@ int espmod_instance_stop(espmod_instance_t *inst);
  * not been handled, ESPMOD_ERR_SIZE when larger than CONFIG_ESPMOD_REQUEST_MAX. Any task. */
 int espmod_instance_post(espmod_instance_t *inst, int component, int method, const uint8_t *data, size_t len);
 /* Same, and wait for the module's respond() (at most CONFIG_ESPMOD_RESPONSE_MAX bytes; none = length 0). */
+/* Send the module a message the way a module would: copied into a pool packet and delivered as a call with call.pkt,
+ * call.from = ADDR_MAIN. ESPMOD_ERR_BUSY when its inbox is full or the pool is out of packets. Any task. */
+int espmod_instance_send(espmod_instance_t *inst, int component, int method, uint64_t id, const uint8_t *data, size_t len);
 int espmod_instance_request(espmod_instance_t *inst, int component, int method, const uint8_t *data, size_t len,
                             uint8_t *response, size_t capacity, size_t *response_len, uint32_t timeout_ms);
 
@@ -118,6 +162,20 @@ int espmod_serial_start(espmod_serial_line_fn on_line, void *ctx);
 void espmod_serial_stop(void);
 /* Write text; returns the bytes taken, or a negative ESPMOD_ERR_*. */
 int espmod_serial_write(const void *data, size_t len);
+/* For whoever owns light sleep (the sleepy runtime): a computer is attached on USB-Serial/JTAG (which also charges the device,
+ * so a sleep policy can stay awake), and the receive interrupt/wakeup to re-arm after a light-sleep return (ESP-IDF can
+ * leave it disabled after a GPIO wake). The reader itself wakes every 250 ms on USB and sleeps on the event queue on UART0. */
+bool espmod_serial_usb_active(void);
+
+/* The ESPMOD_FEAT_* bits a module sees in the host table (what the hooks installed at init make real). The loader checks an
+ * image's required features against this, so a module that needs SERIAL or PACKETS is refused at install, not at start. */
+uint32_t espmod_host_features(void);
+
+/* Send ESP-IDF log lines to the ROM console. For an application that has no C library stdout: Rust std on ESP-IDF 6.0 with its
+ * own `app_main` (crates/espmod-host/example) never registers the console, so every ESP_LOG line is lost. Cheap, no allocation;
+ * the one place text is formatted outside mod_console, because a log line is the only way those components report. */
+void espmod_log_to_rom(void);
+void espmod_serial_rearm(void);
 
 /* High-water mark of the worker task's stack, bytes. */
 uint32_t espmod_host_stack_high_water(void);

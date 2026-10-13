@@ -54,15 +54,25 @@ typedef struct {
     uint32_t last_runtime_ms;
     uint32_t stack_high_water_bytes;
     int last_check;          /* espmod_dmod_result_t of the last start attempt */
+    bool needs_reboot;       /* the module stopped with memory it had not freed: the slot cannot be replaced until a restart */
 } espmod_slot_status_t;
 
 /* Once, after espmod_host_init(), NVS and the event loop (an upload needs the network). */
 esp_err_t espmod_loader_init(const espmod_loader_config_t *config);
 
+/* Start every installed module whose manifest asks for it (manifest key 6: its start request; `mkmod.py --autostart`). What
+ * runs at boot is therefore decided by what is installed, not by the build. Returns how many were started. */
+int espmod_loader_autostart(void);
+
+/* The manifest of the module in `slot`, read from flash (the module need not run): its length, 0 if it has none, or
+ * ESPMOD_ERR_SIZE / ESPMOD_LOADER_ERR_*. */
+int espmod_loader_manifest(int slot, uint8_t *out, size_t capacity);
+
 /* The module calls of the ABI (modules_info, module_start, module_stop), for espmod_host_hooks_t. The stop only queues. */
 int espmod_loader_modules_info(uint8_t *out, size_t capacity);
 int espmod_loader_start_named(const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len);
 int espmod_loader_stop_named(const uint8_t *name, size_t name_len);
+int espmod_loader_manifest_named(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
 
 /* The version shown in the slot's status (whoever installs images records it; the loader keeps no state of its own). */
 void espmod_loader_set_version(int slot, uint32_t version);

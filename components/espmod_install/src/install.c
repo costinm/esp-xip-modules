@@ -15,7 +15,8 @@ static int map_error(int rc)
     switch (rc) {
     case 0: return 0;
     case ESPMOD_LOADER_ERR_IMAGE: return WL_ERR_BAD_IMAGE_HEADER;
-    case ESPMOD_LOADER_ERR_TIMEOUT: return WL_ERR_BUSY;
+    case ESPMOD_LOADER_ERR_TIMEOUT:
+    case ESPMOD_ERR_LEAK: return WL_ERR_BUSY;       /* the module lost memory last time: restart first */
     case ESPMOD_ERR_SIZE: return WL_ERR_BAD_LENGTH;
     default: return WL_ERR_FLASH;
     }

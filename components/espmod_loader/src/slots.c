@@ -37,6 +37,7 @@ int espmod_loader_slot_begin(int slot)
     if (!espmod_loader_slot(slot)) return ESPMOD_LOADER_ERR_SLOT;
     em_slot_state_t *st = &em.slots[slot];
     const espmod_slot_t *def = &em.cfg.slots[slot];
+    if (st->st.needs_reboot) return ESPMOD_ERR_LEAK;       /* its last run lost memory: restart before replacing it */
     st->was_running = st->st.running;
     if (espmod_loader_stop(slot, 3000) != 0) return ESPMOD_LOADER_ERR_TIMEOUT;
     /* Invalidate first: from here until the final head write the slot has no valid header. */

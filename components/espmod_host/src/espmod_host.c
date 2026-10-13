@@ -32,7 +32,11 @@ static em_alarm_ctx_t alarm_ctx[EM_MAX_INSTANCES * EM_ALARMS];
 
 static struct espmod_instance *I(void *user) { return user; }
 static int dispatch(struct espmod_instance *in, int component, int method, int value, uint32_t flags, const uint8_t *data, size_t len);
+static int dispatch_packet(struct espmod_instance *in, int component, int method, const uint8_t *data, size_t len, uint32_t pkt,
+                           uint32_t from, uint64_t id, uint32_t flags);
 static void serial_release(struct espmod_instance *in);
+static struct espmod_instance *by_component(int component, const struct espmod_instance *except);
+static bool known_locked(const struct espmod_instance *in);
 
 static int h_log(void *user, const uint8_t *data, size_t len)
 {
@@ -47,22 +51,6 @@ static int h_log(void *user, const uint8_t *data, size_t len)
      * way to explain a failure. */
     ESP_LOGW(TAG, "%s: %s%s", in->name, line, n == len ? "" : "...");
     return n == len ? ESPMOD_OK : ESPMOD_ERR_SIZE;
-}
-
-static void *h_alloc(void *user, size_t size, size_t align)
-{
-    struct espmod_instance *in = I(user);
-    if (size == 0 || align == 0 || (align & (align - 1)) != 0) return NULL;
-    if (!in->arena) {
-        in->arena = heap_caps_malloc(CONFIG_ESPMOD_ARENA_SIZE + 15, MALLOC_CAP_8BIT);
-        if (!in->arena) return NULL;
-        in->arena_used = 0;
-    }
-    uintptr_t base = ((uintptr_t)in->arena + 15) & ~(uintptr_t)15;
-    uintptr_t at = (base + in->arena_used + align - 1) & ~(uintptr_t)(align - 1);
-    if (at < base || at - base > CONFIG_ESPMOD_ARENA_SIZE || size > CONFIG_ESPMOD_ARENA_SIZE - (at - base)) return NULL;
-    in->arena_used = (at - base) + size;
-    return (void *)at;
 }
 
 static uint64_t h_now_ms(void *user) { (void)user; return (uint64_t)(esp_timer_get_time() / 1000); }
@@ -97,6 +85,15 @@ static int h_wifi_start(void *user, const uint8_t *ssid, size_t ssid_len, const 
     return hooks.wifi_start(ssid, ssid_len, psk, psk_len);
 }
 
+static int h_wifi_config(void *user, const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len)
+{
+    (void)user;
+    if (!hooks.wifi_config) return ESPMOD_ERR_UNSUPPORTED;
+    if ((ssid_len && !ssid) || (psk_len && !psk) || ssid_len > 32 || psk_len > 63) return ESPMOD_ERR_ARG;
+    int rc = hooks.wifi_config(ssid, ssid_len, psk, psk_len);
+    return rc == 0 ? 0 : rc == -1 ? ESPMOD_ERR_ARG : ESPMOD_ERR_IO;
+}
+
 static int h_wifi_stop(void *user)
 {
     (void)user;
@@ -111,6 +108,32 @@ static int h_wifi_info(void *user, uint8_t *out, size_t capacity)
     if (!hooks.wifi_status) return ESPMOD_ERR_UNSUPPORTED;
     if (!out || !capacity) return ESPMOD_ERR_ARG;
     return em_wifi_info(&hooks, out, capacity);
+}
+
+static int h_heap_info(void *user, uint8_t *out, size_t capacity)
+{
+    (void)user;
+    if (!out || !capacity) return ESPMOD_ERR_ARG;
+    return em_heap_info(out, capacity);
+}
+
+static int h_nv(void *user, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len, uint8_t *out, size_t capacity)
+{
+    (void)user;
+    if (!hooks.nv) return ESPMOD_ERR_UNSUPPORTED;
+    if (!key || !key_len || key_len > 32 || (value_len && !value) || (!value && (!out || !capacity))) return ESPMOD_ERR_ARG;
+    int rc = hooks.nv((const char *)key, key_len, value, value_len, out, capacity);
+    return rc >= 0 ? rc : rc == -1 ? ESPMOD_ERR_ARG : rc == -3 ? ESPMOD_ERR_IO : rc == -5 ? ESPMOD_ERR_SIZE : ESPMOD_ERR_NOTFOUND;
+}
+
+static int h_heap_dump(void *user, int kind) { (void)user; return em_heap_dump(kind); }
+
+static int h_wifi_scan(void *user, uint8_t *out, size_t capacity)
+{
+    (void)user;
+    if (!hooks.wifi_scan) return ESPMOD_ERR_UNSUPPORTED;
+    if (!out || !capacity) return ESPMOD_ERR_ARG;
+    return em_wifi_scan(&hooks, out, capacity);
 }
 
 static int h_loader_start(void *user, const uint8_t *name, size_t name_len)
@@ -274,18 +297,16 @@ static void serial_release(struct espmod_instance *in)
     if (mine && xTaskCreate(serial_close_task, "em_serial_close", 3072, NULL, 4, NULL) != pdPASS) ESP_LOGE(TAG, "serial not closed");
 }
 
-/* A line arrived (serial task): the owner's answer, as text, goes back to the port. */
+/* A line arrived (serial task): it is a packet for the owner, who writes what it has to say with serial_write. */
 static void on_serial_line(void *ctx, char *line, size_t len)
 {
     (void)ctx;
-    static uint8_t answer[CONFIG_ESPMOD_RESPONSE_MAX];
     portENTER_CRITICAL(&registry_lock);
     struct espmod_instance *owner = serial_owner;
     const int component = serial_component, method = serial_method;
     portEXIT_CRITICAL(&registry_lock);
-    size_t n = 0;
-    if (owner && espmod_instance_request(owner, component, method, (const uint8_t *)line, len, answer, sizeof(answer), &n, 5000) == 0 && n)
-        espmod_serial_write(answer, n);
+    if (owner && espmod_instance_send(owner, component, method, 0, (const uint8_t *)line, len) != 0)
+        espmod_serial_write("error: busy\n", 12);
 }
 
 static int h_serial_open(void *user, int component, int method)
@@ -324,30 +345,6 @@ static struct espmod_instance *by_component(int component, const struct espmod_i
     return found;
 }
 
-static void settle_after_call(struct espmod_instance *t, int rc);
-
-/* The target's handler runs here, nested in the caller's: still one handler at a time on the worker. */
-static int h_call(void *user, int component, int method, const uint8_t *data, size_t len, uint8_t *resp, size_t cap, size_t *rlen)
-{
-    struct espmod_instance *me = I(user);
-    if (rlen) *rlen = 0;
-    if (xTaskGetCurrentTaskHandle() != worker_task || (len && !data) || (cap && !resp)) return ESPMOD_ERR_ARG;
-    struct espmod_instance *t = component ? by_component(component, me) : NULL;
-    if (!t) return ESPMOD_ERR_NOTFOUND;
-    if (t->in_request) return ESPMOD_ERR_BUSY;
-    if (!t->response && !(t->response = malloc(CONFIG_ESPMOD_RESPONSE_MAX))) return ESPMOD_ERR_NOMEM;
-    t->in_request = true; t->responded = false; t->response_len = 0;
-    const int rc = dispatch(t, component, method, 0, 1, data, len);
-    t->in_request = false;
-    size_t n = t->responded ? t->response_len : 0;
-    int ret = ESPMOD_OK;
-    if (n > cap) { n = cap; ret = ESPMOD_ERR_SIZE; }
-    if (n) memcpy(resp, t->response, n);
-    if (rlen) *rlen = n;
-    settle_after_call(t, rc);
-    return ret;
-}
-
 static int h_modules_info(void *user, uint8_t *out, size_t capacity)
 {
     (void)user;
@@ -372,6 +369,14 @@ static int h_module_stop(void *user, const uint8_t *name, size_t name_len)
     return hooks.module_stop(name, name_len);
 }
 
+static int h_module_manifest(void *user, const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity)
+{
+    (void)user;
+    if (!hooks.module_manifest) return ESPMOD_ERR_UNSUPPORTED;
+    if (!name || !name_len || (capacity && !out)) return ESPMOD_ERR_ARG;
+    return hooks.module_manifest(name, name_len, out, capacity);
+}
+
 static int h_events_info(void *user, uint8_t *out, size_t capacity)
 {
     (void)user;
@@ -388,6 +393,240 @@ static int h_reset(void *user)
     const esp_timer_create_args_t a = {.callback = restart_later, .name = "restart"};
     if (esp_timer_create(&a, &t) != ESP_OK || esp_timer_start_once(t, 300000) != ESP_OK) return ESPMOD_ERR_NOMEM;
     return ESPMOD_OK;
+}
+
+/* ---- the managed heap: a module frees what it took before it stops, and the host checks the balance ---- */
+static void *h_mem_alloc(void *user, size_t size) { return espmod_mem_alloc(&I(user)->mem, size); }
+static int h_mem_free(void *user, void *ptr) { return espmod_mem_free(&I(user)->mem, ptr) == 0 ? ESPMOD_OK : ESPMOD_ERR_ARG; }
+
+/* ---- packets (abi/API.md, PKT): the C pool, and what each module holds ---- */
+static espmod_pool *pool;
+static SemaphoreHandle_t pool_lock;
+
+static size_t pool_free_heap(void) { return heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); }
+
+/* The pool is allocated when the first packet is wanted: a device whose modules never use one pays nothing. */
+static espmod_pool *pool_get(void)
+{
+    if (!pool_lock) {
+        SemaphoreHandle_t m = xSemaphoreCreateMutex();
+        portENTER_CRITICAL(&registry_lock);
+        if (!pool_lock) { pool_lock = m; m = NULL; }
+        portEXIT_CRITICAL(&registry_lock);
+        if (m) vSemaphoreDelete(m);
+    }
+    xSemaphoreTake(pool_lock, portMAX_DELAY);
+    if (!pool) {
+        if (hooks.pool) {                       /* the application's pool: DMesh's QUIC pool */
+            if (hooks.pool->slot_size(hooks.pool->ctx) >= ESPMOD_PKT_SLOT_MIN) pool = espmod_pool_external(hooks.pool);
+            else ESP_LOGE(TAG, "application pool slots are too small (%u < %u)", (unsigned)hooks.pool->slot_size(hooks.pool->ctx), (unsigned)ESPMOD_PKT_SLOT_MIN);
+        } else {
+            pool = espmod_pool_create(CONFIG_ESPMOD_PKT_SLOTS, ESPMOD_PKT_SLOT_MIN);
+            espmod_pool_set_policy(pool, CONFIG_ESPMOD_PKT_KEEP, pool_free_heap, CONFIG_ESPMOD_PKT_HEAP_RESERVE);
+        }
+    }
+    xSemaphoreGive(pool_lock);
+    return pool;
+}
+
+#define PKT_TAIL (ESPMOD_PKT_SLOT_MIN - ESPMOD_PKT_HEADROOM - ESPMOD_PKT_MAX)
+
+static void drop_slot(int slot) { espmod_pool_release(pool, slot); }
+
+static int h_pkt_alloc(void *user, uint32_t *out)
+{
+    struct espmod_instance *in = I(user);
+    espmod_pool *p = pool_get();
+    if (!out) return ESPMOD_ERR_ARG;
+    *out = 0;
+    if (!p) return ESPMOD_ERR_NOMEM;
+    if (espmod_held_count(&in->held, ESPMOD_HELD_OWNED) >= in->held.quota) return ESPMOD_ERR_BUSY;
+    int slot = espmod_pool_acquire(p, CONFIG_ESPMOD_PKT_RESERVE);
+    if (slot < 0) return ESPMOD_ERR_NOMEM;
+    uint32_t h = espmod_held_add(&in->held, slot, ESPMOD_PKT_HEADROOM, 0, ESPMOD_HELD_OWNED);
+    if (!h) { drop_slot(slot); return ESPMOD_ERR_BUSY; }
+    *out = h;
+    return ESPMOD_OK;
+}
+
+static int h_pkt_buf(void *user, uint32_t pkt, uint8_t **ptr, size_t *max)
+{
+    struct espmod_instance *in = I(user);
+    espmod_held_entry *e = espmod_held_get(&in->held, pkt);
+    if (!e || !ptr || !max) return ESPMOD_ERR_ARG;
+    if (espmod_pool_refs(pool, e->slot) != 1) return ESPMOD_ERR_BUSY;     /* shared: something else still reads it */
+    *ptr = espmod_pool_slot(pool, e->slot) + e->start;
+    *max = espmod_pool_slot_size(pool) - e->start - PKT_TAIL;
+    if (*max > ESPMOD_PKT_MAX) *max = ESPMOD_PKT_MAX;
+    return ESPMOD_OK;
+}
+
+static int h_pkt_span(void *user, uint32_t pkt, uint8_t **base, size_t *capacity)
+{
+    struct espmod_instance *in = I(user);
+    espmod_held_entry *e = espmod_held_get(&in->held, pkt);
+    if (!e || !base || !capacity || !pool) return ESPMOD_ERR_ARG;
+    if (espmod_pool_refs(pool, e->slot) != 1) return ESPMOD_ERR_BUSY;
+    *base = espmod_pool_slot(pool, e->slot);
+    *capacity = espmod_pool_slot_size(pool);
+    return ESPMOD_OK;
+}
+
+/* The socket and asynchronous flash table entries are present for ABI size
+ * compatibility. Until the C event bridge is installed they report the
+ * feature as unavailable instead of leaving null function pointers. */
+static int h_tcp_accept(void *u, uint16_t p, uint32_t m, int32_t c, int32_t f, uint32_t *l)
+{ (void)u; (void)p; (void)m; (void)c; (void)f; if (l) *l = 0; return ESPMOD_ERR_UNSUPPORTED; }
+static int h_socket_read(void *u, uint32_t s, uint8_t *b, size_t n)
+{ (void)u; (void)s; (void)b; (void)n; return ESPMOD_ERR_UNSUPPORTED; }
+static int h_socket_write(void *u, uint32_t s, const uint8_t *b, size_t n)
+{ (void)u; (void)s; (void)b; (void)n; return ESPMOD_ERR_UNSUPPORTED; }
+static int h_socket_close(void *u, uint32_t s)
+{ (void)u; (void)s; return ESPMOD_ERR_UNSUPPORTED; }
+static int h_socket_peer(void *u, uint32_t s, uint8_t *a, uint16_t *p, uint32_t *sc)
+{ (void)u; (void)s; (void)a; (void)p; (void)sc; return ESPMOD_ERR_UNSUPPORTED; }
+static int h_socket_write_pkt(void *u, uint32_t s, uint32_t p, uint32_t o, uint32_t n)
+{ (void)u; (void)s; (void)p; (void)o; (void)n; return ESPMOD_ERR_UNSUPPORTED; }
+static int h_flash_erase(void *u, uint32_t a, uint32_t n, int32_t c, int32_t m, uint64_t id)
+{ (void)u; (void)a; (void)n; (void)c; (void)m; (void)id; return ESPMOD_ERR_UNSUPPORTED; }
+static int h_flash_write(void *u, uint32_t a, const uint8_t *b, size_t n, int32_t c, int32_t m, uint64_t id)
+{ (void)u; (void)a; (void)b; (void)n; (void)c; (void)m; (void)id; return ESPMOD_ERR_UNSUPPORTED; }
+static int h_flash_read(void *u, uint32_t a, uint8_t *b, size_t n)
+{ (void)u; (void)a; (void)b; (void)n; return ESPMOD_ERR_UNSUPPORTED; }
+
+static int h_pkt_keep(void *user, uint32_t pkt)
+{
+    int rc = espmod_held_keep(&I(user)->held, pkt);
+    return rc == 0 ? ESPMOD_OK : rc == -2 ? ESPMOD_ERR_BUSY : ESPMOD_ERR_ARG;
+}
+
+static int h_pkt_free(void *user, uint32_t pkt)
+{
+    espmod_held_entry e = espmod_held_take(&I(user)->held, pkt);
+    if (e.slot < 0) return ESPMOD_ERR_ARG;
+    drop_slot(e.slot);
+    return ESPMOD_OK;
+}
+
+static int h_pkt_info(void *user, uint32_t *headroom, uint32_t *max)
+{
+    (void)user;
+    if (!headroom || !max) return ESPMOD_ERR_ARG;
+    *headroom = ESPMOD_PKT_HEADROOM;
+    *max = ESPMOD_PKT_MAX;
+    return ESPMOD_OK;
+}
+
+/* The packet goes to the target's inbox ring and a worker event; on success the target owns the reference. */
+static int deliver(struct espmod_instance *t, int slot, uint16_t start, uint16_t len, int component, int method,
+                   uint32_t from, uint64_t id)
+{
+    uint32_t tid = 0;
+    int rc = ESPMOD_ERR_NOTFOUND;
+    portENTER_CRITICAL(&registry_lock);
+    if (known_locked(t)) {
+        if (t->pkt_count >= CONFIG_ESPMOD_PKT_INBOX) rc = ESPMOD_ERR_BUSY;
+        else {
+            unsigned at = (t->pkt_head + t->pkt_count++) % CONFIG_ESPMOD_PKT_INBOX;
+            t->pkt_in[at].slot = (int16_t)slot; t->pkt_in[at].start = start; t->pkt_in[at].len = len;
+            t->pkt_in[at].component = component; t->pkt_in[at].method = method;
+            t->pkt_in[at].from = from; t->pkt_in[at].id = id;
+            tid = t->id;
+            rc = 0;
+        }
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    if (rc) return rc;
+    em_event_t ev = {.kind = EM_EV_PACKET, .inst = tid};
+    if (xQueueSend(worker_queue, &ev, 0) == pdTRUE) return 0;
+    portENTER_CRITICAL(&registry_lock);              /* no room for the event: take the packet back out */
+    if (known_locked(t)) {
+        for (unsigned k = 0; k < t->pkt_count; k++) {
+            unsigned at = (t->pkt_head + k) % CONFIG_ESPMOD_PKT_INBOX;
+            if (t->pkt_in[at].slot != slot) continue;
+            for (unsigned j = k; j + 1 < t->pkt_count; j++)
+                t->pkt_in[(t->pkt_head + j) % CONFIG_ESPMOD_PKT_INBOX] = t->pkt_in[(t->pkt_head + j + 1) % CONFIG_ESPMOD_PKT_INBOX];
+            t->pkt_count--;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    return ESPMOD_ERR_BUSY;
+}
+
+static int h_send(void *user, uint32_t pkt, size_t len, uint32_t dst, int component, int method, uint64_t id)
+{
+    struct espmod_instance *in = I(user);
+    espmod_held_entry e = espmod_held_take(&in->held, pkt);       /* consumed on success and on failure */
+    if (e.slot < 0) return ESPMOD_ERR_ARG;
+    int rc;
+    if (len > ESPMOD_PKT_MAX || e.start + len > espmod_pool_slot_size(pool)) {
+        rc = ESPMOD_ERR_SIZE;
+    } else if (dst == ESPMOD_ADDR_MAIN) {
+        rc = hooks.packet ? hooks.packet(hooks.packet_ctx, in->name, in->component, component, method, id,
+                                         espmod_pool_slot(pool, e.slot) + e.start, len) : ESPMOD_ERR_NOTFOUND;
+        drop_slot(e.slot);                                         /* lent to the hook for the call */
+        if (rc == 0) in->stats.pkt_sent++;
+        return rc;
+    } else {
+        struct espmod_instance *t = by_component((int)dst, NULL);
+        rc = t ? deliver(t, e.slot, e.start, (uint16_t)len, component, method, in->component, id) : ESPMOD_ERR_NOTFOUND;
+        if (rc == 0) { in->stats.pkt_sent++; return 0; }
+    }
+    in->stats.pkt_dropped++;
+    drop_slot(e.slot);
+    return rc;
+}
+
+int espmod_instance_send(espmod_instance_t *in, int component, int method, uint64_t id, const uint8_t *data, size_t len)
+{
+    espmod_pool *p = pool_get();
+    if (!in || (len && !data) || !p) return in && p ? ESPMOD_ERR_ARG : ESPMOD_ERR_NOMEM;
+    if (len > ESPMOD_PKT_MAX) return ESPMOD_ERR_SIZE;
+    int slot = espmod_pool_acquire(p, 0);                         /* the application may use every packet */
+    if (slot < 0) return ESPMOD_ERR_NOMEM;
+    if (len) memcpy(espmod_pool_slot(p, slot) + ESPMOD_PKT_HEADROOM, data, len);
+    int rc = deliver(in, slot, ESPMOD_PKT_HEADROOM, (uint16_t)len, component, method, ESPMOD_ADDR_MAIN, id);
+    if (rc) { drop_slot(slot); in->stats.pkt_dropped++; }
+    return rc;
+}
+
+/* The module used respond() on a packet that carried an id: the same bytes go to the sender as a message with that id. */
+static void answer(struct espmod_instance *in, uint32_t to, int component, int method, uint64_t id, const uint8_t *data, size_t len)
+{
+    if (to == ESPMOD_ADDR_MAIN) {
+        if (hooks.packet) hooks.packet(hooks.packet_ctx, in->name, in->component, component, method, id, data, len);
+        return;
+    }
+    struct espmod_instance *t = by_component((int)to, NULL);
+    espmod_pool *p = pool_get();
+    if (!t || !p) return;
+    int slot = espmod_pool_acquire(p, 0);
+    if (slot < 0) { in->stats.pkt_dropped++; return; }
+    if (len) memcpy(espmod_pool_slot(p, slot) + ESPMOD_PKT_HEADROOM, data, len);
+    if (deliver(t, slot, ESPMOD_PKT_HEADROOM, (uint16_t)len, component, method, in->component, id)) { drop_slot(slot); in->stats.pkt_dropped++; }
+    else in->stats.pkt_sent++;
+}
+
+/* Release what a module still holds or has waiting (it ended): on the worker, in finish(). */
+static unsigned packets_release(struct espmod_instance *in)
+{
+    unsigned leaked = 0;
+    if (!pool) return 0;
+    for (unsigned i = 0; i < ESPMOD_HELD_MAX; i++) {
+        if (in->held.e[i].state == ESPMOD_HELD_FREE) continue;
+        if (in->held.e[i].state == ESPMOD_HELD_OWNED) { in->stats.pkt_leaked++; leaked++; }
+        drop_slot(in->held.e[i].slot);
+        in->held.e[i].state = ESPMOD_HELD_FREE;
+    }
+    portENTER_CRITICAL(&registry_lock);
+    unsigned n = in->pkt_count;
+    int slots[CONFIG_ESPMOD_PKT_INBOX];
+    for (unsigned k = 0; k < n; k++) slots[k] = in->pkt_in[(in->pkt_head + k) % CONFIG_ESPMOD_PKT_INBOX].slot;
+    in->pkt_count = 0;
+    portEXIT_CRITICAL(&registry_lock);
+    for (unsigned k = 0; k < n; k++) { drop_slot(slots[k]); in->stats.pkt_dropped++; }
+    return leaked;
 }
 
 /* ---- instances ---- */
@@ -428,14 +667,37 @@ static void finish(struct espmod_instance *in, int result)
         alarm_ctx[in->slot * EM_ALARMS + i].seq++;   /* a callback already in flight is stale */
     }
     serial_release(in);
+    const unsigned leaked_packets = packets_release(in);
+    const uint32_t leaked_bytes = espmod_mem_used(&in->mem);        /* cannot be freed: nobody knows where it is */
+    in->stats.mem_leaked = leaked_bytes;
+    if (leaked_packets || leaked_bytes) {
+        ESP_LOGW(TAG, "%s ended holding %u packets (freed) and %u bytes of memory%s", in->name, leaked_packets,
+                 (unsigned)leaked_bytes, leaked_bytes ? ": it needs a reboot to be replaced" : "");
+        if (result >= 0) result = ESPMOD_ERR_LEAK;
+    }
     em_periph_release(in);
     espmod_done_fn done = in->done;
     void *ctx = in->done_ctx;
     espmod_stats_t stats = in->stats;
     ESP_LOGI(TAG, "%s ended: %d (%u calls, max %u us)", in->name, result, (unsigned)stats.calls, (unsigned)stats.max_handler_us);
-    free(in->state); free(in->inbox); free(in->start_request); free(in->response); free(in->arena);
+    free(in->state); free(in->inbox); free(in->start_request); free(in->response);
     free(in);
     if (done) done(ctx, result, &stats);
+}
+
+static int dispatch_x(struct espmod_instance *in, const espmod_call *call)
+{
+    const int64_t t0 = esp_timer_get_time();
+    int rc = in->handler(&in->table, in->state, call);
+    uint32_t us = (uint32_t)(esp_timer_get_time() - t0);
+    in->stats.calls++;
+    if (us > in->stats.max_handler_us) in->stats.max_handler_us = us;
+    if (us / 1000 > CONFIG_ESPMOD_HANDLER_MS) {
+        in->stats.overruns++;
+        ESP_LOGW(TAG, "%s: handler %d.%d took %u ms (budget %d)", in->name, call->component, call->method, (unsigned)(us / 1000),
+                 CONFIG_ESPMOD_HANDLER_MS);
+    }
+    return rc;
 }
 
 static int dispatch(struct espmod_instance *in, int component, int method, int value, uint32_t flags,
@@ -443,18 +705,15 @@ static int dispatch(struct espmod_instance *in, int component, int method, int v
 {
     const espmod_call call = {.size = sizeof(call), .component = component, .method = method, .value = value,
                               .flags = flags, .data = data, .len = len};
-    in->arena_used = 0;
-    const int64_t t0 = esp_timer_get_time();
-    int rc = in->handler(&in->table, in->state, &call);
-    uint32_t us = (uint32_t)(esp_timer_get_time() - t0);
-    in->stats.calls++;
-    if (us > in->stats.max_handler_us) in->stats.max_handler_us = us;
-    if (us / 1000 > CONFIG_ESPMOD_HANDLER_MS) {
-        in->stats.overruns++;
-        ESP_LOGW(TAG, "%s: handler %d.%d took %u ms (budget %d)", in->name, component, method, (unsigned)(us / 1000),
-                 CONFIG_ESPMOD_HANDLER_MS);
-    }
-    return rc;
+    return dispatch_x(in, &call);
+}
+
+static int dispatch_packet(struct espmod_instance *in, int component, int method, const uint8_t *data, size_t len, uint32_t pkt,
+                           uint32_t from, uint64_t id, uint32_t flags)
+{
+    const espmod_call call = {.size = sizeof(call), .component = component, .method = method, .data = data, .len = len,
+                              .pkt = pkt, .from = from, .id = id, .flags = flags};
+    return dispatch_x(in, &call);
 }
 
 /* After a handler call: a negative result or DONE ends the instance. True when it ended. */
@@ -466,8 +725,6 @@ static bool settle(struct espmod_instance *in, int rc)
     }
     return false;
 }
-
-static void settle_after_call(struct espmod_instance *t, int rc) { settle(t, rc); }
 
 static void handle_alarm(struct espmod_instance *in, const em_event_t *ev)
 {
@@ -508,6 +765,48 @@ static void handle_request(struct espmod_instance *in, const em_event_t *ev)
     portEXIT_CRITICAL(&registry_lock);
     if (waiter) xSemaphoreGive(waiter);
     settle(in, rc);
+}
+
+/* Deliver what is waiting, one call each: the packet is lent for the call and goes back to the pool when the handler
+ * returns, unless the module kept it. */
+static void handle_packets(struct espmod_instance *in)
+{
+    for (;;) {
+        int slot = -1;
+        uint16_t start = 0, len = 0;
+        int32_t component = 0, method = 0;
+        uint32_t from = 0;
+        uint64_t id = 0;
+        bool was_full = false;
+        portENTER_CRITICAL(&registry_lock);
+        if (in->pkt_count) {
+            was_full = in->pkt_count >= CONFIG_ESPMOD_PKT_INBOX;
+            unsigned at = in->pkt_head;
+            slot = in->pkt_in[at].slot; start = in->pkt_in[at].start; len = in->pkt_in[at].len;
+            component = in->pkt_in[at].component; method = in->pkt_in[at].method;
+            from = in->pkt_in[at].from; id = in->pkt_in[at].id;
+            in->pkt_head = (uint8_t)((at + 1) % CONFIG_ESPMOD_PKT_INBOX);
+            in->pkt_count--;
+        }
+        portEXIT_CRITICAL(&registry_lock);
+        if (slot < 0) return;
+        if (was_full && hooks.inbox_ready) hooks.inbox_ready(hooks.packet_ctx, in->component);
+        uint32_t h = espmod_held_add(&in->held, slot, start, len, ESPMOD_HELD_BORROWED);
+        if (!h) { drop_slot(slot); in->stats.pkt_dropped++; continue; }
+        in->stats.pkt_received++;
+        const bool wants = id != 0;
+        if (wants && !in->response) in->response = malloc(CONFIG_ESPMOD_RESPONSE_MAX);
+        in->in_request = wants && in->response; in->responded = false; in->response_len = 0;
+        const int rc = dispatch_packet(in, component, method, espmod_pool_slot(pool, slot) + start, len, h, from, id, wants ? 1 : 0);
+        in->in_request = false;
+        if (wants && in->responded) answer(in, from, component, method, id, in->response, in->response_len);
+        espmod_held_entry *e = espmod_held_get(&in->held, h);
+        if (e && e->state == ESPMOD_HELD_BORROWED) {         /* not kept, not sent on */
+            espmod_held_take(&in->held, h);
+            drop_slot(slot);
+        }
+        if (settle(in, rc)) return;
+    }
 }
 
 static void worker(void *arg)
@@ -554,6 +853,7 @@ static void worker(void *arg)
             }
             break;
         case EM_EV_REQUEST: handle_request(in, &ev); break;
+        case EM_EV_PACKET: handle_packets(in); break;
         case EM_EV_ALARM: handle_alarm(in, &ev); break;
         default: break;
         }
@@ -593,8 +893,11 @@ esp_err_t espmod_host_init_simple(espmod_host_emit_fn emit, const espmod_host_ex
     espmod_host_hooks_t h = {.emit = simple_on_emit};
     if (ext) {
         h.wifi_start = ext->wifi_start; h.wifi_stop = ext->wifi_stop; h.wifi_status = ext->wifi_status;
+        h.wifi_config = ext->wifi_config; h.wifi_saved = ext->wifi_saved; h.nv = ext->nv; h.pool = ext->pool; h.wifi_scan = ext->wifi_scan;
         h.loader_start = ext->loader_start; h.loader_stop = ext->loader_stop;
         h.modules_info = ext->modules_info; h.module_start = ext->module_start; h.module_stop = ext->module_stop;
+        h.module_manifest = ext->module_manifest;
+        h.packet = ext->packet; h.inbox_ready = ext->inbox_ready;
     }
     return espmod_host_init(&h);
 }
@@ -614,6 +917,15 @@ void espmod_host_wake_window(void)
     (void)xQueueSend(worker_queue, &ev, 0);
 }
 
+uint32_t espmod_host_features(void)
+{
+    return ESPMOD_FEAT_SETTINGS | ESPMOD_FEAT_SPI | ESPMOD_FEAT_SPI_READY | ESPMOD_FEAT_I2C |
+           ESPMOD_FEAT_ADC | ESPMOD_FEAT_RGBLED | ESPMOD_FEAT_SERVICE |
+           (hooks.next_window_ms ? ESPMOD_FEAT_ALARM_FLEX : 0) | (hooks.wifi_start ? ESPMOD_FEAT_WIFI : 0) |
+           (hooks.loader_start ? ESPMOD_FEAT_LOADER : 0) |
+           ESPMOD_FEAT_SERIAL | ESPMOD_FEAT_PACKETS | ESPMOD_FEAT_MEMORY | (hooks.modules_info ? ESPMOD_FEAT_MODULES : 0);
+}
+
 espmod_instance_t *espmod_instance_create(const char *name, const espmod_instance_config_t *cfg)
 {
     if (!inited || !name || !*name || !cfg || !cfg->handler || cfg->state_bytes > 4096) return NULL;
@@ -623,25 +935,29 @@ espmod_instance_t *espmod_instance_create(const char *name, const espmod_instanc
     in->handler = cfg->handler; in->done = cfg->done; in->done_ctx = cfg->done_ctx;
     in->state_bytes = cfg->state_bytes;
     in->component = cfg->component;
+    espmod_held_init(&in->held, CONFIG_ESPMOD_PKT_HELD);
+    espmod_mem_init(&in->mem, CONFIG_ESPMOD_MEM_QUOTA);
     in->state = calloc(1, cfg->state_bytes ? cfg->state_bytes : 1);
     in->inbox = malloc(CONFIG_ESPMOD_REQUEST_MAX);
     if (!in->state || !in->inbox) { free(in->state); free(in->inbox); free(in); return NULL; }
     in->table = (espmod_host){
         .abi_version = ESPMOD_ABI_VERSION,
         .size = sizeof(espmod_host),
-        .features = ESPMOD_FEAT_SETTINGS | ESPMOD_FEAT_SPI | ESPMOD_FEAT_SPI_READY | ESPMOD_FEAT_I2C |
-                    ESPMOD_FEAT_ADC | ESPMOD_FEAT_RGBLED | ESPMOD_FEAT_SERVICE |
-                    (hooks.next_window_ms ? ESPMOD_FEAT_ALARM_FLEX : 0) | (hooks.wifi_start ? ESPMOD_FEAT_WIFI : 0) | (hooks.loader_start ? ESPMOD_FEAT_LOADER : 0) |
-                    ESPMOD_FEAT_SERIAL | ESPMOD_FEAT_CALL | (hooks.modules_info ? ESPMOD_FEAT_MODULES : 0),
+        .features = espmod_host_features(),
         .user = in,
-        .log = h_log, .alloc = h_alloc, .now_ms = h_now_ms, .respond = h_respond, .emit = h_emit,
+        .log = h_log, .now_ms = h_now_ms, .respond = h_respond, .emit = h_emit,
         .call_service = h_call_service, .get_setting = h_get_setting, .set_setting = h_set_setting,
         .alarm_set = h_alarm_set, .alarm_cancel = h_alarm_cancel, .connected = h_connected,
-        .wifi_start = h_wifi_start, .wifi_stop = h_wifi_stop, .wifi_info = h_wifi_info,
+        .wifi_start = h_wifi_start, .wifi_stop = h_wifi_stop, .wifi_info = h_wifi_info, .wifi_config = h_wifi_config,
         .loader_start = h_loader_start, .loader_stop = h_loader_stop,
-        .serial_open = h_serial_open, .serial_write = h_serial_write, .serial_close = h_serial_close, .call = h_call,
+        .serial_open = h_serial_open, .serial_write = h_serial_write, .serial_close = h_serial_close,
         .modules_info = h_modules_info, .module_start = h_module_start, .module_stop = h_module_stop,
         .events_info = h_events_info, .reset = h_reset,
+        .pkt_alloc = h_pkt_alloc, .pkt_buf = h_pkt_buf, .pkt_keep = h_pkt_keep, .pkt_free = h_pkt_free, .send = h_send,
+        .pkt_info = h_pkt_info, .mem_alloc = h_mem_alloc, .mem_free = h_mem_free, .pkt_span = h_pkt_span,
+        .tcp_accept = h_tcp_accept, .socket_read = h_socket_read, .socket_write = h_socket_write,
+        .socket_close = h_socket_close, .socket_peer = h_socket_peer, .socket_write_pkt = h_socket_write_pkt,
+        .flash_erase = h_flash_erase, .flash_write = h_flash_write, .flash_read = h_flash_read, .module_manifest = h_module_manifest, .wifi_scan = h_wifi_scan, .nv = h_nv, .heap_info = h_heap_info, .heap_dump = h_heap_dump,
     };
     em_periph_fill(&in->table);
     for (int i = 0; i < EM_IRQ_SLOTS; i++) in->irq[i].inst = in;

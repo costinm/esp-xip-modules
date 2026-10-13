@@ -17,6 +17,9 @@
  * gives up after 200 ms (a closed terminal must not block the task forever).
  *
  * Output is written to the driver directly; ESP_LOG keeps printing on the same port. */
+#include <stdarg.h>
+#include "esp_log.h"
+#include "esp_rom_sys.h"
 #include <stdlib.h>
 #include <string.h>
 #include "sdkconfig.h"
@@ -192,6 +195,22 @@ static void serial_task(void *arg)
     vTaskDelete(NULL);
 }
 
+bool espmod_serial_usb_active(void)
+{
+#if CONFIG_IDF_TARGET_ESP32C6
+    return s.running && s.usb && usb_serial_jtag_is_connected();
+#else
+    return false;
+#endif
+}
+
+void espmod_serial_rearm(void)
+{
+    if (!s.running || s.usb) return;
+    uart_set_wakeup_threshold(UART_NUM_0, 3);
+    uart_enable_rx_intr(UART_NUM_0);
+}
+
 int espmod_serial_start(espmod_serial_line_fn on_line, void *ctx)
 {
     if (s.running) return ESPMOD_ERR_BUSY;
@@ -225,3 +244,13 @@ void espmod_serial_stop(void)
     uninstall_driver();
     s.running = false;
 }
+
+static int rom_vprintf(const char *fmt, va_list ap)
+{
+    char line[160];
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    esp_rom_printf("%s", line);
+    return n;
+}
+
+void espmod_log_to_rom(void) { esp_log_set_vprintf(rom_vprintf); }

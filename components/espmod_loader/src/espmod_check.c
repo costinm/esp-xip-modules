@@ -11,6 +11,11 @@ espmod_dmod_result_t espmod_dmod_check(const espmod_dmod_header *h, const espmod
         return EMD_BAD_HEADER;
     for (size_t i = 0; i < sizeof(h->reserved); i++) if (h->reserved[i] != 0) return EMD_BAD_HEADER;
     if (h->image_size <= ESPMOD_DMOD_HEADER_SIZE || h->image_size > r->slot_size) return EMD_BAD_SIZE;
+    /* the manifest, if any, is inside the image after the header, 4-aligned */
+    if (h->manifest_size || h->manifest_offset) {
+        if (!h->manifest_size || h->manifest_offset < ESPMOD_DMOD_HEADER_SIZE || (h->manifest_offset & 3) ||
+            h->manifest_offset > h->image_size || h->manifest_size > h->image_size - h->manifest_offset) return EMD_BAD_HEADER;
+    }
     /* RISC-V code may be 2-byte aligned; Xtensa entries are 4-byte aligned by the linker script. */
     if (h->entry_offset < ESPMOD_DMOD_HEADER_SIZE || h->entry_offset >= h->image_size || (h->entry_offset & 1))
         return EMD_BAD_ENTRY;

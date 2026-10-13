@@ -30,11 +30,36 @@ menu "esp-xip-modules host"
         int "Events queued for the worker (interrupts, alarms, requests)"
         default 32
 
-    config ESPMOD_ARENA_SIZE
-        int "Scratch memory per module (alloc), bytes"
-        default 32768
+    config ESPMOD_PKT_SLOTS
+        int "Packets in the host's own pool, at most (1204 bytes each, allocated one by one as modules use them)"
+        default 16
+
+    config ESPMOD_PKT_KEEP
+        int "Idle packets that keep their storage (the rest go back to the heap when released)"
+        default 2
+
+    config ESPMOD_PKT_HEAP_RESERVE
+        int "Free heap that must remain after a packet is allocated, bytes"
+        default 16384
         help
-            Allocated on the first alloc() call, freed when the module returns.
+            A module cannot take the last RAM of the device for packets. DMesh does not use this pool: it hands the QUIC pool to the host.
+
+    config ESPMOD_PKT_RESERVE
+        int "Packets a module cannot take: kept for the application"
+        default 2
+
+    config ESPMOD_PKT_HELD
+        int "Packets one module can hold at a time (at most 8)"
+        default 4
+        range 1 8
+
+    config ESPMOD_PKT_INBOX
+        int "Packets that can wait for one module"
+        default 4
+
+    config ESPMOD_MEM_QUOTA
+        int "Bytes one module can take with mem_alloc"
+        default 8192
 
     config ESPMOD_SERIAL_STACK
         int "Stack of the serial reader task (it runs the line handler), bytes"

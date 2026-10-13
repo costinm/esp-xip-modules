@@ -2,6 +2,8 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include "sdkconfig.h"
+#include "espmod_pool.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -37,12 +39,15 @@ void em_periph_reserve(uint64_t mask);
 void em_events_add(const char *module, uint16_t id, uint8_t type, const uint8_t *value, size_t len);
 int em_events_info(uint8_t *out, size_t cap);
 int em_wifi_info(const espmod_host_hooks_t *hooks, uint8_t *out, size_t cap);
+int em_heap_dump(int kind);
+int em_heap_info(uint8_t *out, size_t cap);
+int em_wifi_scan(const espmod_host_hooks_t *hooks, uint8_t *out, size_t cap);
 
 /* espmod_serial.c: the pins of the serial port, reserved from modules whether or not the port is started. */
 uint64_t em_serial_pins(void);
 
 /* A worker event. Interrupts, alarm timers and other tasks only ever queue these; module code runs on the worker. */
-enum { EM_EV_CALL = 1, EM_EV_REQUEST, EM_EV_START, EM_EV_ALARM, EM_EV_NETWORK, EM_EV_WAKE };
+enum { EM_EV_CALL = 1, EM_EV_REQUEST, EM_EV_START, EM_EV_ALARM, EM_EV_NETWORK, EM_EV_WAKE, EM_EV_PACKET };
 typedef struct {
     uint8_t kind;
     uint32_t inst;                /* instance id (not a pointer: the instance may be gone by the time it is read) */
@@ -85,12 +90,14 @@ struct espmod_instance {
     uint8_t *response;            /* CONFIG_ESPMOD_RESPONSE_MAX */
     size_t response_len;
     bool in_request, responded;
-    uint8_t *arena;
-    size_t arena_used;
     em_irq_slot_t irq[EM_IRQ_SLOTS];
     em_spi_dev_t spi[EM_SPI_DEVICES];
     em_alarm_t alarms[EM_ALARMS];
     espmod_stats_t stats;
+    espmod_mem mem;               /* the managed heap of this module */
+    espmod_held held;             /* packets this module owns, and the one the current call lent it */
+    struct { int16_t slot; uint16_t start, len; int32_t component, method; uint32_t from; uint64_t id; } pkt_in[CONFIG_ESPMOD_PKT_INBOX];
+    uint8_t pkt_head, pkt_count;  /* the ring of packets waiting for this module (under the registry lock) */
 };
 
 /* espmod_host.c */
