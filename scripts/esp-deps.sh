@@ -4,14 +4,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Prefer an existing DMesh install: no second ESP-IDF download (env.sh logic).
 . "$REPO_ROOT/env.sh"
 ESP_ROOT="$EM_ESP_ROOT"
-if [[ -n "${EM_DMESH_REPO:-}" ]]; then
-    echo "Reusing ESP-IDF from $ESP_ROOT (DMesh); nothing to install."
-    echo "Load with: . env.sh   (EM_DMESH_DIR=none to install a private copy)"
-    exit 0
-fi
 PROFILE="${EM_NIX_PROFILE:-$REPO_ROOT/target/nix/profile}"
 IDF_VERSION="v6.0.2"
 JOBS="${ESP_IDF_GIT_JOBS:-8}"

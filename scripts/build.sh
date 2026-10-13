@@ -29,20 +29,22 @@ for cpu in $CPUS; do
     # every module: modules/mod_<name>/ with the sources of the slot <name>. C modules: the .c files, options in a
     # comment (/* mkmod: --state 64 --stack 4096 */). Rust modules: a Cargo.toml (bin mod_<name>, feature flat-image),
     # options in [package.metadata] mkmod = "...". A module without a slot in main_slots[] is linked into main
-    # only (mod_console: modules/mod_console is a component).
+    # only.
     for dir in "$ROOT"/modules/mod_*/; do
         name="$(basename "$dir")"; slot="${name#mod_}"
+        # a module may name the slot it shares with another (mod_rtest and mod_test: the one `test` slot): --slot in its options
+        if [[ -f $dir/Cargo.toml ]]; then opts="$(sed -n 's|^mkmod = "\(.*\)"|\1|p' "$dir/Cargo.toml" | head -1)"
+        else opts="$(sed -n 's|.*mkmod: \(.*\) \*/.*|\1|p' "$dir"*.c | head -1)"; fi
+        [[ $opts =~ --slot[[:space:]]+([a-z0-9_]+) ]] && { slot="${BASH_REMATCH[1]}"; opts="${opts/--slot ${slot}/}"; }
         python3 "$ROOT/tools/mkmod.py" --chip "$cpu" --list-slots | grep -q "^$slot:" || { echo "$name: no slot, not packed"; continue; }
         if [[ -f $dir/Cargo.toml ]]; then
             if [[ -z ${EM_RUST_ESP_BIN:-} && -z ${EM_RUST_MODULES:-} ]]; then
                 echo "$name: Rust module skipped (needs the esp toolchain: . ./env.sh finds it in an ESP-IDF install made with DMesh, or set EM_RUST_MODULES=1 when cargo has it)"
                 continue
             fi
-            opts="$(sed -n 's|^mkmod = "\(.*\)"|\1|p' "$dir/Cargo.toml" | head -1)"
             python3 "$ROOT/tools/mkmod.py" --chip "$cpu" --slot "$slot" $opts --cargo "$dir/Cargo.toml:$name:flat-image" \
                 --out "$out/modules/$name.dmod"
         else
-            opts="$(sed -n 's|.*mkmod: \(.*\) \*/.*|\1|p' "$dir"*.c | head -1)"
             python3 "$ROOT/tools/mkmod.py" --chip "$cpu" --slot "$slot" $opts --out "$out/modules/$name.dmod" "$dir"*.c
         fi
     done

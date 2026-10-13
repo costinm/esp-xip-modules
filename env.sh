@@ -11,32 +11,13 @@ _em_target="$EM_REPO/target"
 mkdir -p "$_em_target" 2>/dev/null || true
 
 export EM_IDF_VERSION="v6.0.2"
-# Reuse an existing DMesh checkout's ESP-IDF (target/esp32-6.0) instead of
-# downloading another copy. Override with EM_ESP_ROOT, or EM_DMESH_DIR=/path
-# (set EM_DMESH_DIR=none to force a private install under target/).
-if [ -z "${EM_ESP_ROOT:-}" ]; then
-    for _em_cand in "${EM_DMESH_DIR:-}" /ws/dmesh "$EM_REPO/../dmesh"; do
-        [ -n "$_em_cand" ] && [ "$_em_cand" != none ] || continue
-        _em_root="$_em_cand/target/esp32-6.0"
-        if [ -f "$_em_root/esp-idf/export.sh" ] && [ -d "$_em_root/espressif/python_env" ]; then
-            EM_ESP_ROOT="$(cd "$_em_root" && pwd)"
-            EM_DMESH_REPO="$(cd "$_em_cand" && pwd)"
-            break
-        fi
-    done
-fi
+# An external ESP-IDF installation may be selected explicitly with EM_ESP_ROOT.
 export EM_ESP_ROOT="${EM_ESP_ROOT:-$_em_target/esp-idf-6.0}"
 export NIX_PROFILE="${EM_NIX_PROFILE:-$_em_target/nix/profile}"
 export NIX_CONFIG="${NIX_CONFIG:-experimental-features = nix-command flakes}"
 export TMPDIR="${TMPDIR:-/tmp}"
 
-# Host tools (cmake, ninja, git): own profile, else DMesh's ESP32 profile.
-if [ -n "${EM_DMESH_REPO:-}" ] && [ -d "$EM_DMESH_REPO/target/nix/esp32-profile/bin" ]; then
-    export PATH="$EM_DMESH_REPO/target/nix/esp32-profile/bin:$PATH"
-fi
-if [ ! -d "$NIX_PROFILE/bin" ] && [ -n "${EM_DMESH_REPO:-}" ] && [ -d "$EM_DMESH_REPO/target/nix/profile/bin" ]; then
-    NIX_PROFILE="$EM_DMESH_REPO/target/nix/profile"
-fi
+# Host tools (cmake, ninja, git): this checkout's profile.
 if [ -d "$NIX_PROFILE/bin" ]; then
     export PATH="/usr/bin:/bin:$NIX_PROFILE/bin:$PATH"
 fi
@@ -58,7 +39,7 @@ if [ -z "${IDF_PATH:-}" ] && [ -f "$EM_ESP_ROOT/esp-idf/export.sh" ]; then
     . "$IDF_PATH/export.sh" >/dev/null 2>&1
 fi
 
-unset _em_venv _em_dir _em_target _em_cand _em_root
+unset _em_venv _em_dir _em_target
 export EM_ENV_LOADED=1
 
 # Rust modules (tools/mkmod.py --cargo) need the esp toolchain (nightly + rust-src, Xtensa target): the one that
