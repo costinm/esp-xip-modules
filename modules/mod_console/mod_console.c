@@ -7,6 +7,7 @@
  * `help`, or `component.method key=value ...`: the last turns into the request payload of the module `component`
  * (tagged CBOR, named by catalog.h, generated from the modules' API.md files), calls it with the host's call(), and
  * turns its answer back into text. The host moves bytes and structured records; it formats nothing. */
+/* mkmod: --state 8 --stack 6144 --features SERIAL,PACKETS,MEMORY --autostart */
 #include "espmod_module.h"
 #include "catalog.h"
 
@@ -72,7 +73,7 @@ static int digits(const char *s, size_t n, uint64_t *v)
     uint64_t x = 0;
     for (size_t i = 0; i < n; i++) {
         if (s[i] < '0' || s[i] > '9') return 0;
-        x = x * 10 + (uint64_t)(s[i] - '0');
+        x = (x << 3) + (x << 1) + (uint64_t)(s[i] - '0');
     }
     *v = x;
     return 1;
@@ -80,11 +81,36 @@ static int digits(const char *s, size_t n, uint64_t *v)
 
 static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
 
+/* The blocks one call took with mem_alloc, given back together at the end of the handler: this module's own bookkeeping, the
+ * host has no notion of per-call memory. */
+typedef struct { void *p[16]; int n; } mem_t;
+static void *take(const espmod_host *h, mem_t *mem, size_t size)
+{
+    void *b = mem->n < 16 ? h->mem_alloc(h->user, size) : 0;
+    if (b) mem->p[mem->n++] = b;
+    return b;
+}
+static void give_back(const espmod_host *h, mem_t *mem) { while (mem->n) (void)h->mem_free(h->user, mem->p[--mem->n]); }
+
 /* Output buffer for text. */
 typedef struct { char *p; size_t cap, len; } out_t;
 static void put(out_t *o, const char *s, size_t n) { for (size_t i = 0; i < n && o->len + 1 < o->cap; i++) o->p[o->len++] = s[i]; }
 static void puts_(out_t *o, const char *s) { put(o, s, em_strlen(s)); }
-static void putu(out_t *o, uint64_t v) { char d[24]; int k = 0; do { d[k++] = (char)('0' + v % 10); v /= 10; } while (v); while (k) put(o, &d[--k], 1); }
+/* v / 10 and v % 10 with 32-bit operations only: a module links no libgcc (no __udivdi3) */
+static uint32_t divmod10(uint64_t *v)
+{
+    uint32_t hi = (uint32_t)(*v >> 32), lo = (uint32_t)*v;
+    uint32_t qh = hi / 10, r = hi % 10;
+    uint32_t cur = (r << 16) | (lo >> 16);
+    uint32_t q1 = cur / 10;
+    r = cur % 10;
+    cur = (r << 16) | (lo & 0xffff);
+    uint32_t q0 = cur / 10;
+    r = cur % 10;
+    *v = ((uint64_t)qh << 32) | ((uint64_t)q1 << 16) | q0;
+    return r;
+}
+static void putu(out_t *o, uint64_t v) { char d[24]; int k = 0; do { d[k++] = (char)('0' + divmod10(&v)); } while (v); while (k) put(o, &d[--k], 1); }
 static void putn(out_t *o, int64_t v) { char b[24]; size_t n = em_itoa(b, (long)v); put(o, b, n); }
 
 /* ---- parse ---- */
@@ -123,7 +149,7 @@ static void local(const espmod_host *h, em_cbor_w *w, const char *text)
 
 static void help_text(out_t *o)
 {
-    puts_(o, "status | start NAME [TEXT] | stop NAME | events | reset | wifi [ssid=NAME] [psk=SECRET] [start|stop] | loader start NAME | loader stop\n");
+    puts_(o, "status | start NAME [TEXT] | stop NAME | events | reset | heap [regions|blocks|tasks|trace ...] | nv KEY[=VALUE] | wifi [ssid=NAME] [psk=SECRET] [start|stop] | loader start NAME | loader stop\n");
     puts_(o, "component.method key=value ... (values: 12, -3, true, hex:0a0b, text, \"two words\")\n");
     for (int i = 0; i < CAT_COMPS; i++) {
         puts_(o, cname(cat_comps[i].name)); puts_(o, ":");
@@ -161,18 +187,15 @@ static int encode_value(em_cbor_w *w, unsigned kind, const char *v, size_t n)
     return -1;   /* a number was expected */
 }
 
-static void do_parse(const espmod_host *h, const uint8_t *line_in, size_t line_len, em_cbor_w *w)
+static void do_parse(const espmod_host *h, mem_t *mem, const uint8_t *line_in, size_t line_len, em_cbor_w *w)
 {
-    char *line = h->alloc(h->user, line_len + 1, 1);
-    tok_t *t = h->alloc(h->user, sizeof(tok_t) * MAX_TOKENS, 8);
-    char *msg = h->alloc(h->user, OUT_MAX, 1);
-    if (!line || !t || !msg) { local(h, w, "error: out of memory"); return; }
+    char *line = take(h, mem, line_len + 1);
+    tok_t *t = take(h, mem, sizeof(tok_t) * MAX_TOKENS);
+    if (!line || !t) { local(h, w, "error: out of memory"); return; }
     em_copy(line, line_in, line_len);
     int count = tokenize(line, line_len, t);
     if (count < 0) { local(h, w, "error: too many words"); return; }
     if (count == 0) { local(h, w, ""); return; }
-    out_t o = {msg, OUT_MAX, 0};
-    (void)o;
 
     /* component and method */
     const cat_comp *c = 0;
@@ -240,7 +263,7 @@ static void do_parse(const espmod_host *h, const uint8_t *line_in, size_t line_l
             size_t vn = t[i].n;
             int last = fi + 1 == m->nreq;
             if (req[fi].kind == CAT_K_TEXT && last) {      /* the last text field takes the rest of the line */
-                char *joined = h->alloc(h->user, line_len + 1, 1);
+                char *joined = take(h, mem, line_len + 1);
                 if (!joined) { local(h, w, "error: out of memory"); return; }
                 size_t jn = 0;
                 for (int j = i; j < count; j++) {
@@ -254,7 +277,7 @@ static void do_parse(const espmod_host *h, const uint8_t *line_in, size_t line_l
             na++; fi++;
         }
     }
-    uint8_t *out = h->alloc(h->user, OUT_MAX, 4);
+    uint8_t *out = take(h, mem, OUT_MAX);
     if (!out) { local(h, w, "error: out of memory"); return; }
     em_cbor_w body;
     em_cbor_init(&body, out, OUT_MAX);
@@ -330,9 +353,9 @@ static void render_item(out_t *o, em_cbor_r *r, const cat_field *f, int depth)
     }
 }
 
-static void do_render(const espmod_host *h, const uint8_t *data, size_t len, em_cbor_w *w)
+static void do_render(const espmod_host *h, mem_t *mem, const uint8_t *data, size_t len, em_cbor_w *w)
 {
-    char *text = h->alloc(h->user, OUT_MAX, 1);
+    char *text = take(h, mem, OUT_MAX);
     if (!text) return;
     out_t o = {text, OUT_MAX, 0};
     int64_t comp = 0, meth = 0;
@@ -395,7 +418,7 @@ static void do_render(const espmod_host *h, const uint8_t *data, size_t len, em_
 }
 
 /* ---- the command line ---- */
-#define M_LINE 3
+#define M_LINE 3                      /* a line typed on the serial port (a packet) */
 
 /* The bytes of the item stored under `key` of a CBOR map. */
 static int raw_value(const uint8_t *map, size_t len, uint64_t key, const uint8_t **p, size_t *n)
@@ -431,14 +454,6 @@ static void render_list(out_t *o, const uint8_t *data, size_t len, const char *r
     }
 }
 
-static size_t setting(const espmod_host *h, const char *key, char *buf, size_t cap)
-{
-    size_t n = 0;
-    if (h->get_setting(h->user, (const uint8_t *)key, em_strlen(key), (uint8_t *)buf, cap - 1, &n) != 0) n = 0;
-    buf[n] = 0;
-    return n;
-}
-
 static int word_is(const tok_t *t, const char *w) { return t->n == em_strlen(w) && same(t->s, w, t->n); }
 
 static void error_rc(out_t *o, const char *what, int rc)
@@ -446,45 +461,132 @@ static void error_rc(out_t *o, const char *what, int rc)
     puts_(o, "error: "); puts_(o, what); puts_(o, " failed: "); putn(o, rc); put(o, "\n", 1);
 }
 
-/* `wifi ssid=NAME psk=SECRET` keeps the network in this module's settings (never in an image); `wifi start` joins it
- * (empty ssid: the flash network), `wifi` shows the state, `wifi stop` leaves. */
+/* `heap`: free memory, from heap_info (bytes) */
+static void cmd_heap(const espmod_host *h, const tok_t *t, int count, out_t *o)
+{
+    if (count > 1) {            /* `heap regions|blocks|tasks|trace start|trace dump|trace stop`: printed to the device log */
+        int kind = word_is(&t[1], "regions") ? 0 : word_is(&t[1], "blocks") ? 1 : word_is(&t[1], "tasks") ? 2 :
+                   (word_is(&t[1], "trace") && count > 2) ? (word_is(&t[2], "start") ? 3 : word_is(&t[2], "dump") ? 4 : word_is(&t[2], "stop") ? 5 : -1) : -1;
+        if (kind < 0) { puts_(o, "error: heap [regions|blocks|tasks|trace start|dump|stop]\n"); return; }
+        int rc = h->heap_dump(h->user, kind);
+        if (rc) error_rc(o, "heap", rc); else puts_(o, "ok (in the device log)\n");
+        return;
+    }
+    uint8_t info[64];
+    int n = h->heap_info(h->user, info, sizeof(info));
+    if (n < 0) { error_rc(o, "heap", n); return; }
+    for (int k = 0; k < 6; k++) {                 /* (no table of pointers: a module image has no relocations) */
+        int64_t v = 0;
+        em_cbor_get_int(info, (size_t)n, (uint64_t)k + 1, &v);
+        puts_(o, k == 0 ? "free=" : k == 1 ? " largest=" : k == 2 ? " min_free=" : k == 3 ? " total=" : k == 4 ? " internal_free=" : " internal_largest=");
+        putn(o, v);
+    }
+    puts_(o, "\n");
+}
+
+/* `nv KEY` shows a device setting, `nv KEY=VALUE` sets it, `nv KEY=` restores the default (nv: the application answers for its names) */
+static void cmd_nv(const espmod_host *h, const tok_t *t, int count, out_t *o)
+{
+    if (count != 2) { puts_(o, "error: nv KEY | nv KEY=VALUE | nv KEY=\n"); return; }
+    size_t eq = 0;
+    while (eq < t[1].n && t[1].s[eq] != '=') eq++;
+    const int write = eq < t[1].n;
+    uint8_t val[48];
+    int rc = h->nv(h->user, (const uint8_t *)t[1].s, eq, write ? (const uint8_t *)t[1].s + eq + 1 : 0, write ? t[1].n - eq - 1 : 0, val, sizeof(val));
+    if (rc == ESPMOD_ERR_NOTFOUND && !write) { put(o, t[1].s, eq); puts_(o, " is unknown or not set\n"); return; }
+    if (rc < 0) { error_rc(o, "nv", rc); return; }
+    put(o, t[1].s, eq);
+    if (write) { puts_(o, write && t[1].n == eq + 1 ? " restored to the default (applies at the next start)\n" : " set (applies at the next start)\n"); return; }
+    puts_(o, "="); put(o, (const char *)val, (size_t)rc); puts_(o, "\n");
+}
+
+/* `wifi scan`: one line per network in range, strongest first (wifi_scan: the first call starts it, a later one has the list) */
+static void wifi_scan_list(const espmod_host *h, out_t *o)
+{
+    uint8_t buf[1024];
+    int n = h->wifi_scan(h->user, buf, sizeof(buf));
+    if (n == ESPMOD_ERR_BUSY) { puts_(o, "scanning; run `wifi scan` again in a few seconds\n"); return; }
+    if (n < 0) { error_rc(o, "wifi scan", n); return; }
+    em_cbor_r r;
+    em_cbor_item arr;
+    em_cbor_reader(&r, buf, (size_t)n);
+    if (em_cbor_next(&r, &arr) || arr.type != EM_CBOR_ARRAY) { puts_(o, "error: bad scan answer\n"); return; }
+    for (size_t i = 0; i < arr.n; i++) {
+        const uint8_t *entry = r.p;
+        em_cbor_r skip = r;
+        if (em_cbor_skip(&skip)) break;
+        const size_t elen = (size_t)(skip.p - entry);
+        const uint8_t *name, *bssid;
+        size_t nn, bn;
+        int64_t rssi = 0, ch = 0, auth = 0;
+        em_cbor_get_str(entry, elen, 1, EM_CBOR_BYTES, &name, &nn);
+        em_cbor_get_int(entry, elen, 3, &rssi);
+        em_cbor_get_int(entry, elen, 4, &ch);
+        em_cbor_get_int(entry, elen, 5, &auth);
+        puts_(o, "ssid=\""); put(o, (const char *)name, nn); puts_(o, "\" ch="); putn(o, ch);
+        puts_(o, " rssi="); putn(o, rssi); puts_(o, " auth="); putn(o, auth);
+        if (em_cbor_get_str(entry, elen, 2, EM_CBOR_BYTES, &bssid, &bn) == 0 && bn == 6) {
+            char hex[17 + 7] = " bssid=";
+            for (int k = 0; k < 6; k++) {
+                hex[7 + k * 3] = "0123456789abcdef"[bssid[k] >> 4];
+                hex[8 + k * 3] = "0123456789abcdef"[bssid[k] & 15];
+                if (k < 5) hex[9 + k * 3] = ':';
+            }
+            put(o, hex, 7 + 17);
+        }
+        put(o, "\n", 1);
+        r = skip;
+    }
+}
+
+/* `wifi ssid=NAME psk=SECRET` stores the device's network (wifi_config: esp-wifi-loader's settings, never an image; both in
+ * one line, `psk=` alone keeps the name, an empty `ssid=` clears it); `wifi start` joins it if a scan sees it, else the flash
+ * network; `wifi` shows the state; `wifi stop` leaves. The network is optional: installs work without it. */
 static void cmd_wifi(const espmod_host *h, const tok_t *t, int count, out_t *o)
 {
     if (!(h->features & ESPMOD_FEAT_WIFI)) { puts_(o, "error: this host has no Wi-Fi\n"); return; }
+    uint8_t info[128];
+    int n = h->wifi_info(h->user, info, sizeof(info));
+    const uint8_t *text; size_t tn;
+    char ssid[40], psk[72];
+    size_t sn = 0, pn = 0;
+    int set_ssid = 0, set_psk = 0;
+    if (n > 0 && em_cbor_get_str(info, (size_t)n, 5, EM_CBOR_TEXT, &text, &tn) == 0 && tn < sizeof(ssid)) { em_copy(ssid, text, tn); sn = tn; }
     for (int i = 1; i < count; i++) {
-        int rc;
-        if (word_is(&t[i], "stop")) {
+        int rc = 0;
+        if (word_is(&t[i], "scan")) {
+            wifi_scan_list(h, o);
+            return;
+        } else if (word_is(&t[i], "stop")) {
             rc = h->wifi_stop(h->user);
         } else if (word_is(&t[i], "start")) {
-            char ssid[40], psk[72];
-            size_t sn = setting(h, "ssid", ssid, sizeof(ssid)), pn = setting(h, "psk", psk, sizeof(psk));
-            rc = h->wifi_start(h->user, (const uint8_t *)ssid, sn, (const uint8_t *)psk, pn);
+            rc = h->wifi_start(h->user, (const uint8_t *)"", 0, (const uint8_t *)"", 0);
         } else {
             size_t eq = 0;
             while (eq < t[i].n && t[i].s[eq] != '=') eq++;
-            const char *key = eq == 4 && same(t[i].s, "ssid", 4) ? "ssid" : eq == 3 && same(t[i].s, "psk", 3) ? "psk" : 0;
-            if (!key || eq == t[i].n || !(h->features & ESPMOD_FEAT_SETTINGS)) {
-                puts_(o, "error: wifi [ssid=NAME] [psk=SECRET] [start|stop] (empty value clears)\n");
-                return;
-            }
-            rc = h->set_setting(h->user, (const uint8_t *)key, em_strlen(key), (const uint8_t *)t[i].s + eq + 1, t[i].n - eq - 1);
+            const size_t vn = eq < t[i].n ? t[i].n - eq - 1 : 0;
+            if (eq == 4 && same(t[i].s, "ssid", 4) && vn < sizeof(ssid)) { em_copy(ssid, t[i].s + eq + 1, vn); sn = vn; set_ssid = 1; }
+            else if (eq == 3 && same(t[i].s, "psk", 3) && vn < sizeof(psk)) { em_copy(psk, t[i].s + eq + 1, vn); pn = vn; set_psk = 1; }
+            else { puts_(o, "error: wifi [ssid=NAME] [psk=SECRET] [start|stop] (empty value clears)\n"); return; }
         }
         if (rc) { error_rc(o, "wifi", rc); return; }
     }
-    uint8_t info[96];
-    int n = h->wifi_info(h->user, info, sizeof(info));
+    if (set_ssid || set_psk) {
+        int rc = h->wifi_config(h->user, (const uint8_t *)ssid, sn, (const uint8_t *)psk, set_ssid && !set_psk ? 0 : pn);
+        if (rc) { error_rc(o, "wifi", rc); return; }
+    }
+    n = h->wifi_info(h->user, info, sizeof(info));
     int64_t state = 0, rssi = 0;
-    const uint8_t *text; size_t tn;
     if (n > 0) em_cbor_get_int(info, (size_t)n, 1, &state);
     puts_(o, "state="); puts_(o, state == 2 ? "up" : state == 1 ? "joining" : "off");
     if (state == 2 && em_cbor_get_str(info, (size_t)n, 2, EM_CBOR_TEXT, &text, &tn) == 0) { puts_(o, " ssid=\""); put(o, (const char *)text, tn); puts_(o, "\""); }
     if (state == 2 && em_cbor_get_str(info, (size_t)n, 3, EM_CBOR_TEXT, &text, &tn) == 0) { puts_(o, " ip="); put(o, (const char *)text, tn); }
     if (state == 2 && em_cbor_get_int(info, (size_t)n, 4, &rssi) == 0) { puts_(o, " rssi="); putn(o, rssi); }
-    char ssid[40], psk[72];
-    size_t sn = setting(h, "ssid", ssid, sizeof(ssid));
     puts_(o, " saved_ssid=\"");
-    if (sn) put(o, ssid, sn); else puts_(o, "(flash network)");
-    puts_(o, setting(h, "psk", psk, sizeof(psk)) ? "\" psk=set\n" : "\" psk=unset\n");
+    if (n > 0 && em_cbor_get_str(info, (size_t)n, 5, EM_CBOR_TEXT, &text, &tn) == 0) put(o, (const char *)text, tn); else puts_(o, "(flash network)");
+    em_cbor_r pv; em_cbor_item pit;
+    const int psk_set = n > 0 && em_cbor_get(info, (size_t)n, 6, &pv) == 0 && em_cbor_next(&pv, &pit) == 0 && pit.type == EM_CBOR_BOOL && pit.arg;
+    puts_(o, psk_set ? "\" psk=set\n" : "\" psk=unset\n");
 }
 
 /* `loader start NAME`: the upload server, announcing that this device wants the package NAME; `loader stop` */
@@ -500,74 +602,127 @@ static void cmd_loader(const espmod_host *h, const tok_t *t, int count, out_t *o
     else puts_(o, "ok\n");
 }
 
-/* `NAME.METHOD key=value`: the request payload by the catalog, the module called, its answer as text */
-static void cmd_call(const espmod_host *h, const uint8_t *line, size_t n, out_t *o)
-{
-    uint8_t *req = h->alloc(h->user, RESP_MAX, 4);
-    uint8_t *ans = h->alloc(h->user, RESP_MAX, 4);
-    uint8_t *tmp = h->alloc(h->user, RESP_MAX, 4);
-    if (!req || !ans || !tmp) { puts_(o, "error: out of memory\n"); return; }
-    em_cbor_w w;
-    em_cbor_init(&w, req, RESP_MAX);
-    do_parse(h, line, n, &w);
-    int len = em_cbor_done(&w);
-    const uint8_t *text; size_t tn;
-    if (len <= 0) { puts_(o, "error: bad request\n"); return; }
-    if (em_cbor_get_str(req, (size_t)len, 12, EM_CBOR_TEXT, &text, &tn) == 0) {     /* answered by the parser */
-        put(o, (const char *)text, tn);
-        if (tn) put(o, "\n", 1);
-        return;
-    }
-    int64_t comp = 0, meth = 0;
-    const uint8_t *fields; size_t fn;
-    if (em_cbor_get_int(req, (size_t)len, 1, &comp) || em_cbor_get_int(req, (size_t)len, 2, &meth) ||
-        raw_value(req, (size_t)len, 5, &fields, &fn)) { puts_(o, "error: bad request\n"); return; }
-    size_t an = 0;
-    int rc = (h->features & ESPMOD_FEAT_CALL) ? h->call(h->user, (int)comp, (int)meth, fields, fn, ans, RESP_MAX, &an) : ESPMOD_ERR_UNSUPPORTED;
+/* The console waits for nothing. A line is a packet, the request to a module is a packet with an id, and what comes back is
+ * whatever packets the module sends, whenever it sends them: one answer, several lines, a stream, a message with the same id
+ * as an earlier request, an event nobody asked for. Each is printed as it arrives, like a background app writing to a terminal
+ * or the replies of a multiplexed connection. The only memory is the next id. */
+typedef struct {
+    uint32_t next_id;
+} cstate_t;
 
+static void render_answer(const espmod_host *h, mem_t *mem, int64_t comp, int64_t meth, const uint8_t *res, size_t rn, const char *err, out_t *o)
+{
+    uint8_t *tmp = take(h, mem, RESP_MAX);
+    uint8_t *out = take(h, mem, RESP_MAX);
+    if (!tmp || !out) { puts_(o, "error: out of memory\n"); return; }
     /* the answer for render: {1: component, 2: method, 6: result} or {7: error} */
+    em_cbor_w w;
     em_cbor_init(&w, tmp, RESP_MAX);
     em_cbor_map(&w, 3);
     em_cbor_uint(&w, 1); em_cbor_uint(&w, (uint64_t)comp);
     em_cbor_uint(&w, 2); em_cbor_uint(&w, (uint64_t)meth);
-    if (rc == 0 || rc == ESPMOD_ERR_SIZE) { em_cbor_uint(&w, 6); if (an) em_cbor_put(&w, ans, an); else em_cbor_map(&w, 0); }
-    else {
-        static const char notfound[] = "module not running (start it)";
-        em_cbor_uint(&w, 7);
-        em_cbor_text(&w, rc == ESPMOD_ERR_NOTFOUND ? notfound : "request failed", rc == ESPMOD_ERR_NOTFOUND ? sizeof(notfound) - 1 : 14);
-    }
+    if (err) { em_cbor_uint(&w, 7); em_cbor_text(&w, err, em_strlen(err)); }
+    else { em_cbor_uint(&w, 6); if (rn) em_cbor_put(&w, res, rn); else em_cbor_map(&w, 0); }
     int tl = em_cbor_done(&w);
-    uint8_t *out = h->alloc(h->user, RESP_MAX, 4);
-    if (tl <= 0 || !out) { puts_(o, "error: answer too large\n"); return; }
+    if (tl <= 0) { puts_(o, "error: answer too large\n"); return; }
     em_cbor_w r;
     em_cbor_init(&r, out, RESP_MAX);
-    do_render(h, tmp, (size_t)tl, &r);
+    do_render(h, mem, tmp, (size_t)tl, &r);
     int rl = em_cbor_done(&r);
+    const uint8_t *text; size_t tn;
     if (rl > 0 && em_cbor_get_str(out, (size_t)rl, 1, EM_CBOR_TEXT, &text, &tn) == 0) put(o, (const char *)text, tn);
 }
 
-/* One line in, the text answer out (o). */
-static void do_line(const espmod_host *h, const uint8_t *line_in, size_t n, out_t *o)
+/* The manifest of the installed module (abi/API.md, module_manifest) is the module's own word on which methods it has; when
+ * it has one, a method it does not list is refused here instead of being sent. No manifest, no such slot or a manifest too
+ * large for the buffer: the catalog's word stands. */
+static int manifest_allows(const espmod_host *h, mem_t *mem, int64_t component, int64_t method, out_t *o)
 {
-    char *line = h->alloc(h->user, n + 1, 1);
-    tok_t *t = h->alloc(h->user, sizeof(tok_t) * MAX_TOKENS, 8);
-    if (!line || !t) { puts_(o, "error: out of memory\n"); return; }
+    const char *name = 0;
+    for (int i = 0; i < CAT_COMPS; i++) if (cat_comps[i].id == component) name = cname(cat_comps[i].name);
+    if (!name || !(h->features & ESPMOD_FEAT_MODULES) || !ESPMOD_HOST_HAS(h, module_manifest)) return 1;
+    uint8_t *m = take(h, mem, 1024);
+    if (!m) return 1;
+    int n = h->module_manifest(h->user, (const uint8_t *)name, em_strlen(name), m, 1024);
+    em_cbor_r r;
+    em_cbor_item it;
+    if (n <= 0 || em_cbor_get(m, (size_t)n, 3, &r) || em_cbor_next(&r, &it) || it.type != EM_CBOR_ARRAY) return 1;
+    for (size_t i = 0; i < it.n; i++) {
+        em_cbor_r start = r;                                       /* {1: id, 2: name, 3: request fields, 4: response fields} */
+        int64_t id = -1;
+        if (em_cbor_skip(&r)) return 1;
+        if (em_cbor_get_int(start.p, start.len - r.len, 1, &id) == 0 && id == method) return 1;
+    }
+    puts_(o, "error: "); puts_(o, name); puts_(o, " does not list method "); putn(o, method); puts_(o, " in its manifest\n");
+    return 0;
+}
+
+/* `NAME.METHOD key=value`: the request payload by the catalog, sent as a packet to the module. 1 when it was sent (the answer
+ * comes later); 0 when `o` already has the text (a syntax error, or nobody to send to). */
+static int cmd_call(const espmod_host *h, mem_t *mem, cstate_t *st, const uint8_t *line, size_t n, out_t *o)
+{
+    uint8_t *req = take(h, mem, RESP_MAX);
+    if (!req) { puts_(o, "error: out of memory\n"); return 0; }
+    em_cbor_w w;
+    em_cbor_init(&w, req, RESP_MAX);
+    do_parse(h, mem, line, n, &w);
+    int len = em_cbor_done(&w);
+    const uint8_t *text; size_t tn;
+    if (len <= 0) { puts_(o, "error: bad request\n"); return 0; }
+    if (em_cbor_get_str(req, (size_t)len, 12, EM_CBOR_TEXT, &text, &tn) == 0) {     /* answered by the parser */
+        put(o, (const char *)text, tn);
+        return 0;
+    }
+    int64_t comp = 0, meth = 0;
+    const uint8_t *fields; size_t fn;
+    if (em_cbor_get_int(req, (size_t)len, 1, &comp) || em_cbor_get_int(req, (size_t)len, 2, &meth) ||
+        raw_value(req, (size_t)len, 5, &fields, &fn)) { puts_(o, "error: bad request\n"); return 0; }
+
+    if (!manifest_allows(h, mem, comp, meth, o)) return 0;
+    uint32_t pkt = 0;
+    uint8_t *window = 0;
+    size_t room = 0;
+    if (h->pkt_alloc(h->user, &pkt) != 0) { puts_(o, "error: no packet\n"); return 0; }
+    if (h->pkt_buf(h->user, pkt, &window, &room) != 0 || fn > room) {
+        h->pkt_free(h->user, pkt);
+        puts_(o, "error: request too long\n");
+        return 0;
+    }
+    em_copy(window, fields, fn);
+    if (++st->next_id == 0) st->next_id = 1;
+    int rc = h->send(h->user, pkt, fn, (uint32_t)comp, (int)comp, (int)meth, st->next_id);
+    if (rc == ESPMOD_ERR_NOTFOUND) { puts_(o, "error: module not running (start it)\n"); return 0; }
+    if (rc == ESPMOD_ERR_BUSY) { puts_(o, "error: busy (the module has no room for it yet)\n"); return 0; }
+    if (rc) { error_rc(o, "send", rc); return 0; }
+    return 1;
+}
+
+/* One line in; the text goes to the out_t. Returns 1 when the answer is still to come. */
+static int do_line(const espmod_host *h, mem_t *mem, cstate_t *st, const uint8_t *line_in, size_t n, out_t *o)
+{
+    char *line = take(h, mem, n + 1);
+    tok_t *t = take(h, mem, sizeof(tok_t) * MAX_TOKENS);
+    if (!line || !t) { puts_(o, "error: out of memory\n"); return 0; }
     em_copy(line, line_in, n);
     int count = tokenize(line, n, t);
-    if (count < 0) { puts_(o, "error: too many words\n"); return; }
-    if (count == 0) return;
-    uint8_t *buf = h->alloc(h->user, RESP_MAX, 4);
-    if (!buf) { puts_(o, "error: out of memory\n"); return; }
+    if (count < 0) { puts_(o, "error: too many words\n"); return 0; }
+    if (count == 0) return 0;
+    uint8_t *buf = take(h, mem, RESP_MAX);
+    if (!buf) { puts_(o, "error: out of memory\n"); return 0; }
     int len;
     if (word_is(&t[0], "help")) {
         help_text(o);
+    } else if (word_is(&t[0], "nv")) {
+        if (ESPMOD_HOST_HAS(h, nv)) cmd_nv(h, t, count, o); else puts_(o, "error: this host has no device settings\n");
+    } else if (word_is(&t[0], "heap")) {
+        cmd_heap(h, t, count, o);
     } else if (word_is(&t[0], "wifi")) {
         cmd_wifi(h, t, count, o);
     } else if (word_is(&t[0], "loader")) {
         cmd_loader(h, t, count, o);
     } else if (word_is(&t[0], "status") || word_is(&t[0], "events") || word_is(&t[0], "reset") ||
                word_is(&t[0], "start") || word_is(&t[0], "stop")) {
-        if (!(h->features & ESPMOD_FEAT_MODULES)) { puts_(o, "error: this host has no module control\n"); return; }
+        if (!(h->features & ESPMOD_FEAT_MODULES)) { puts_(o, "error: this host has no module control\n"); return 0; }
         if (word_is(&t[0], "status")) {
             len = h->modules_info(h->user, buf, RESP_MAX);
             if (len > 0) render_list(o, buf, (size_t)len, "slot");
@@ -584,8 +739,8 @@ static void do_line(const espmod_host *h, const uint8_t *line_in, size_t n, out_
             if (word_is(&t[0], "stop")) {
                 rc = h->module_stop(h->user, (const uint8_t *)t[1].s, t[1].n);
             } else {                       /* the rest of the line is the start request */
-                char *rest = h->alloc(h->user, n + 1, 1);
-                if (!rest) { puts_(o, "error: out of memory\n"); return; }
+                char *rest = take(h, mem, n + 1);
+                if (!rest) { puts_(o, "error: out of memory\n"); return 0; }
                 size_t rn = 0;
                 for (int j = 2; j < count; j++) {
                     if (j > 2) rest[rn++] = ' ';
@@ -599,43 +754,73 @@ static void do_line(const espmod_host *h, const uint8_t *line_in, size_t n, out_
             else puts_(o, "ok\n");
         }
     } else {
-        cmd_call(h, line_in, n, o);
+        if (cmd_call(h, mem, st, line_in, n, o)) return 1;
     }
     if (!o->len) puts_(o, "ok\n");
     else if (o->p[o->len - 1] != '\n') put(o, "\n", 1);
+    return 0;
 }
 
-ESPMOD_HANDLER(console)(const espmod_host *h, void *state, const espmod_call *c)
+static void say(const espmod_host *h, const out_t *o)
 {
-    (void)state;
+    if (o->len && (h->features & ESPMOD_FEAT_SERIAL)) (void)h->serial_write(h->user, (const uint8_t *)o->p, o->len);
+}
+
+static int handle(const espmod_host *h, mem_t *mem, void *state, const espmod_call *c)
+{
+    cstate_t *st = state;
     if (c->component == ESPMOD_HOST_COMPONENT) {
         if (c->method == ESPMOD_HOST_START && (h->features & ESPMOD_FEAT_SERIAL)) (void)h->serial_open(h->user, C_CONSOLE, M_LINE);
         else if (c->method == ESPMOD_HOST_STOP && (h->features & ESPMOD_FEAT_SERIAL)) (void)h->serial_close(h->user);
         return ESPMOD_RET_CONTINUE;
     }
-    if (c->component != C_CONSOLE || !(c->flags & 1)) return ESPMOD_RET_CONTINUE;
-    if (c->method == M_LINE) {
-        char *text = h->alloc(h->user, OUT_MAX, 1);
-        if (!text) return ESPMOD_RET_CONTINUE;
-        out_t o = {text, OUT_MAX, 0};
-        do_line(h, c->data, c->len, &o);
-        h->respond(h->user, (const uint8_t *)o.p, o.len);
+    /* a message from a module: print it as the answer to (component, method) it carries; it may be one of many */
+    if (c->pkt && c->from != ESPMOD_ADDR_MAIN && !(c->component == C_CONSOLE && c->method == M_LINE)) {
+        char *text = take(h, mem, OUT_MAX);
+        if (text) {
+            out_t o = {text, OUT_MAX, 0};
+            render_answer(h, mem, c->component, c->method, c->data, c->len, 0, &o);
+            if (!o.len) puts_(&o, "ok");
+            if (o.p[o.len - 1] != '\n') put(&o, "\n", 1);
+            say(h, &o);
+        }
         return ESPMOD_RET_CONTINUE;
     }
-    uint8_t *buf = h->alloc(h->user, RESP_MAX, 4);
+    if (c->component != C_CONSOLE) return ESPMOD_RET_CONTINUE;
+    if (c->method == M_LINE && c->pkt) {
+        char *text = take(h, mem, OUT_MAX);
+        if (!text) {                    /* memory is refused: say so, the reply cannot be built */
+            if (h->features & ESPMOD_FEAT_SERIAL) (void)h->serial_write(h->user, (const uint8_t *)"error: out of memory\n", 21);
+            return ESPMOD_RET_CONTINUE;
+        }
+        out_t o = {text, OUT_MAX, 0};
+        if (do_line(h, mem, st, c->data, c->len, &o)) return ESPMOD_RET_CONTINUE;      /* what the module says comes as packets */
+        say(h, &o);
+        return ESPMOD_RET_CONTINUE;
+    }
+    if (!(c->flags & 1)) return ESPMOD_RET_CONTINUE;
+    uint8_t *buf = take(h, mem, RESP_MAX);
     if (!buf) return ESPMOD_RET_CONTINUE;
     em_cbor_w w;
     em_cbor_init(&w, buf, RESP_MAX);
     if (c->method == M_PARSE) {
         const uint8_t *line; size_t n;
-        if (em_cbor_get_str(c->data, c->len, 1, EM_CBOR_TEXT, &line, &n) == 0) do_parse(h, line, n, &w);
+        if (em_cbor_get_str(c->data, c->len, 1, EM_CBOR_TEXT, &line, &n) == 0) do_parse(h, mem, line, n, &w);
         else local(h, &w, "error: no line");
     } else if (c->method == M_RENDER) {
-        do_render(h, c->data, c->len, &w);
+        do_render(h, mem, c->data, c->len, &w);
     } else {
         return ESPMOD_RET_CONTINUE;
     }
     int n = em_cbor_done(&w);
     if (n > 0) h->respond(h->user, buf, (size_t)n);
     return ESPMOD_RET_CONTINUE;
+}
+
+ESPMOD_HANDLER(console)(const espmod_host *h, void *state, const espmod_call *c)
+{
+    mem_t m = {{0}, 0};
+    const int rc = handle(h, &m, state, c);
+    give_back(h, &m);        /* what the call took (text buffers, tokens) goes back whether it ended early or not */
+    return rc;
 }

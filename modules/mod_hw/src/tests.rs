@@ -80,7 +80,7 @@ impl Rig {
 
     fn call(&mut self, method: i32, value: i32, data: &[u8], request: bool) -> i32 {
         let hw = unsafe { Hw::new(&self.host) }.unwrap();
-        let view = CallView { component: COMPONENT, method, value, flags: request as u32, data };
+        let view = CallView { component: COMPONENT, method, value, flags: request as u32, data, pkt: 0, from: 0, id: 0 };
         self.module.handle(&hw, &view)
     }
 }
@@ -217,7 +217,7 @@ fn the_host_stop_releases_everything() {
     let mut rig = Rig::new(0);
     rig.call(M_BUTTON, 0, &[], true);
     let hw = unsafe { Hw::new(&rig.host) }.unwrap();
-    let view = CallView { component: 0, method: espmod_abi::HOST_STOP as i32, value: 0, flags: 0, data: &[] };
+    let view = CallView { component: 0, method: espmod_abi::HOST_STOP as i32, value: 0, flags: 0, data: &[], pkt: 0, from: 0, id: 0 };
     assert_eq!(rig.module.handle(&hw, &view), 0);
     assert_eq!(rig.world.borrow().unregistered, [0]);
 }

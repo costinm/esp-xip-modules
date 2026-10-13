@@ -16,6 +16,20 @@ The device test module (see `docs/testing.md`). Start it with a mode (`start tes
 |---:|---|---|---|
 | 1 | `value` | `string` | |
 
+## 20. `pkt_echo` — send a packet back to its sender, unchanged but for the first byte
+
+The packet itself goes back (no copy): `send(call.pkt, call.len, call.from, 2, 21, call.id)`. The answer is the call `21`.
+
+## 22. `pkt_keep` — keep the packet past the call
+
+Only for the tests of the packet rules: a kept packet that is still held when the module ends is counted as a leak.
+
+## 23. `pkt_drop` — give the kept packet back
+
+## 24. `mem_leak` — take memory and do not give it back
+
+Only for the tests of the managed heap: the host frees the block when the module ends and reports the stop as failed (`ERR_LEAK`).
+
 ## 2. `info` — how often the handler ran
 
 ### Response

@@ -1,0 +1,40 @@
+[package]
+name = "esp-mod-rtest"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The device test of the esp-xip-modules ABI in Rust: the twin of mod_test (C), in the same slot"
+publish = false
+
+# Standalone: built by tools/mkmod.py --cargo (scripts/build.sh), not as part of a cargo workspace.
+[workspace]
+
+[dependencies]
+espmod-abi = { path = "../../crates/espmod-abi", features = ["global-alloc", "allocator-api"] }
+
+[package.metadata]
+# Options for tools/mkmod.py (scripts/build.sh). The slot is mod_test's: install one or the other.
+mkmod = "--slot test --stack 4096 --state 64"
+
+[features]
+flat-image = []
+# a static library for tests/host/test_rtest.c (a panic handler, since there is no std)
+sim = []
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "mod_rtest"
+required-features = ["flat-image"]
+
+[profile.release]
+codegen-units = 1
+debug = false
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

@@ -4,7 +4,9 @@ The text interface of a device, and the only place text is made or read. It take
 (`serial_open`): each line typed arrives as a request (method 3, the line as bytes) and the text it answers is printed.
 A line is one of the commands below or `component.method key=value ...` (the spelling of the ssh-mesh `mesh` CLI), which
 becomes the tagged-CBOR request of the module `component` (names and tags from the `API.md` files of the modules,
-`tools/gen_catalog.py`), is sent with the host's `call`, and the answer is turned back into text. `parse` (1) and `render`
+`tools/gen_catalog.py`), and is sent as a packet with an id. Nothing waits for an answer: whatever packets modules send to the
+console, one or many, answers or not, are printed as they arrive. Before sending, the console asks the host for the module's
+**manifest** (`module_manifest`: the methods the installed image says it has) and refuses a method that is not in it. `parse` (1) and `render`
 (2) below are the two halves of that, for a caller that has its own transport.
 
 Commands: `status` (the slots), `start NAME [TEXT]`, `stop NAME`, `events` (the last events modules emitted), `reset`,
@@ -67,6 +69,7 @@ value looks like (`name=123` stays text when `name` is a `string`).
 | 8 | `ms` | `uint` | Duration of the last run. |
 | 9 | `stack_free` | `uint` | Worker stack high-water mark. |
 | 10 | `check` | `int` | Result of the last start attempt's image check. |
+| 11 | `reboot` | `bool` | The module stopped with memory it had not freed: it cannot be replaced until the device restarts. |
 
 ## `event` — one event of a module (`events`; the host's `events_info`)
 

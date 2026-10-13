@@ -5,7 +5,7 @@
  *
  * The start request picks the mode:
  *   (empty) or "selftest"  every check that needs no wiring; finishes with 0 when all pass
- *   "serve"                stay; requests are echoed as an event and answered with respond()
+ *   "serve"                stay; requests are echoed as an event and answered with respond(); packets are echoed, kept, dropped
  *   "alarm"                one-shot, periodic and cancelled alarms
  *   "gpio A B"             pins A and B jumpered: levels, pull, and an interrupt on B when A toggles
  *   "spi SCK MISO MOSI CS [BUS]" a loopback wire from MOSI to MISO (BUS 2 or 3, default 2): spi_transfer returns what was sent
@@ -16,6 +16,7 @@
 #define EV_CHECK 0x7e00
 #define EV_SUMMARY 0x7eff
 #define EV_ECHO 0x7e10
+#define EV_PKT 0x7e11
 
 /* This module's own component and methods (the pair main or the module itself chose; see abi/API.md). */
 #define C_TEST 2
@@ -26,13 +27,18 @@
 #define M_IRQ 12      /* interrupt of pin B */
 #define M_MASKED 13   /* alarm: the masked interrupt stayed quiet */
 #define M_TIMEOUT 14  /* alarm: the interrupt never came */
+#define M_PKT_ECHO 20  /* a packet: flip its first byte and send it back to its sender, the same packet (no copy) */
+#define M_PKT_REPLY 21 /* the answer to M_PKT_ECHO */
+#define M_PKT_KEEP 22  /* a packet: keep it past the call */
+#define M_PKT_DROP 23  /* give the kept packet back */
+#define M_MEM_LEAK 24  /* take a block of memory and do not give it back (the host must notice at stop) */
 
 typedef struct {
     uint8_t mode, done_oneshot, irq_seen;
     uint16_t n;
     int16_t pass, fail;
     int32_t a, b, periodic;
-    uint32_t ticks, calls;
+    uint32_t ticks, calls, kept;
     uint64_t t0;
 } state_t;
 _Static_assert(sizeof(state_t) <= 64, "state_t must fit the 64 bytes asked for with mkmod: --state");
@@ -46,7 +52,7 @@ static void check(state_t *st, const espmod_host *h, const char *name, int ok, i
     if (len > 28) len = 28;
     em_copy(line, name, len); n = len;
     if (ok) { em_copy(line + n, " ok", 4); st->pass++; }
-    else { em_copy(line + n, " FAIL ", 6); n += 6; em_itoa(line + n, code); st->fail++; }
+    else { em_copy(line + n, " FAIL ", 6); n += 6; em_itoa(line + n, code); st->fail++; em_log(h, line); }
     em_emit_text(h, (uint16_t)(EV_CHECK + st->n++), line);
 }
 
@@ -86,6 +92,58 @@ static void cbor_checks(state_t *st, const espmod_host *h)
     check(st, h, "cbor-overflow", em_cbor_done(&w) == ESPMOD_ERR_SIZE, 0);
 }
 
+/* Packets: a handle is valid until the packet leaves, a stale or zero handle is refused, `send` consumes the handle even when
+ * it fails, a module holds only a few. */
+static void pkt_checks(state_t *st, const espmod_host *h)
+{
+    uint32_t headroom = 0, max = 0, p = 0;
+    check(st, h, "pkt-info", h->pkt_info(h->user, &headroom, &max) == 0 && headroom >= ESPMOD_PKT_HEADROOM && max >= 1, (int)max);
+    int rc = h->pkt_alloc(h->user, &p);
+    check(st, h, "pkt-alloc", rc == 0 && p != 0, rc);
+    uint8_t *buf = 0; size_t room = 0;
+    rc = h->pkt_buf(h->user, p, &buf, &room);
+    check(st, h, "pkt-buf", rc == 0 && buf && room >= 1 && room <= ESPMOD_PKT_MAX, rc);
+    if (buf && room >= 8) { for (int i = 0; i < 8; i++) buf[i] = (uint8_t)(0xa0 + i); }
+    check(st, h, "pkt-write", buf && room >= 8 && buf[7] == 0xa7, 0);
+    check(st, h, "pkt-free", h->pkt_free(h->user, p) == 0, 0);
+    check(st, h, "pkt-stale-free", h->pkt_free(h->user, p) == ESPMOD_ERR_ARG, 0);
+    check(st, h, "pkt-stale-buf", h->pkt_buf(h->user, p, &buf, &room) == ESPMOD_ERR_ARG, 0);
+    check(st, h, "pkt-zero", h->pkt_free(h->user, 0) == ESPMOD_ERR_ARG && h->pkt_keep(h->user, 0) == ESPMOD_ERR_ARG, 0);
+
+    uint32_t q[16];
+    int n = 0;
+    while (n < 16 && h->pkt_alloc(h->user, &q[n]) == 0) n++;
+    rc = n < 16 ? h->pkt_alloc(h->user, &p) : 0;
+    check(st, h, "pkt-quota", n >= 1 && n < 16 && (rc == ESPMOD_ERR_BUSY || rc == ESPMOD_ERR_NOMEM), n);
+    for (int i = 0; i < n; i++) h->pkt_free(h->user, q[i]);
+
+    /* send gives the handle up whether it works or not */
+    rc = h->pkt_alloc(h->user, &p);
+    int rs = h->send(h->user, p, ESPMOD_PKT_MAX + 1, ESPMOD_ADDR_MAIN, C_TEST, M_PKT_REPLY, 1);
+    check(st, h, "pkt-send-big", rc == 0 && rs == ESPMOD_ERR_SIZE && h->pkt_free(h->user, p) == ESPMOD_ERR_ARG, rs);
+    rc = h->pkt_alloc(h->user, &p);
+    rs = h->send(h->user, p, 4, 60000, C_TEST, M_PKT_REPLY, 1);
+    check(st, h, "pkt-send-nowhere", rc == 0 && rs == ESPMOD_ERR_NOTFOUND && h->pkt_free(h->user, p) == ESPMOD_ERR_ARG, rs);
+    rc = h->pkt_alloc(h->user, &p);
+    rs = h->send(h->user, p, 4, ESPMOD_ADDR_MAIN, C_TEST, M_PKT_REPLY, 2);        /* works or finds no hook: either way it is gone */
+    check(st, h, "pkt-send-consumes", rc == 0 && (rs == 0 || rs == ESPMOD_ERR_NOTFOUND) && h->pkt_free(h->user, p) == ESPMOD_ERR_ARG, rs);
+}
+
+/* The managed heap: the host adds up what is taken and given back, the quota is a limit, the balance must be zero at stop. */
+static void mem_checks(state_t *st, const espmod_host *h)
+{
+    uint8_t *a = h->mem_alloc(h->user, 100), *b = h->mem_alloc(h->user, 100);
+    check(st, h, "mem-alloc", a && b && a != b, 0);
+    check(st, h, "mem-align", a && b && (((uintptr_t)a | (uintptr_t)b) & 7) == 0, 0);
+    if (a) { for (int i = 0; i < 100; i++) a[i] = (uint8_t)i; }
+    check(st, h, "mem-rw", a && a[99] == 99, 0);
+    check(st, h, "mem-free", h->mem_free(h->user, a) == 0, 0);
+    check(st, h, "mem-null", h->mem_free(h->user, 0) == ESPMOD_ERR_ARG, 0);
+    check(st, h, "mem-zero", h->mem_alloc(h->user, 0) == 0, 0);
+    check(st, h, "mem-huge", h->mem_alloc(h->user, 1u << 24) == 0, 0);
+    check(st, h, "mem-free-b", h->mem_free(h->user, b) == 0, 0);
+}
+
 static int selftest(state_t *st, const espmod_host *h)
 {
     check(st, h, "abi", h->abi_version == ESPMOD_ABI_VERSION && h->size >= sizeof(*h), (int)h->abi_version);
@@ -93,11 +151,8 @@ static int selftest(state_t *st, const espmod_host *h)
     uint64_t t0 = h->now_ms(h->user);
     check(st, h, "time", h->now_ms(h->user) >= t0, 0);
 
-    uint8_t *a = h->alloc(h->user, 100, 16), *b = h->alloc(h->user, 100, 4);
-    check(st, h, "alloc", a && b && a != b && (((uintptr_t)a) & 15) == 0, 0);
-    if (a) { for (int i = 0; i < 100; i++) a[i] = (uint8_t)i; }
-    check(st, h, "alloc-rw", a && a[99] == 99, 0);
-    check(st, h, "alloc-bad", h->alloc(h->user, 0, 4) == 0 && h->alloc(h->user, 8, 3) == 0, 0);
+    if (h->features & ESPMOD_FEAT_PACKETS) pkt_checks(st, h);
+    if (h->features & ESPMOD_FEAT_MEMORY) mem_checks(st, h);
 
     /* not a request: nothing to answer; connectivity is a plain query */
     check(st, h, "respond-no-request", h->respond(h->user, (const uint8_t *)"x", 1) == ESPMOD_ERR_ARG, 0);
@@ -311,6 +366,21 @@ ESPMOD_HANDLER(test)(const espmod_host *h, void *state, const espmod_call *c)
         if (st->irq_seen) return ESPMOD_RET_CONTINUE;
         check(st, h, "irq-event", 0, -1);
         return finish(st, h);
+    case M_PKT_ECHO:
+        if (c->pkt) {
+            uint8_t *b = 0; size_t room = 0;
+            if (h->pkt_buf(h->user, c->pkt, &b, &room) == 0 && c->len) b[0] = (uint8_t)~b[0];
+            (void)h->send(h->user, c->pkt, c->len, c->from, C_TEST, M_PKT_REPLY, c->id);
+        }
+        return ESPMOD_RET_CONTINUE;
+    case M_PKT_REPLY: em_emit_text(h, EV_PKT, "reply"); return ESPMOD_RET_CONTINUE;
+    case M_PKT_KEEP:
+        if (c->pkt && !st->kept && h->pkt_keep(h->user, c->pkt) == 0) st->kept = c->pkt;
+        return ESPMOD_RET_CONTINUE;
+    case M_MEM_LEAK: (void)h->mem_alloc(h->user, 64); return ESPMOD_RET_CONTINUE;
+    case M_PKT_DROP:
+        if (st->kept) { h->pkt_free(h->user, st->kept); st->kept = 0; }
+        return ESPMOD_RET_CONTINUE;
     default: return request(st, h, c);
     }
 }
