@@ -8,6 +8,14 @@ def num(text):
     return int(text.strip("` "), 0)
 
 
+def _cell(c):
+    """A cell without the backticks of a one-token cell; a link to a type (`[`row[]`](#row)`, the ssh-mesh spelling) is its type."""
+    link = re.fullmatch(r"\[`?(.+?)`?\]\(#[^)]*\)", c)
+    if link:
+        return link.group(1)
+    return c[1:-1] if c.startswith("`") and c.endswith("`") and c.count("`") == 2 else c
+
+
 def tables(lines):
     """Rows of every markdown table in `lines`, each a list of cells without the backticks of one-token cells."""
     rows = []
@@ -16,7 +24,7 @@ def tables(lines):
         if not line.startswith("|") or set(line) <= set("|-: "):
             continue
         cells = [c.strip() for c in line.strip("|").split("|")]
-        rows.append([c[1:-1] if c.startswith("`") and c.endswith("`") and c.count("`") == 2 else c for c in cells])
+        rows.append([_cell(c) for c in cells])
     return rows[1:]   # the header row
 
 
@@ -105,6 +113,8 @@ def _methods(body):
         target = None
         rows = []
         for line in m["lines"] + ["### end"]:
+            if re.match(r"`\w+` fields:\s*$", line):          # a row record (the ssh-mesh spelling): not part of the table above
+                line = "### end"
             if line.startswith("### "):
                 if target is not None:
                     fields = [(int(t), n, ty) for t, n, ty, *_ in tables(rows) if t.isdigit()]
@@ -118,14 +128,27 @@ def _methods(body):
 
 
 def module_types(text):
-    """The `# Types` section of an API.md: {type name: [(tag, field name, type)]}."""
+    """The record types of an API.md: {type name: [(tag, field name, type)]}. Both spellings: the `# Types` section
+    (`## `name``), and a row record under a method (a line "`Name` fields:" and a field table, as in ssh-mesh)."""
     out = {}
     try:
         body = top_text(text, "Types")
     except KeyError:
-        return out
-    for heading, lines in sections(body, 2):
+        body = None
+    for heading, lines in (sections(body, 2) if body is not None else []):
         m = re.match(r"`(\w+)`", heading)
         if m:
             out[m.group(1)] = [(int(t), n, ty) for t, n, ty, *_ in tables(lines) if t.isdigit()]
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"`(\w+)` fields:\s*$", line)
+        if not m:
+            continue
+        rows = []
+        for follower in lines[i + 1:]:
+            if follower.startswith("|"):
+                rows.append(follower)
+            elif rows:
+                break
+        out.setdefault(m.group(1), [(int(t), n, ty) for t, n, ty, *_ in tables(rows) if t.isdigit()])
     return out

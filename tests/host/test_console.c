@@ -81,22 +81,33 @@ static void check_render(const uint8_t *res, size_t rn, int comp, int method, co
     if (strcmp(text, want)) { printf("FAIL render: got \"%s\" want \"%s\"\n", text, want); failures++; }
 }
 
-/* a typed line, as the serial port delivers it: the answer must be exactly (or, for a long one, contain) `want` */
+/* a typed line, as the serial port delivers it: a packet for the console. The answer is what the console writes to the port,
+ * after the packets between it and the module have run. It must be exactly `want` (when it ends with a newline) or contain it. */
+static sim_t *module_sim;
+static void pump(void)
+{
+    for (int i = 0; i < 4; i++) {
+        sim_run(s, 0);
+        if (module_sim) sim_run(module_sim, 0);
+    }
+}
+
 static void check_line(const char *line, const char *want)
 {
-    uint8_t ans[1100];
-    int n = sim_request(s, 20, 3, line, strlen(line), ans, sizeof(ans) - 1);
-    ans[n > 0 ? n : 0] = 0;
+    sim_serial_clear();
+    int rc = sim_send(s, 20, 3, 0, line, strlen(line));
+    pump();
     int exact = strlen(want) && want[strlen(want) - 1] == '\n';
-    if (n < 0 || (exact ? strcmp((char *)ans, want) : !strstr((char *)ans, want))) {
-        printf("FAIL line \"%s\": got \"%s\", want \"%s\"\n", line, n > 0 ? (char *)ans : "", want);
+    if (rc || (exact ? strcmp(sim_serial_out, want) : !strstr(sim_serial_out, want))) {
+        printf("FAIL line \"%s\": got \"%s\" (send %d), want \"%s\"\n", line, sim_serial_out, rc, want);
         failures++;
     }
 }
 
 int main(void)
 {
-    s = sim_new(console_handle, 16);
+    s = sim_new(console_handle, 32);
+    sim_set_component(s, 20);
     sim_start(s, "", 0);
     sim_run(s, 0);
 
@@ -148,8 +159,9 @@ int main(void)
     check_line("test.echo value=hi", "error: module not running (start it)\n");
     sim_t *test = sim_new(test_handle, 64);
     sim_start(test, "serve", 5);
-    sim_run(test, 0);
-    sim_set_call_target(test, 2);
+    sim_set_component(test, 2);
+    module_sim = test;
+    pump();
     check_line("test.echo value=hello", "value=hello\n");
     check_line("test.echo hello there", "value=\"hello there\"\n");
     check_line("wifi", "state=off saved_ssid=\"(flash network)\" psk=unset\n");
@@ -157,6 +169,14 @@ int main(void)
     check_line("wifi start", "state=up ssid=\"lab\" ip=192.168.49.7 rssi=-40 saved_ssid=\"lab\" psk=set\n");
     CHECK(!strcmp(sim_ssid, "lab") && !strcmp(sim_psk, "two words") && sim_wifi_on);
     check_line("wifi stop", "state=off");
+    check_line("heap", "free=41000 largest=30000 min_free=28000 total=230000 internal_free=38000 internal_largest=26000\n");
+    check_line("heap regions", "ok (in the device log)\n");
+    check_line("heap bogus", "error: heap [regions");
+    check_line("nv wifi.rx_static", "wifi.rx_static is unknown or not set\n");
+    check_line("nv wifi.rx_static=12", "wifi.rx_static set (applies at the next start)\n");
+    check_line("nv wifi.rx_static", "wifi.rx_static=12\n");
+    check_line("nv bogus", "bogus is unknown or not set\n");
+    check_line("wifi scan", "ssid=\"costin\" ch=6 rssi=-41 auth=3 bssid=10:bd:a3:ac:5a:21\nssid=\"\" ch=11 rssi=-80 auth=0 bssid=01:02:03:04:05:06\n");
     check_line("wifi bogus", "error: wifi [ssid=NAME]");
     check_line("wifi ssid=", "saved_ssid=\"(flash network)\"");
     check_line("loader start test", "ok\n");
@@ -165,10 +185,48 @@ int main(void)
     check_line("loader stop", "ok\n");
     CHECK(!sim_loader_on);
     check_line("loader start", "error: loader start NAME");
+    /* the console waits for nothing: two requests in flight, answers in any order, and messages nobody asked for */
+    sim_serial_clear();
+    CHECK(sim_send(s, 20, 3, 0, "test.echo value=one", 19) == 0);
+    CHECK(sim_send(s, 20, 3, 0, "test.echo value=two", 19) == 0);
+    pump();
+    CHECK(strstr(sim_serial_out, "value=one\n") && strstr(sim_serial_out, "value=two\n"));
+    static const uint8_t a1[] = {0xa1, 0x01, 0x61, 'a'}, b1[] = {0xa1, 0x01, 0x61, 'b'};
+    sim_serial_clear();
+    CHECK(sim_send_from(s, 2, 2, 1, 0, a1, sizeof(a1)) == 0);          /* from the module, no request: a line it chose to write */
+    CHECK(sim_send_from(s, 2, 2, 1, 77, b1, sizeof(b1)) == 0);         /* and another, with an id of its own */
+    pump();
+    CHECK(!strcmp(sim_serial_out, "value=a\nvalue=b\n"));
+
+    /* the manifest of the installed module is its own word on its methods */
+    em_cbor_w mf;
+    em_cbor_init(&mf, sim_manifest, sizeof(sim_manifest));
+    em_cbor_map(&mf, 3);
+    em_cbor_uint(&mf, 1); em_cbor_text(&mf, "test", 4);
+    em_cbor_uint(&mf, 2); em_cbor_uint(&mf, 2);
+    em_cbor_uint(&mf, 3); em_cbor_array(&mf, 2);
+    em_cbor_map(&mf, 2); em_cbor_uint(&mf, 1); em_cbor_uint(&mf, 1); em_cbor_uint(&mf, 2); em_cbor_text(&mf, "echo", 4);
+    em_cbor_map(&mf, 2); em_cbor_uint(&mf, 1); em_cbor_uint(&mf, 2); em_cbor_uint(&mf, 2); em_cbor_text(&mf, "info", 4);
+    sim_manifest_len = (size_t)em_cbor_done(&mf);
+    check_line("test.echo value=listed", "value=listed\n");
+    check_line("test.pkt_echo", "does not list method 20 in its manifest");       /* in the catalog, not in this image */
+    sim_manifest_len = 0;
+    check_line("test.pkt_echo", "");                                              /* no manifest: the catalog decides */
+
+    /* a module that never answers costs the console nothing */
+    sim_free(test);
+    module_sim = sim_new(test_handle, 64);
+    sim_set_component(module_sim, 2);                                 /* never started or run */
+    sim_serial_clear();
+    CHECK(sim_send(s, 20, 3, 0, "test.echo value=x", 17) == 0);
+    sim_run(s, 0);
+    CHECK(sim_serial_len == 0);
+    check_line("status", "name=hello");                                /* still answering lines */
+    sim_free(module_sim);
+    module_sim = NULL;
     sim_stop(s);
     sim_run(s, 0);
     CHECK(sim_serial_component == -1);
-    sim_free(test);
 
     sim_free(s);
     puts(failures ? "FAILED" : "console ok");

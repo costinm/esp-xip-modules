@@ -51,6 +51,84 @@ def slots(path=os.path.join(ROOT, "main", "main.c")):
     return {m[0]: (int(m[1], 0), int(m[2], 0), int(m[3], 0)) for m in re.findall(pattern, block)}
 
 
+def _cbor_head(major, n):
+    if n < 24:
+        return bytes([major << 5 | n])
+    if n < 256:
+        return bytes([major << 5 | 24, n])
+    if n < 65536:
+        return bytes([major << 5 | 25]) + n.to_bytes(2, "big")
+    return bytes([major << 5 | 26]) + n.to_bytes(4, "big")
+
+
+def cbor(obj):
+    """Definite-length CBOR of ints, strings, lists and dicts (the manifest needs nothing else)."""
+    if isinstance(obj, bool):
+        return bytes([0xf5 if obj else 0xf4])
+    if isinstance(obj, int):
+        return _cbor_head(0, obj) if obj >= 0 else _cbor_head(1, -1 - obj)
+    if isinstance(obj, str):
+        return _cbor_head(3, len(obj.encode())) + obj.encode()
+    if isinstance(obj, (list, tuple)):
+        return _cbor_head(4, len(obj)) + b"".join(cbor(x) for x in obj)
+    if isinstance(obj, dict):
+        return _cbor_head(5, len(obj)) + b"".join(cbor(k) + cbor(v) for k, v in obj.items())
+    raise TypeError(obj)
+
+
+def manifest_of_api(api_text, autostart=None):
+    """The manifest of a module (abi/API.md, module_manifest): the catalog of its API.md in compact CBOR, what the console
+    needs instead of IDs compiled into it. b"" when the file describes no module.
+
+      {1: name, 2: component,
+       3: [{1: method id, 2: method name, 3: request fields (index), 4: response fields (index)}, ...],
+       4: [[type name, [fields]], ...],                      (record types the fields refer to; absent if none)
+       5: [[fields], ...],                                   (the field lists the methods point at, each stored once)
+       6: start request}                                     (only if the module starts at boot: text, may be empty)
+      field = [tag, name, kind]  or  [tag, name, kind, type name]
+      kind  = 0 any, 1 text, 2 bool, 3 uint, 4 int, 5 bytes, 6 map, 7 array   (the kinds of the console's text syntax)
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from apimd import module_api, module_types
+    from gen_catalog import kind_of
+    comps = module_api(api_text)
+    if not comps:
+        return b""
+    types = module_types(api_text)
+    records = {name: i for i, name in enumerate(sorted(types))}
+
+    def fields(rows):
+        out = []
+        for tag, fname, ftype in rows:
+            kind, rec = kind_of(ftype, records)
+            out.append([tag, fname, kind] + ([sorted(types)[rec - 1]] if rec else []))
+        return out
+
+    name, cid, methods = comps[0]
+    lists = []
+
+    def index(rows):                       # shared request/response tables are stored once
+        f = fields(rows)
+        if f not in lists:
+            lists.append(f)
+        return lists.index(f)
+
+    doc = {1: name, 2: cid, 3: [{1: mid, 2: mname, 3: index(req), 4: index(resp)} for mname, mid, _s, req, resp in methods]}
+    if types:
+        doc[4] = [[tname, fields(types[tname])] for tname in sorted(types)]
+    doc[5] = lists
+    if autostart is not None:
+        doc[6] = autostart
+    return cbor(doc)
+
+
+def api_beside(sources, cargo):
+    """The API.md next to the module's sources (or its Cargo.toml)."""
+    first = cargo[0] if cargo else (sources[0] if sources else None)
+    path = os.path.join(os.path.dirname(os.path.abspath(first)), "API.md") if first else None
+    return path if path and os.path.exists(path) else None
+
+
 def run(cmd, **kw):
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kw)
     if r.returncode:
@@ -93,7 +171,7 @@ def cargo_link(cfg, cargo, window, link_script, tmp):
         if env.get("EM_RUST_ESP_BIN"):   # env.sh: the esp toolchain (nightly with rust-src) shared with the ESP-IDF install
             env["PATH"] = env["EM_RUST_ESP_BIN"] + os.pathsep + env["PATH"]
         run(["cargo", "rustc", "--manifest-path", manifest, "--bin", binname, "--features", features,
-             "--target", target, "--release", "-Zbuild-std=core,compiler_builtins",
+             "--target", target, "--release", "-Zbuild-std=core,alloc,compiler_builtins",
              "-Zbuild-std-features=compiler-builtins-mem", "--config", f'target.{target}.linker="{tool}gcc"',
              "--", *rustflags], env=env)
         built = os.path.join(os.path.dirname(os.path.abspath(manifest)), "target", target, "release", binname)
@@ -106,7 +184,8 @@ def cargo_link(cfg, cargo, window, link_script, tmp):
     return link
 
 
-def build(chip, slot, sources, out, stack=8192, features=0, state=0, defines=(), keep_elf=None, cargo=None, slot_file=None):
+def build(chip, slot, sources, out, stack=8192, features=0, state=0, defines=(), keep_elf=None, cargo=None, slot_file=None,
+          autostart=None):
     cfg = CHIPS[chip]
     tag, offset, slot_size = (slots(slot_file) if slot_file else slots())[slot]
     tool = cfg["prefix"] + "-"
@@ -161,8 +240,12 @@ def build(chip, slot, sources, out, stack=8192, features=0, state=0, defines=(),
             if "Entry point address" in line:
                 entry = int(line.split()[-1], 16)
         code = open(raw, "rb").read()
+        api = api_beside(sources, cargo)
+        manifest = manifest_of_api(open(api).read(), autostart) if api else b""
+        if autostart is not None and not api:
+            sys.exit("--autostart is recorded in the manifest, which is made from an API.md next to the sources")
         image = dmod.pack(code, entry - window, tag, code_vma=window, data_vma=data_window, stack_bytes=stack,
-                          required_features=features, fixed_vma=cfg["fixed"], state_bytes=state)
+                          required_features=features, fixed_vma=cfg["fixed"], state_bytes=state, manifest=manifest)
     if len(image) > slot_size:
         sys.exit(f"image is {len(image)} bytes, slot '{slot}' holds {slot_size}")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
@@ -183,6 +266,8 @@ def main():
     ap.add_argument("--slots", metavar="FILE",
                     help="C file with the main_slots[] table of the application (default: main/main.c)")
     ap.add_argument("--list-slots", action="store_true")
+    ap.add_argument("--autostart", nargs="?", const="", default=None, metavar="REQUEST",
+                    help="start this module at boot (recorded in its manifest) with REQUEST as its start request")
     ap.add_argument("--elf", help="also keep the linked ELF here (objdump -d)")
     ap.add_argument("--cargo", metavar="MANIFEST:BIN[:FEATURES]",
                     help="build a Rust module: the bin BIN of the crate at MANIFEST (e.g. fw/mod_lora/Cargo.toml:mod_lora:flat-image)")
@@ -203,7 +288,8 @@ def main():
     feat = 0
     for item in a.features.split(","):
         feat |= dmod.FEATURES[item.upper()] if item.upper() in dmod.FEATURES else int(item, 0)
-    build(a.chip, a.slot, a.sources, a.out, a.stack, feat, a.state, keep_elf=a.elf, cargo=cargo, slot_file=a.slots)
+    build(a.chip, a.slot, a.sources, a.out, a.stack, feat, a.state, keep_elf=a.elf, cargo=cargo, slot_file=a.slots,
+          autostart=a.autostart)
 
 
 if __name__ == "__main__":

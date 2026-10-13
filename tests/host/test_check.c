@@ -30,6 +30,12 @@ static void test_dmod(void)
     h = good(); h.abi_version = ESPMOD_ABI_VERSION + 1; CHECK(espmod_dmod_check(&h, &pic) == EMD_BAD_VERSION);
     h = good(); h.header_size = 32; CHECK(espmod_dmod_check(&h, &pic) == EMD_BAD_HEADER);
     h = good(); h.reserved[5] = 1; CHECK(espmod_dmod_check(&h, &pic) == EMD_BAD_HEADER);
+    h = good(); h.manifest_offset = 0x1f0; h.manifest_size = 0x10; CHECK(espmod_dmod_check(&h, &pic) == EMD_OK);     /* at the end */
+    h = good(); h.manifest_offset = 0x1f0; h.manifest_size = 0x11; CHECK(espmod_dmod_check(&h, &pic) == EMD_BAD_HEADER);   /* past the end */
+    h = good(); h.manifest_offset = 0x1f1; h.manifest_size = 4; CHECK(espmod_dmod_check(&h, &pic) == EMD_BAD_HEADER);      /* unaligned */
+    h = good(); h.manifest_offset = 0x20; h.manifest_size = 4; CHECK(espmod_dmod_check(&h, &pic) == EMD_BAD_HEADER);      /* inside the header */
+    h = good(); h.manifest_offset = 0x100; h.manifest_size = 0; CHECK(espmod_dmod_check(&h, &pic) == EMD_BAD_HEADER);     /* an offset with no size */
+    h = good(); h.manifest_size = 8; CHECK(espmod_dmod_check(&h, &pic) == EMD_BAD_HEADER);                                /* a size with no offset */
     h = good(); h.stack_bytes = 1u << 20; CHECK(espmod_dmod_check(&h, &pic) == EMD_BAD_HEADER);
     h = good(); h.image_size = 0x20000; CHECK(espmod_dmod_check(&h, &pic) == EMD_BAD_SIZE);
     h = good(); h.image_size = 64; CHECK(espmod_dmod_check(&h, &pic) == EMD_BAD_SIZE);

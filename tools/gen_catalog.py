@@ -16,7 +16,9 @@ from apimd import module_api, module_types  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 OUT = os.path.join(ROOT, "modules", "mod_console", "catalog.h")
-SOURCES = sorted(os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, "modules", "*", "API.md")))
+TWINS = {"mod_rtest"}   # same component and methods as mod_test (installed in the same slot): listed once
+SOURCES = sorted(os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, "modules", "*", "API.md"))
+                 if os.path.basename(os.path.dirname(p)) not in TWINS)
 
 K = {"any": 0, "text": 1, "bool": 2, "uint": 3, "int": 4, "bytes": 5, "map": 6, "array": 7}
 

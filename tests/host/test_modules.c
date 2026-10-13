@@ -1,12 +1,18 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Run mod_hello and mod_test (the same sources that become flash images) against the simulated host: virtual time,
- * so alarms of a second cost nothing. */
+ * so alarms of a second cost nothing. Built a second time with -DTEST_HANDLE=espmod_handle -DNO_HELLO against the static library
+ * of modules/mod_rtest (the Rust twin): the same tests, so the two cannot drift apart. */
 #include <stdio.h>
 #include <string.h>
 #include "sim_host.h"
 
+#ifndef TEST_HANDLE
+#define TEST_HANDLE test_handle
+#endif
+#ifndef NO_HELLO
 extern int hello_handle(const espmod_host *, void *, const espmod_call *);
-extern int test_handle(const espmod_host *, void *, const espmod_call *);
+#endif
+extern int TEST_HANDLE(const espmod_host *, void *, const espmod_call *);
 
 static int failures;
 #define CHECK(cond) do { if (!(cond)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); failures++; } } while (0)
@@ -23,11 +29,12 @@ static void dump_events(sim_t *s)
 #define STATE 64
 static sim_t *start_test(const char *request)
 {
-    sim_t *s = sim_new(test_handle, STATE);
+    sim_t *s = sim_new(TEST_HANDLE, STATE);
     sim_start(s, request, strlen(request));
     return s;
 }
 
+#ifndef NO_HELLO
 static void test_hello(void)
 {
     sim_t *s = sim_new(hello_handle, 0);
@@ -38,6 +45,7 @@ static void test_hello(void)
     CHECK(sim_find_event(s, 1, "hi") == 0);
     sim_free(s);
 }
+#endif
 
 static void test_selftest(void)
 {
@@ -73,6 +81,82 @@ static void test_serve_request_stop(void)
     sim_run(s, 0);
     CHECK(sim_ended(s) && sim_result(s) == 0);
     CHECK(sim_find_event(s, 0x7eff, "stopped") >= 0);
+    sim_free(s);
+}
+
+/* Packets between the application and a module, between two modules, kept past a call, and given back when the module ends. */
+static void test_packets(void)
+{
+    const int avail = sim_pool_available();
+    sim_t *a = start_test("serve"), *b = start_test("serve");
+    sim_set_component(a, 2);
+    sim_set_component(b, 3);
+    sim_run(a, 1);
+    sim_run(b, 1);
+
+    /* application -> module A -> back to the application: one packet, the same one, never copied */
+    static const uint8_t msg[] = {0x10, 0x20, 0x30};
+    sim_main_clear();
+    CHECK(sim_send(a, 2, 20, 77, msg, sizeof(msg)) == 0);
+    sim_run(a, 1);
+    CHECK(sim_main_n == 1 && sim_main_msgs[0].id == 77 && sim_main_msgs[0].len == 3 && sim_main_msgs[0].from == 2 &&
+          sim_main_msgs[0].component == 2 && sim_main_msgs[0].method == 21);
+    CHECK(sim_main_msgs[0].data[0] == (uint8_t)~0x10 && sim_main_msgs[0].data[2] == 0x30);   /* first byte flipped in place */
+    CHECK(sim_pool_available() == avail);                                                    /* the packet went back to the pool */
+
+    /* a second instance answers with its own address */
+    CHECK(sim_send(b, 2, 20, 5, msg, sizeof(msg)) == 0);
+    sim_run(b, 1);
+    CHECK(sim_main_n == 2 && sim_main_msgs[1].from == 3);
+    CHECK(sim_pool_available() == avail);
+
+    /* keep: the packet stays out of the pool until it is dropped */
+    CHECK(sim_send(a, 2, 22, 0, msg, sizeof(msg)) == 0);
+    sim_run(a, 1);
+    CHECK(sim_pool_available() == avail - 1 && sim_held_count(a) == 1);
+    CHECK(sim_send(a, 2, 23, 0, NULL, 0) == 0);
+    sim_run(a, 1);
+    CHECK(sim_pool_available() == avail && sim_held_count(a) == 0);
+
+    /* a module that ends with a kept packet gives it back, and it is counted */
+    CHECK(sim_send(b, 2, 22, 0, msg, sizeof(msg)) == 0);
+    sim_run(b, 1);
+    CHECK(sim_pool_available() == avail - 1);
+    sim_stop(b);
+    sim_run(b, 0);
+    CHECK(sim_ended(b) && sim_pool_available() == avail && sim_leaked(b) == 1);
+    CHECK(sim_send(b, 2, 20, 0, msg, sizeof(msg)) != 0);              /* nobody home */
+    CHECK(sim_pool_available() == avail);
+
+    /* the runtime-side queue is bounded: a sender backs off when it is full, and succeeds again as the module takes packets */
+    int sent = 0, rc = 0;
+    while (sent < 10 && (rc = sim_send(a, 2, 23, 0, NULL, 0)) == 0) sent++;
+    CHECK(sent == 4 && rc == ESPMOD_ERR_BUSY);
+    sim_run(a, 1);
+    CHECK(sim_send(a, 2, 23, 0, NULL, 0) == 0);
+    sim_run(a, 1);
+    CHECK(sim_pool_available() == avail);
+
+    /* too large for a packet */
+    uint8_t big[ESPMOD_PKT_MAX + 1] = {0};
+    CHECK(sim_send(a, 2, 20, 0, big, sizeof(big)) == ESPMOD_ERR_SIZE);
+    sim_free(a);
+    sim_free(b);
+    CHECK(sim_pool_available() == avail);
+}
+
+/* The managed heap: what a module did not free is freed by the host when it ends, and counted. */
+static void test_memory(void)
+{
+    sim_t *s = start_test("serve");
+    sim_set_component(s, 2);
+    sim_run(s, 1);
+    CHECK(sim_send(s, 2, 24, 0, NULL, 0) == 0);
+    sim_run(s, 1);
+    CHECK(sim_mem_leaked(s) == 0);                    /* still running: nothing counted */
+    sim_stop(s);
+    sim_run(s, 0);
+    CHECK(sim_ended(s) && sim_mem_leaked(s) == 64);   /* the balance: the 64 bytes it took and did not give back */
     sim_free(s);
 }
 
@@ -186,9 +270,13 @@ static void test_alarm_rules(void)
 
 int main(void)
 {
+#ifndef NO_HELLO
     test_hello();
+#endif
     test_selftest();
     test_serve_request_stop();
+    test_packets();
+    test_memory();
     test_alarms();
     test_gpio_loop();
     test_spi_loop();

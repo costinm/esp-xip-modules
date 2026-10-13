@@ -13,10 +13,27 @@ extern char sim_ssid[40], sim_psk[72], sim_loader_name[40];   /* what wifi_start
 extern int sim_wifi_on, sim_loader_on;
 /* The console's calls */
 extern int sim_serial_component, sim_serial_method, sim_reset_called;
+extern char sim_serial_out[4096];                                 /* what the module wrote with serial_write */
+extern size_t sim_serial_len;
+void sim_serial_clear(void);
 extern char sim_started[40], sim_start_request[80], sim_stopped[40];
 extern uint8_t sim_modules_cbor[600], sim_events_cbor[600];   /* what modules_info and events_info return */
 extern size_t sim_modules_len, sim_events_len;
-void sim_set_call_target(sim_t *target, int component);       /* call() reaches this simulated module */
+extern uint8_t sim_manifest[200];        /* what module_manifest("test") returns (empty: the module has none) */
+extern size_t sim_manifest_len;
+
+/* Packets (abi/API.md PKT): the same pool and held-table code as the C host, with a small pool of 8 packets */
+typedef struct { uint32_t from; int component, method; uint64_t id; size_t len; uint8_t data[256]; } sim_msg_t;
+extern sim_msg_t sim_main_msgs[8];     /* what modules sent to ADDR_MAIN */
+extern int sim_main_n;
+void sim_main_clear(void);
+void sim_set_component(sim_t *s, int component);                      /* this module is the target of send(dst = component) */
+int sim_send(sim_t *s, int component, int method, uint64_t id, const void *data, size_t len);   /* from the application */
+int sim_send_from(sim_t *s, uint32_t from, int component, int method, uint64_t id, const void *data, size_t len);   /* as if module `from` sent it */
+int sim_pool_available(void);
+unsigned sim_held_count(sim_t *s);                                     /* packets the module owns */
+unsigned sim_mem_leaked(sim_t *s);                                     /* bytes not given back when it ended */
+unsigned sim_leaked(sim_t *s);                                         /* owned when it ended */
 
 sim_t *sim_new(espmod_handle_fn handler, uint32_t state_bytes);
 void sim_free(sim_t *s);

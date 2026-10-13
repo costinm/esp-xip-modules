@@ -147,8 +147,11 @@ def rust_type(ctype, prefix):
     t = ctype.strip()
     const = t.startswith("const ")
     t = t.removeprefix("const ").strip()
-    ptr = t.endswith("*")
+    stars = t.count("*")
+    ptr = stars > 0
     t = t.rstrip("*").strip()
+    if stars == 2:                      # 'uint8_t **': a pointer to a pointer the host fills in
+        return f"*mut *mut {RUST_TYPES[t] if t in RUST_TYPES else t}"
     if t == "void":
         base = "u8" if ptr else "()"
     elif t.startswith(prefix + "_"):

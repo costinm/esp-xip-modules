@@ -70,7 +70,7 @@ class Dmod(unittest.TestCase):
 class Slots(unittest.TestCase):
     def test_slot_table_is_read_from_main(self):
         s = mkmod.slots()
-        self.assertEqual(s["hello"], (1, 0, 0x10000))
+        self.assertEqual(s["console"], (20, 0, 0x10000))
         self.assertEqual(s["test"], (2, 0x10000, 0x10000))
         tags = [t for t, _, _ in s.values()]
         self.assertEqual(len(set(tags)), len(tags))
@@ -228,7 +228,7 @@ class Build(unittest.TestCase):
 
     def test_all_chips(self):
         for chip in mkmod.CHIPS:
-            for slot, src in (("hello", "mod_hello/mod_hello.c"), ("test", "mod_test/mod_test.c")):
+            for slot, src in (("hw", "mod_hello/mod_hello.c"), ("test", "mod_test/mod_test.c")):
                 with self.subTest(chip=chip, slot=slot):
                     image = self.build(chip, slot, src)
                     h = dmod.unpack(image)
@@ -272,6 +272,111 @@ class Build(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             mkmod.build(chip, "lora", [src], os.path.join(tempfile.mkdtemp(), "x.dmod"))
         self.assertIn("puts", str(cm.exception))
+
+
+def cbor_decode(data, pos=0):
+    """Just enough CBOR to read a manifest back: (value, next position)."""
+    major, info = data[pos] >> 5, data[pos] & 31
+    pos += 1
+    n = info
+    if info == 24:
+        n, pos = data[pos], pos + 1
+    elif info == 25:
+        n, pos = int.from_bytes(data[pos:pos + 2], "big"), pos + 2
+    if major == 0:
+        return n, pos
+    if major == 3:
+        return data[pos:pos + n].decode(), pos + n
+    if major == 4:
+        out = []
+        for _ in range(n):
+            v, pos = cbor_decode(data, pos)
+            out.append(v)
+        return out, pos
+    if major == 5:
+        out = {}
+        for _ in range(n):
+            k, pos = cbor_decode(data, pos)
+            out[k], pos = cbor_decode(data, pos)
+        return out, pos
+    raise ValueError(major)
+
+
+class Manifest(unittest.TestCase):
+    API = """# `demo` API (7)
+
+## 1. `ping` — x
+
+### Request
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `value` | `string` | |
+| 2 | `wait` | `uint` | |
+
+### Response
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `value` | `string` | |
+
+## 20. `pong` — y
+
+### Request
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `value` | `string` | |
+| 2 | `wait` | `uint` | |
+
+### Response
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `value` | `string` | |
+"""
+
+    def test_the_manifest_is_the_catalog_of_the_api_md(self):
+        m, end = cbor_decode(mkmod.manifest_of_api(self.API))
+        self.assertEqual(m[1], "demo")
+        self.assertEqual(m[2], 7)
+        self.assertEqual([(x[1], x[2]) for x in m[3]], [(1, "ping"), (20, "pong")])
+        requests = m[5][m[3][0][3]]
+        self.assertEqual(requests, [[1, "value", 1], [2, "wait", 3]])        # tag, name, kind (text, uint)
+        self.assertEqual(m[3][0][3], m[3][1][3], "an identical field list is stored once")
+        self.assertEqual(len(m[5]), 2)
+        self.assertEqual(mkmod.manifest_of_api("no module here"), b"")
+
+    def test_the_manifest_is_the_one_ssh_mesh_writes(self):
+        """The same API.md and the same bytes as ssh-mesh's mesh-api-gen (crates/mesh-api-gen/tests/data, a test there)."""
+        data = os.path.join(ROOT, "tests", "data")
+        api = open(os.path.join(data, "manifest-demo-API.md")).read()
+        self.assertEqual(mkmod.manifest_of_api(api).hex(), open(os.path.join(data, "manifest-demo.hex")).read().strip())
+        self.assertEqual(mkmod.manifest_of_api(api, autostart="").hex(),
+                         open(os.path.join(data, "manifest-demo-autostart.hex")).read().strip())
+        m, _ = cbor_decode(mkmod.manifest_of_api(api, autostart="serve"))
+        self.assertEqual(m[6], "serve")
+        self.assertEqual(m[4][0][0], "Row")
+
+    def test_the_manifest_sits_after_the_code_inside_the_image(self):
+        m = mkmod.manifest_of_api(self.API)
+        image = dmod.pack(b"\x01\x02\x03\x04" * 5, 0x44, 7, manifest=m)
+        h = dmod.unpack(image)
+        self.assertEqual(h["manifest_offset"], 64 + 20)
+        self.assertEqual(h["manifest_size"], len(m))
+        self.assertEqual(h["image_size"], len(image))
+        self.assertEqual(dmod.manifest_of(image), m)
+        self.assertEqual(len(image) % 4, 0)
+        plain = dmod.unpack(dmod.pack(b"\x01\x02\x03\x04" * 2, 0x44, 7))
+        self.assertEqual((plain["manifest_offset"], plain["manifest_size"]), (0, 0))
+
+    def test_a_built_module_carries_its_manifest(self):
+        image_path = os.path.join(ROOT, "target", "out", "esp32c6", "modules", "mod_test.dmod")
+        if not os.path.exists(image_path):
+            self.skipTest("no built image (scripts/build.sh)")
+        m, _ = cbor_decode(dmod.manifest_of(open(image_path, "rb").read()))
+        self.assertEqual((m[1], m[2]), ("test", 2))
+        self.assertIn("echo", [x[2] for x in m[3]])
 
 
 class SlotTable(unittest.TestCase):

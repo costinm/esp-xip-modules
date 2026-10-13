@@ -34,7 +34,7 @@ class Install(unittest.TestCase):
         cls.exe = os.path.join(cls.dir, "test_install")
         subprocess.run(["gcc", "-Wall", "-Wextra", "-g", "-fsanitize=address,undefined", "-DCONFIG_IDF_FIRMWARE_CHIP_ID=13",
                         "-I", "tests/host/fake_idf", "-I", "tests/host", "-I", "include", "-I", "components/espmod_loader/include",
-                        "-I", "components/espmod_host/include", "-I", "components/espmod_loader/src", "-I", "components/espmod_install/include",
+                        "-I", "components/espmod_host/include", "-I", "components/espmod_pool/include", "-I", "components/espmod_loader/src", "-I", "components/espmod_install/include",
                         "-I", os.path.join(LOADER, "components", "esp_wifi_loader", "include"), "-o", cls.exe,
                         *SOURCES, "-lpthread"], cwd=ROOT, check=True)
         cls.key = os.path.join(cls.dir, "a.pem")
