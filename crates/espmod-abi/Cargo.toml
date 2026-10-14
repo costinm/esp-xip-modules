@@ -12,3 +12,6 @@ allocator-api = []
 global-alloc = []
 
 [workspace]
+
+[dependencies]
+mesh-api = { git = "https://github.com/costinm/ssh-mesh", default-features = false }

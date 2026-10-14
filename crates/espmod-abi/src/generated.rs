@@ -34,6 +34,7 @@ pub const HOST_START: u32 = 1; // Once, after the instance is created. `data` is
 pub const HOST_STOP: u32 = 2; // Main asks the module to end. The instance is destroyed after the call; release what is not released by that (a radio left transmitting).
 pub const HOST_NETWORK: u32 = 3; // Connectivity changed; `value` is 1 when main has a network path, else 0. Delivered to every running module (a handler that has nothing to do returns at once).
 pub const HOST_WAKE: u32 = 4; // A wake window opened. Only if the module asked with an alarm using `ALARM_WINDOW`.
+pub const HOST_TRANSPORT: u32 = 5; // Desired bearer profile changed; `value` is its generation. Read it with `transport_get` and reconcile.
 
 // RET: Return values of a handler.
 pub const RET_CONTINUE: u32 = 0; // Keep the instance.
@@ -83,14 +84,14 @@ pub const FEAT_ADC: u32 = 16; // `adc_read`.
 pub const FEAT_RGBLED: u32 = 32; // `rgbled_write`.
 pub const FEAT_SERVICE: u32 = 64; // `call_service`.
 pub const FEAT_ALARM_FLEX: u32 = 128; // `ALARM_FLEXIBLE` windows are real (the host has a sleepy mode); otherwise a flexible alarm fires at its delay.
-pub const FEAT_WIFI: u32 = 256; // `wifi_start` / `wifi_stop` / `wifi_config` / `wifi_info` / `wifi_scan`.
-pub const FEAT_LOADER: u32 = 512; // `loader_start` / `loader_stop`.
+pub const FEAT_WIFI: u32 = 256; // Optional `wifi_start`, `wifi_stop`, `wifi_info`, `wifi_config`, and `wifi_scan` primitives.
 pub const FEAT_SERIAL: u32 = 1024; // `serial_open` / `serial_write` / `serial_close`.
 pub const FEAT_MODULES: u32 = 4096; // `modules_info`, `module_start`, `module_stop`, `events_info`, `reset`.
 pub const FEAT_PACKETS: u32 = 8192; // `pkt_*` and `send`, `call.pkt` / `call.from` / `call.id`.
 pub const FEAT_MEMORY: u32 = 16384; // `mem_alloc` / `mem_free`.
 pub const FEAT_SOCKET: u32 = 32768; // Nonblocking TCP sockets and packet writes.
-pub const FEAT_FLASH: u32 = 65536; // Module-slot flash erase, pool-packet write, and short read; writes also require a signed manifest declaration.
+pub const FEAT_TRANSPORT_PROFILE: u32 = 131072; // Shared desired bearer profile, module notifications and optional saved startup profile.
+pub const FEAT_FLASH: u32 = 65536; // Physical flash erase, pool-packet write and read; image policy belongs to callers.
 
 // SOCKET_MODE: `SOCKET_MODE`
 pub const SOCKET_MODE_DIRECT: u32 = 0; // Readiness callback; the module calls nonblocking `socket_read` or `socket_write`.
@@ -109,6 +110,54 @@ pub const SOCKET_EVENT_WRITE_DONE: u32 = 7; // A previously accepted packet has 
 pub const DMOD_MAGIC: u32 = 1146047812; // 'DMOD' little endian.
 pub const DMOD_HEADER_SIZE: u32 = 64;
 pub const DMOD_FLAG_FIXED_VMA: u32 = 1; // Linked at code_vma/data_vma (Xtensa); otherwise position independent (RISC-V).
+
+/// complete desired physical bearer configuration
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BearerProfile {
+    pub size: u32, // Size of this struct; caller sets it to sizeof(espmod_bearer_profile).
+    pub version: u32, // Profile layout version. Default=1.
+    pub ssid: [u8; 33], // Desired ssid. Default=0.
+    pub ssid_len: u32, // Desired ssid_len. Default=0.
+    pub sta_passphrase: [u8; 64], // Desired sta_passphrase. Default=0.
+    pub sta_passphrase_len: u32, // Desired sta_passphrase_len. Default=0.
+    pub sta_bssid: [u8; 6], // Desired sta_bssid. Default=0.
+    pub sta_bssid_set: u8, // Desired sta_bssid_set. Default=0.
+    pub sta_channel: u8, // Desired sta_channel. Default=0.
+    pub espnow_capture: u8, // Desired espnow_capture. Default=0.
+    pub nan_dw_interval: u8, // Desired nan_dw_interval. Default=1.
+    pub now: u8, // Desired now. Default=0.
+    pub ndp: u8, // Desired ndp. Default=0.
+    pub ap: u8, // Desired ap. Default=1.
+    pub open: u8, // Desired open. Default=0.
+    pub uart: u8, // Desired uart. Default=1.
+    pub ble: u8, // Desired ble. Default=0.
+    pub uart_mode: u8, // Desired uart_mode. Default=2.
+    pub uart_baud: u32, // Desired uart_baud. Default=115200.
+    pub uart_port: u8, // Desired uart_port. Default=0.
+    pub radio_mode: u8, // Desired radio_mode. Default=0.
+    pub radio_frequency: u32, // Desired radio_frequency. Default=0.
+    pub radio_bandwidth: u32, // Desired radio_bandwidth. Default=0.
+    pub radio_bitrate: u32, // Desired radio_bitrate. Default=0.
+    pub radio_tx_power: i32, // Desired radio_tx_power. Default=0.
+    pub radio_spreading_factor: u8, // Desired radio_spreading_factor. Default=0.
+    pub radio_coding_rate: u8, // Desired radio_coding_rate. Default=0.
+    pub ap_ssid: [u8; 33], // Desired ap_ssid. Default=0.
+    pub ap_ssid_len: u32, // Desired ap_ssid_len. Default=0.
+    pub ap_passphrase: [u8; 64], // Desired ap_passphrase. Default=0.
+    pub ap_passphrase_len: u32, // Desired ap_passphrase_len. Default=0.
+    pub run_requested: u8, // Desired run_requested. Default=0.
+    pub mode: u32, // Desired mode. Default=0.
+    pub raw_tx_rate: u8, // Desired raw_tx_rate. Default=0.
+    pub sta_driver_tx: u8, // Desired sta_driver_tx. Default=1.
+    pub sta_bssid_check_disabled: u8, // Desired sta_bssid_check_disabled. Default=1.
+    pub sta_ampdu_enabled: u8, // Desired sta_ampdu_enabled. Default=1.
+    pub sta_11b_rates_disabled: u8, // Desired sta_11b_rates_disabled. Default=1.
+    pub sta_raw_rx_enabled: u8, // Desired sta_raw_rx_enabled. Default=1.
+}
+impl Default for BearerProfile { fn default() -> Self { unsafe { core::mem::zeroed() } } }
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::size_of::<BearerProfile>() == 284);
 
 /// argument of `spi_open`
 #[repr(C)]
@@ -231,10 +280,6 @@ pub struct Host {
     pub wifi_info: Option<unsafe extern "C" fn(user: *mut c_void, out: *mut u8, capacity: usize) -> i32>,
     /// the network this device uses when it is not told one
     pub wifi_config: Option<unsafe extern "C" fn(user: *mut c_void, ssid: *const u8, ssid_len: usize, psk: *const u8, psk_len: usize) -> i32>,
-    /// accept a signed package called `name`
-    pub loader_start: Option<unsafe extern "C" fn(user: *mut c_void, name: *const u8, name_len: usize) -> i32>,
-    /// close the upload server
-    pub loader_stop: Option<unsafe extern "C" fn(user: *mut c_void) -> i32>,
     /// receive the lines typed on the board's serial port
     pub serial_open: Option<unsafe extern "C" fn(user: *mut c_void, component: i32, method: i32) -> i32>,
     /// write text to the serial port
@@ -291,15 +336,23 @@ pub struct Host {
     pub pkt_span: Option<unsafe extern "C" fn(user: *mut c_void, pkt: u32, base: *mut *mut u8, capacity: *mut usize) -> i32>,
     /// transfer a pool packet for runtime-buffered output
     pub socket_write_pkt: Option<unsafe extern "C" fn(user: *mut c_void, socket: u32, pkt: u32, start: u32, len: u32) -> i32>,
-    /// enqueue a module-slot erase
-    pub flash_erase: Option<unsafe extern "C" fn(user: *mut c_void, slot: u32, offset: u32, len: u32, component: i32, method: i32, id: u64) -> i32>,
-    /// transfer a pool packet for a module-slot write
-    pub flash_write: Option<unsafe extern "C" fn(user: *mut c_void, slot: u32, offset: u32, pkt: u32, start: u32, len: u32, component: i32, method: i32, id: u64) -> i32>,
-    /// read a module slot into module memory
-    pub flash_read: Option<unsafe extern "C" fn(user: *mut c_void, slot: u32, offset: u32, out: *mut u8, len: usize) -> i32>,
+    /// enqueue a physical flash erase
+    pub flash_erase: Option<unsafe extern "C" fn(user: *mut c_void, address: u32, offset: u32, len: u32, component: i32, method: i32, id: u64) -> i32>,
+    /// transfer a pool packet for a physical flash write
+    pub flash_write: Option<unsafe extern "C" fn(user: *mut c_void, address: u32, offset: u32, pkt: u32, start: u32, len: u32, component: i32, method: i32, id: u64) -> i32>,
+    /// read physical flash into module memory
+    pub flash_read: Option<unsafe extern "C" fn(user: *mut c_void, address: u32, offset: u32, out: *mut u8, len: usize) -> i32>,
+    /// apply a partial desired transport request
+    pub transport_set: Option<unsafe extern "C" fn(user: *mut c_void, request: *const u8, len: usize, generation: *mut u32) -> i32>,
+    /// read the desired bearer profile
+    pub transport_get: Option<unsafe extern "C" fn(user: *mut c_void, profile: *mut BearerProfile, generation: *mut u32) -> i32>,
+    /// structured device and component status
+    pub device_info: Option<unsafe extern "C" fn(user: *mut c_void, out: *mut u8, capacity: usize) -> i32>,
+    /// replace a cached component status contribution
+    pub info_publish: Option<unsafe extern "C" fn(user: *mut c_void, component: i32, method: i32, data: *const u8, len: usize) -> i32>,
 }
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<Host>() == 252);
+const _: () = assert!(core::mem::size_of::<Host>() == 260);
 
 /// Byte offset of each host call, for `Host::has`.
 pub mod slot {
@@ -329,37 +382,39 @@ pub mod slot {
     pub const WIFI_STOP: usize = 108;
     pub const WIFI_INFO: usize = 112;
     pub const WIFI_CONFIG: usize = 116;
-    pub const LOADER_START: usize = 120;
-    pub const LOADER_STOP: usize = 124;
-    pub const SERIAL_OPEN: usize = 128;
-    pub const SERIAL_WRITE: usize = 132;
-    pub const SERIAL_CLOSE: usize = 136;
-    pub const MODULES_INFO: usize = 140;
-    pub const MODULE_START: usize = 144;
-    pub const MODULE_STOP: usize = 148;
-    pub const EVENTS_INFO: usize = 152;
-    pub const RESET: usize = 156;
-    pub const PKT_ALLOC: usize = 160;
-    pub const PKT_BUF: usize = 164;
-    pub const PKT_KEEP: usize = 168;
-    pub const PKT_FREE: usize = 172;
-    pub const SEND: usize = 176;
-    pub const PKT_INFO: usize = 180;
-    pub const MEM_ALLOC: usize = 184;
-    pub const MEM_FREE: usize = 188;
-    pub const MODULE_MANIFEST: usize = 192;
-    pub const WIFI_SCAN: usize = 196;
-    pub const HEAP_INFO: usize = 200;
-    pub const NV: usize = 204;
-    pub const HEAP_DUMP: usize = 208;
-    pub const TCP_ACCEPT: usize = 212;
-    pub const SOCKET_READ: usize = 216;
-    pub const SOCKET_WRITE: usize = 220;
-    pub const SOCKET_CLOSE: usize = 224;
-    pub const SOCKET_PEER: usize = 228;
-    pub const PKT_SPAN: usize = 232;
-    pub const SOCKET_WRITE_PKT: usize = 236;
-    pub const FLASH_ERASE: usize = 240;
-    pub const FLASH_WRITE: usize = 244;
-    pub const FLASH_READ: usize = 248;
+    pub const SERIAL_OPEN: usize = 120;
+    pub const SERIAL_WRITE: usize = 124;
+    pub const SERIAL_CLOSE: usize = 128;
+    pub const MODULES_INFO: usize = 132;
+    pub const MODULE_START: usize = 136;
+    pub const MODULE_STOP: usize = 140;
+    pub const EVENTS_INFO: usize = 144;
+    pub const RESET: usize = 148;
+    pub const PKT_ALLOC: usize = 152;
+    pub const PKT_BUF: usize = 156;
+    pub const PKT_KEEP: usize = 160;
+    pub const PKT_FREE: usize = 164;
+    pub const SEND: usize = 168;
+    pub const PKT_INFO: usize = 172;
+    pub const MEM_ALLOC: usize = 176;
+    pub const MEM_FREE: usize = 180;
+    pub const MODULE_MANIFEST: usize = 184;
+    pub const WIFI_SCAN: usize = 188;
+    pub const HEAP_INFO: usize = 192;
+    pub const NV: usize = 196;
+    pub const HEAP_DUMP: usize = 200;
+    pub const TCP_ACCEPT: usize = 204;
+    pub const SOCKET_READ: usize = 208;
+    pub const SOCKET_WRITE: usize = 212;
+    pub const SOCKET_CLOSE: usize = 216;
+    pub const SOCKET_PEER: usize = 220;
+    pub const PKT_SPAN: usize = 224;
+    pub const SOCKET_WRITE_PKT: usize = 228;
+    pub const FLASH_ERASE: usize = 232;
+    pub const FLASH_WRITE: usize = 236;
+    pub const FLASH_READ: usize = 240;
+    pub const TRANSPORT_SET: usize = 244;
+    pub const TRANSPORT_GET: usize = 248;
+    pub const DEVICE_INFO: usize = 252;
+    pub const INFO_PUBLISH: usize = 256;
 }

@@ -14,6 +14,8 @@
 extern crate std;
 
 pub mod cbor;
+/// Desired bearer declaration and tagged-CBOR codec generated from abi/API.md.
+pub mod profile;
 pub mod heap;
 mod generated;
 pub use generated::*;
@@ -54,6 +56,17 @@ impl Hw {
     /// `FEAT_*` bits the host really implements.
     pub fn features(&self) -> u32 {
         self.table().features
+    }
+
+    /// Structured device status, including cached component/method contributions.
+    pub fn device_info(&self, out: &mut [u8]) -> Result<usize, i32> {
+        let n = call!(self, DEVICE_INFO, device_info(out.as_mut_ptr(), out.len()));
+        if n < 0 { Err(n) } else { Ok(n as usize) }
+    }
+
+    /// Publish a copied CBOR map. An empty slice clears this component/method key.
+    pub fn info_publish(&self, component: i32, method: i32, map: &[u8]) -> i32 {
+        call!(self, INFO_PUBLISH, info_publish(component, method, map.as_ptr(), map.len()))
     }
 
     pub fn log(&self, text: &[u8]) -> i32 {
@@ -148,17 +161,31 @@ impl Hw {
         call!(self, SOCKET_WRITE_PKT, socket_write_pkt(socket, pkt, start, len))
     }
 
-    pub fn flash_erase(&self, slot: u32, offset: u32, len: u32, component: i32, method: i32, id: u64) -> i32 {
-        call!(self, FLASH_ERASE, flash_erase(slot, offset, len, component, method, id))
+    pub fn modules_info(&self, out: &mut [u8]) -> i32 {
+        call!(self, MODULES_INFO, modules_info(out.as_mut_ptr(), out.len()))
+    }
+    pub fn module_stop(&self, name: &[u8]) -> i32 {
+        call!(self, MODULE_STOP, module_stop(name.as_ptr(), name.len()))
+    }
+    pub fn reset(&self) -> i32 { call!(self, RESET, reset()) }
+
+    /// Atomically apply a tagged-CBOR partial desired transport request.
+    pub fn transport_set(&self, request: &[u8]) -> Result<u32, i32> {
+        let mut generation = 0;
+        let rc = call!(self, TRANSPORT_SET, transport_set(request.as_ptr(), request.len(), &mut generation));
+        if rc == 0 { Ok(generation) } else { Err(rc) }
+    }
+    pub fn flash_erase(&self, address: u32, offset: u32, len: u32, component: i32, method: i32, id: u64) -> i32 {
+        call!(self, FLASH_ERASE, flash_erase(address, offset, len, component, method, id))
     }
 
     /// Transfer a uniquely held pool packet only when the job is accepted.
-    pub fn flash_write(&self, slot: u32, offset: u32, pkt: u32, start: u32, len: u32, component: i32, method: i32, id: u64) -> i32 {
-        call!(self, FLASH_WRITE, flash_write(slot, offset, pkt, start, len, component, method, id))
+    pub fn flash_write(&self, address: u32, offset: u32, pkt: u32, start: u32, len: u32, component: i32, method: i32, id: u64) -> i32 {
+        call!(self, FLASH_WRITE, flash_write(address, offset, pkt, start, len, component, method, id))
     }
 
-    pub fn flash_read(&self, slot: u32, offset: u32, out: &mut [u8]) -> i32 {
-        call!(self, FLASH_READ, flash_read(slot, offset, out.as_mut_ptr(), out.len()))
+    pub fn flash_read(&self, address: u32, offset: u32, out: &mut [u8]) -> i32 {
+        call!(self, FLASH_READ, flash_read(address, offset, out.as_mut_ptr(), out.len()))
     }
 
     /// Keep the packet of this call beyond the call.
