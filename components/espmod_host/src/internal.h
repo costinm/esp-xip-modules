@@ -47,12 +47,13 @@ int em_wifi_scan(const espmod_host_hooks_t *hooks, uint8_t *out, size_t cap);
 uint64_t em_serial_pins(void);
 
 /* A worker event. Interrupts, alarm timers and other tasks only ever queue these; module code runs on the worker. */
-enum { EM_EV_CALL = 1, EM_EV_REQUEST, EM_EV_START, EM_EV_ALARM, EM_EV_NETWORK, EM_EV_WAKE, EM_EV_PACKET };
+enum { EM_EV_CALL = 1, EM_EV_REQUEST, EM_EV_START, EM_EV_ALARM, EM_EV_NETWORK, EM_EV_WAKE, EM_EV_PACKET, EM_EV_TRANSPORT, EM_EV_IO };
 typedef struct {
     uint8_t kind;
     uint32_t inst;                /* instance id (not a pointer: the instance may be gone by the time it is read) */
     int32_t component, method, value;
     uint32_t seq;                 /* ALARM: which arming of the alarm */
+    uint64_t id;
     uint8_t alarm;                /* ALARM: index */
 } em_event_t;
 
@@ -108,3 +109,9 @@ bool em_connected(void);
 void em_periph_init(void);
 void em_periph_release(struct espmod_instance *inst);
 void em_periph_fill(espmod_host *table);
+
+/* Shared status store: owner zero is a native host component. */
+int em_info_init(void);
+int em_info_publish(uint32_t owner, int32_t component, int32_t method, const uint8_t *data, size_t len);
+void em_info_release(uint32_t owner);
+int em_device_info(const espmod_host_hooks_t *hooks, uint8_t *out, size_t cap);

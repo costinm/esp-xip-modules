@@ -58,8 +58,13 @@ menu "esp-xip-modules host"
         default 4
 
     config ESPMOD_MEM_QUOTA
-        int "Bytes one module can take with mem_alloc"
-        default 8192
+        int "Optional per-module allocation limit in bytes (0: use available heap)"
+        default 0
+        range 0 2147483647
+        help
+            All modules have access to mem_alloc. Host allocations leave at
+            least 32 KiB free at allocation time. A nonzero value also caps
+            the total outstanding allocation of each module.
 
     config ESPMOD_SERIAL_STACK
         int "Stack of the serial reader task (it runs the line handler), bytes"

@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "src/loader.c" "src/slots.c" "src/espmod_check.c"
+    SRCS "src/loader.c" "src/espmod_check.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "src"
     REQUIRES espmod_host esp_partition esp_timer

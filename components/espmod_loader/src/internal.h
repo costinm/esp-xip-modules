@@ -20,7 +20,6 @@ typedef struct {
     uint8_t *request;             /* last start request, kept for a restart */
     size_t request_len;
     espmod_slot_status_t st;
-    bool was_running;             /* running when espmod_loader_slot_begin stopped it */
     int64_t started_us;
 } em_slot_state_t;
 

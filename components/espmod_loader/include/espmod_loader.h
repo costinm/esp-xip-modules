@@ -1,10 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* Runs signed module images from flash and installs new ones. A module is not a task: its image stays mapped
+/* Runs module images from flash. A module is not a task: its image stays mapped
  * while the host's worker calls its handler.
  *
  * The application passes a slot table (which module lives where). The loader maps an image, runs it on the host and
- * stops it; it has no network and no crypto. Installing images is the installer's (components/espmod_install, on
- * esp-wifi-loader) using the slot_* calls below. It knows no module by name.
+ * stops it; it has no network, crypto, or image installer. It knows no module by name.
  * Mapping, tasks and the host table are the part that depends on the chip; the checks before a
  * module is mapped are in espmod_check.h. */
 #pragma once
@@ -73,22 +72,6 @@ int espmod_loader_modules_info(uint8_t *out, size_t capacity);
 int espmod_loader_start_named(const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len);
 int espmod_loader_stop_named(const uint8_t *name, size_t name_len);
 int espmod_loader_manifest_named(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
-
-/* The version shown in the slot's status (whoever installs images records it; the loader keeps no state of its own). */
-void espmod_loader_set_version(int slot, uint32_t version);
-
-/* Replacing the image of a slot, for an installer (components/espmod_install; DMesh's Rust one), in this order:
- *   check_head   the first block (the image header) is valid for this slot: tag, size, entry, placement, features
- *   slot_begin   stop the module (3 s) and invalidate the slot (erase its first 64 KiB)
- *   slot_write   each block at its offset in the image (erases a 64 KiB piece when a write starts it)
- *   slot_commit  the first block last, so an interrupted install leaves no valid header; records `version`
- *   slot_end     start again, with its previous request, what slot_begin stopped
- * All return 0 or a negative ESPMOD_LOADER_ERR_* / ESPMOD_ERR_*. */
-int espmod_loader_check_head(int slot, const uint8_t *head, size_t len);
-int espmod_loader_slot_begin(int slot);
-int espmod_loader_slot_write(int slot, uint32_t offset, const uint8_t *data, size_t len);
-int espmod_loader_slot_commit(int slot, const uint8_t *head, size_t len, uint32_t version);
-void espmod_loader_slot_end(int slot);
 
 int espmod_loader_find(const char *name);     /* slot index or -1 */
 const espmod_slot_t *espmod_loader_slot(int slot);

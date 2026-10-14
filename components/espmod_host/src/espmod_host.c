@@ -1,3 +1,4 @@
+#include <stdatomic.h>
 /* SPDX-License-Identifier: Apache-2.0 */
 /* The event-driven host (abi/API.md, Model): one worker task calls the handler of every module for each event
  * (start, stop, request, interrupt, alarm). Instance lifecycle, alarms, and the core calls of the host table: log,
@@ -5,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "espmod_psa.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -14,6 +16,10 @@
 #include "freertos/task.h"
 #include "esp_attr.h"
 #include "nvs.h"
+#include "esp_flash.h"
+#include "esp_netif.h"
+#include "lwip/sockets.h"
+#include <errno.h>
 #include "internal.h"
 
 static const char *TAG = "espmod";
@@ -77,6 +83,20 @@ static int h_emit(void *user, uint16_t event_id, uint8_t value_type, const uint8
     return hooks.emit(hooks.emit_ctx, in->name, event_id, value_type, value, len);
 }
 
+int espmod_transport_set(const uint8_t *p, size_t len, uint32_t *gen) { return hooks.transport_set ? hooks.transport_set(p, len, gen) : ESPMOD_ERR_UNSUPPORTED; }
+int espmod_transport_get(espmod_bearer_profile *p, uint32_t *gen) { return hooks.transport_get ? hooks.transport_get(p, gen) : ESPMOD_ERR_UNSUPPORTED; }
+
+static atomic_bool transport_pending;
+static atomic_uint transport_generation;
+
+static int h_transport_set(void *user, const uint8_t *p, size_t len, uint32_t *generation) {
+    (void)user;
+    return hooks.transport_set ? hooks.transport_set(p, len, generation) : ESPMOD_ERR_UNSUPPORTED;
+}
+static int h_transport_get(void *user, espmod_bearer_profile *p, uint32_t *generation) {
+    (void)user;
+    return hooks.transport_get ? hooks.transport_get(p, generation) : ESPMOD_ERR_UNSUPPORTED;
+}
 static int h_wifi_start(void *user, const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len)
 {
     (void)user;
@@ -134,22 +154,6 @@ static int h_wifi_scan(void *user, uint8_t *out, size_t capacity)
     if (!hooks.wifi_scan) return ESPMOD_ERR_UNSUPPORTED;
     if (!out || !capacity) return ESPMOD_ERR_ARG;
     return em_wifi_scan(&hooks, out, capacity);
-}
-
-static int h_loader_start(void *user, const uint8_t *name, size_t name_len)
-{
-    (void)user;
-    if (!hooks.loader_start) return ESPMOD_ERR_UNSUPPORTED;
-    if (!name || !name_len || name_len > 32) return ESPMOD_ERR_ARG;
-    return hooks.loader_start(name, name_len);
-}
-
-static int h_loader_stop(void *user)
-{
-    (void)user;
-    if (!hooks.loader_stop) return ESPMOD_ERR_UNSUPPORTED;
-    hooks.loader_stop();
-    return 0;
 }
 
 static int h_call_service(void *user, uint16_t tag, const uint8_t *req, size_t req_len,
@@ -345,6 +349,23 @@ static struct espmod_instance *by_component(int component, const struct espmod_i
     return found;
 }
 
+int espmod_device_info(uint8_t *out, size_t capacity) { return em_device_info(&hooks, out, capacity); }
+static int h_device_info(void *user, uint8_t *out, size_t capacity)
+{
+    (void)user; return espmod_device_info(out, capacity);
+}
+static int h_info_publish(void *user, int32_t component, int32_t method, const uint8_t *data, size_t len)
+{
+    return em_info_publish(I(user)->id, component, method, data, len);
+}
+
+static const void *h_get_component(void *user, const char *name)
+{
+    (void)user; /* Requester context; native component functions take no extra argument. */
+    extern const espmod_psa *espmod_psa_component(void);
+    return name && strcmp(name, "psa") == 0 ? espmod_psa_component() : NULL;
+}
+
 static int h_modules_info(void *user, uint8_t *out, size_t capacity)
 {
     (void)user;
@@ -396,7 +417,20 @@ static int h_reset(void *user)
 }
 
 /* ---- the managed heap: a module frees what it took before it stops, and the host checks the balance ---- */
-static void *h_mem_alloc(void *user, size_t size) { return espmod_mem_alloc(&I(user)->mem, size); }
+static void *h_mem_alloc(void *user, size_t size)
+{
+    /* Leave 32 KiB for the host. This checks current heap availability; other
+     * firmware allocations can still consume that margin later. */
+    const size_t margin = 32768;
+    size_t available = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+    if (available <= margin || size > available - margin) return NULL;
+    void *ptr = espmod_mem_alloc(&I(user)->mem, size);
+    if (ptr && heap_caps_get_free_size(MALLOC_CAP_DEFAULT) < margin) {
+        espmod_mem_free(&I(user)->mem, ptr);
+        return NULL;
+    }
+    return ptr;
+}
 static int h_mem_free(void *user, void *ptr) { return espmod_mem_free(&I(user)->mem, ptr) == 0 ? ESPMOD_OK : ESPMOD_ERR_ARG; }
 
 /* ---- packets (abi/API.md, PKT): the C pool, and what each module holds ---- */
@@ -472,27 +506,9 @@ static int h_pkt_span(void *user, uint32_t pkt, uint8_t **base, size_t *capacity
     return ESPMOD_OK;
 }
 
-/* The socket and asynchronous flash table entries are present for ABI size
- * compatibility. Until the C event bridge is installed they report the
- * feature as unavailable instead of leaving null function pointers. */
-static int h_tcp_accept(void *u, uint16_t p, uint32_t m, int32_t c, int32_t f, uint32_t *l)
-{ (void)u; (void)p; (void)m; (void)c; (void)f; if (l) *l = 0; return ESPMOD_ERR_UNSUPPORTED; }
-static int h_socket_read(void *u, uint32_t s, uint8_t *b, size_t n)
-{ (void)u; (void)s; (void)b; (void)n; return ESPMOD_ERR_UNSUPPORTED; }
-static int h_socket_write(void *u, uint32_t s, const uint8_t *b, size_t n)
-{ (void)u; (void)s; (void)b; (void)n; return ESPMOD_ERR_UNSUPPORTED; }
-static int h_socket_close(void *u, uint32_t s)
-{ (void)u; (void)s; return ESPMOD_ERR_UNSUPPORTED; }
-static int h_socket_peer(void *u, uint32_t s, uint8_t *a, uint16_t *p, uint32_t *sc)
-{ (void)u; (void)s; (void)a; (void)p; (void)sc; return ESPMOD_ERR_UNSUPPORTED; }
-static int h_socket_write_pkt(void *u, uint32_t s, uint32_t p, uint32_t o, uint32_t n)
-{ (void)u; (void)s; (void)p; (void)o; (void)n; return ESPMOD_ERR_UNSUPPORTED; }
-static int h_flash_erase(void *u, uint32_t a, uint32_t n, int32_t c, int32_t m, uint64_t id)
-{ (void)u; (void)a; (void)n; (void)c; (void)m; (void)id; return ESPMOD_ERR_UNSUPPORTED; }
-static int h_flash_write(void *u, uint32_t a, const uint8_t *b, size_t n, int32_t c, int32_t m, uint64_t id)
-{ (void)u; (void)a; (void)b; (void)n; (void)c; (void)m; (void)id; return ESPMOD_ERR_UNSUPPORTED; }
-static int h_flash_read(void *u, uint32_t a, uint8_t *b, size_t n)
-{ (void)u; (void)a; (void)b; (void)n; return ESPMOD_ERR_UNSUPPORTED; }
+/* Generic HAL implementations; no upload format or loader policy. */
+#include "socket_hal.inc"
+#include "flash_hal.inc"
 
 static int h_pkt_keep(void *user, uint32_t pkt)
 {
@@ -666,6 +682,9 @@ static void finish(struct espmod_instance *in, int result)
         esp_timer_delete(in->alarms[i].timer);
         alarm_ctx[in->slot * EM_ALARMS + i].seq++;   /* a callback already in flight is stale */
     }
+    em_info_release(in->id);
+    socket_release(in->id);
+    flash_release(in->id);
     serial_release(in);
     const unsigned leaked_packets = packets_release(in);
     const uint32_t leaked_bytes = espmod_mem_used(&in->mem);        /* cannot be freed: nobody knows where it is */
@@ -814,12 +833,23 @@ static void worker(void *arg)
     (void)arg;
     em_event_t ev;
     for (;;) {
-        if (xQueueReceive(worker_queue, &ev, portMAX_DELAY) != pdTRUE) continue;
-        if (ev.kind == EM_EV_NETWORK || ev.kind == EM_EV_WAKE) {
+        if (atomic_exchange(&transport_pending, false)) {
+            ev = (em_event_t){.kind = EM_EV_TRANSPORT, .value = (int32_t)atomic_load(&transport_generation)};
+        } else {
+            if (xQueueReceive(worker_queue, &ev, portMAX_DELAY) != pdTRUE) continue;
+            if (ev.kind == EM_EV_TRANSPORT) {
+                if (!atomic_exchange(&transport_pending, false)) continue;
+                ev.value = (int32_t)atomic_load(&transport_generation);
+            }
+        }
+        if (ev.kind == EM_EV_NETWORK || ev.kind == EM_EV_WAKE || ev.kind == EM_EV_TRANSPORT) {
+            if (ev.kind == EM_EV_TRANSPORT && hooks.transport_reconcile) hooks.transport_reconcile();
             for (int i = 0; i < EM_MAX_INSTANCES; i++) {
                 struct espmod_instance *in = registry[i];
                 if (!in) continue;
-                if (ev.kind == EM_EV_WAKE) {
+                if (ev.kind == EM_EV_TRANSPORT) {
+                    (void)settle(in, dispatch(in, ESPMOD_HOST_COMPONENT, ESPMOD_HOST_TRANSPORT, ev.value, 0, NULL, 0));
+                } else if (ev.kind == EM_EV_WAKE) {
                     bool want = false;
                     for (int k = 0; k < EM_ALARMS; k++) want |= in->alarms[k].used && (in->alarms[k].flags & ESPMOD_ALARM_WINDOW);
                     if (!want) continue;
@@ -854,6 +884,13 @@ static void worker(void *arg)
             break;
         case EM_EV_REQUEST: handle_request(in, &ev); break;
         case EM_EV_PACKET: handle_packets(in); break;
+        case EM_EV_IO: {
+            if (ev.value >= ESPMOD_SOCKET_EVENT_OPEN && ev.value <= ESPMOD_SOCKET_EVENT_WRITE_DONE) socket_delivered((uint32_t)ev.id);
+            espmod_call call = {.size = sizeof(call), .component = ev.component, .method = ev.method,
+                                .value = ev.value, .id = ev.id};
+            (void)settle(in, dispatch_x(in, &call));
+            break;
+        }
         case EM_EV_ALARM: handle_alarm(in, &ev); break;
         default: break;
         }
@@ -867,15 +904,21 @@ uint32_t espmod_host_stack_high_water(void) { return worker_task ? (uint32_t)uxT
 
 esp_err_t espmod_host_init(const espmod_host_hooks_t *h)
 {
+    if (inited) return ESP_OK;
     if (h) hooks = *h;
+    extern void em_profile_install(espmod_host_hooks_t *);
+    em_profile_install(&hooks);
     em_periph_reserve((h ? h->reserved_pins : 0) | em_serial_pins());
     if (inited) return ESP_OK;
+    if (em_info_init()) return ESP_ERR_NO_MEM;
     worker_queue = xQueueCreate(CONFIG_ESPMOD_EVENT_QUEUE, sizeof(em_event_t));
     if (!worker_queue) return ESP_ERR_NO_MEM;
     if (xTaskCreate(worker, "espmod", CONFIG_ESPMOD_WORKER_STACK, NULL, CONFIG_ESPMOD_WORKER_PRIORITY, &worker_task) != pdPASS)
         return ESP_ERR_NO_MEM;
     em_periph_init();
     inited = true;
+    espmod_bearer_profile initial = {.size = sizeof(initial)}; uint32_t generation;
+    if (hooks.transport_get && !hooks.transport_get(&initial, &generation)) espmod_host_transport_changed(generation);
     return ESP_OK;
 }
 
@@ -894,9 +937,10 @@ esp_err_t espmod_host_init_simple(espmod_host_emit_fn emit, const espmod_host_ex
     if (ext) {
         h.wifi_start = ext->wifi_start; h.wifi_stop = ext->wifi_stop; h.wifi_status = ext->wifi_status;
         h.wifi_config = ext->wifi_config; h.wifi_saved = ext->wifi_saved; h.nv = ext->nv; h.pool = ext->pool; h.wifi_scan = ext->wifi_scan;
-        h.loader_start = ext->loader_start; h.loader_stop = ext->loader_stop;
         h.modules_info = ext->modules_info; h.module_start = ext->module_start; h.module_stop = ext->module_stop;
         h.module_manifest = ext->module_manifest;
+        h.transport_reconcile = ext->transport_reconcile;
+        h.transport_set = ext->transport_set; h.transport_get = ext->transport_get;
         h.packet = ext->packet; h.inbox_ready = ext->inbox_ready;
     }
     return espmod_host_init(&h);
@@ -917,12 +961,20 @@ void espmod_host_wake_window(void)
     (void)xQueueSend(worker_queue, &ev, 0);
 }
 
+void espmod_host_transport_changed(uint32_t generation)
+{
+    if (!inited) return;
+    atomic_store(&transport_generation, generation);
+    atomic_store(&transport_pending, true);
+    em_event_t ev = {.kind = EM_EV_TRANSPORT};
+    (void)xQueueSend(worker_queue, &ev, 0);
+}
+
 uint32_t espmod_host_features(void)
 {
-    return ESPMOD_FEAT_SETTINGS | ESPMOD_FEAT_SPI | ESPMOD_FEAT_SPI_READY | ESPMOD_FEAT_I2C |
+    return ESPMOD_FEAT_FLASH | ESPMOD_FEAT_SOCKET | (hooks.transport_set ? ESPMOD_FEAT_TRANSPORT_PROFILE : 0) | ESPMOD_FEAT_SETTINGS | ESPMOD_FEAT_SPI | ESPMOD_FEAT_SPI_READY | ESPMOD_FEAT_I2C |
            ESPMOD_FEAT_ADC | ESPMOD_FEAT_RGBLED | ESPMOD_FEAT_SERVICE |
            (hooks.next_window_ms ? ESPMOD_FEAT_ALARM_FLEX : 0) | (hooks.wifi_start ? ESPMOD_FEAT_WIFI : 0) |
-           (hooks.loader_start ? ESPMOD_FEAT_LOADER : 0) |
            ESPMOD_FEAT_SERIAL | ESPMOD_FEAT_PACKETS | ESPMOD_FEAT_MEMORY | (hooks.modules_info ? ESPMOD_FEAT_MODULES : 0);
 }
 
@@ -936,11 +988,13 @@ espmod_instance_t *espmod_instance_create(const char *name, const espmod_instanc
     in->state_bytes = cfg->state_bytes;
     in->component = cfg->component;
     espmod_held_init(&in->held, CONFIG_ESPMOD_PKT_HELD);
-    espmod_mem_init(&in->mem, CONFIG_ESPMOD_MEM_QUOTA);
+    espmod_mem_init(&in->mem, CONFIG_ESPMOD_MEM_QUOTA ? CONFIG_ESPMOD_MEM_QUOTA : UINT32_MAX);
     in->state = calloc(1, cfg->state_bytes ? cfg->state_bytes : 1);
     in->inbox = malloc(CONFIG_ESPMOD_REQUEST_MAX);
     if (!in->state || !in->inbox) { free(in->state); free(in->inbox); free(in); return NULL; }
     in->table = (espmod_host){
+        .device_info = h_device_info, .info_publish = h_info_publish, .get_component = h_get_component,
+        .transport_set = h_transport_set, .transport_get = h_transport_get,
         .abi_version = ESPMOD_ABI_VERSION,
         .size = sizeof(espmod_host),
         .features = espmod_host_features(),
@@ -949,7 +1003,6 @@ espmod_instance_t *espmod_instance_create(const char *name, const espmod_instanc
         .call_service = h_call_service, .get_setting = h_get_setting, .set_setting = h_set_setting,
         .alarm_set = h_alarm_set, .alarm_cancel = h_alarm_cancel, .connected = h_connected,
         .wifi_start = h_wifi_start, .wifi_stop = h_wifi_stop, .wifi_info = h_wifi_info, .wifi_config = h_wifi_config,
-        .loader_start = h_loader_start, .loader_stop = h_loader_stop,
         .serial_open = h_serial_open, .serial_write = h_serial_write, .serial_close = h_serial_close,
         .modules_info = h_modules_info, .module_start = h_module_start, .module_stop = h_module_stop,
         .events_info = h_events_info, .reset = h_reset,

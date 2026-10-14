@@ -230,7 +230,7 @@ typedef struct { uint32_t size, magic; uintptr_t raw; } mem_head;
 
 void *espmod_mem_alloc(espmod_mem *m, size_t size)
 {
-    if (!size || size > m->quota || m->used > m->quota - size) return NULL;
+    if (!size || size > SIZE_MAX - MEM_HEADER - 15 || size > m->quota || m->used > m->quota - size) return NULL;
     uint8_t *raw = malloc(size + MEM_HEADER + 15);
     if (!raw) return NULL;
     uint8_t *user = (uint8_t *)(((uintptr_t)raw + MEM_HEADER + 15) & ~(uintptr_t)15);

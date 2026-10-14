@@ -19,7 +19,7 @@ extern "C" {
 #endif
 
 /* Where a module's output goes. All hooks may be NULL (events dropped, services not found). */
-/* One access point of a scan (the layout of esp_wifi_loader_ap_t). `auth` is the driver's authentication mode number. */
+/* One access point of a scan. `auth` is the driver's authentication mode number. */
 typedef struct { uint8_t ssid[32]; uint8_t ssid_len; uint8_t bssid[6]; int8_t rssi; uint8_t channel; uint8_t auth; } espmod_ap_t;
 
 typedef struct {
@@ -32,27 +32,26 @@ typedef struct {
                         size_t request_len, uint8_t *response, size_t response_capacity,
                         size_t *response_len, uint32_t timeout_ms);
     void *service_ctx;
-    /* wifi_*, loader_* and the module calls of abi/API.md. NULL: not offered. esp-wifi-loader implements the network
-     * ones (esp_wifi_loader_wifi_*, esp_wifi_loader_server_*), espmod_loader the module ones; all are called on the
+    /* wifi_* and the module calls of abi/API.md. NULL: not offered; the optional
+     * espmod_wifi component implements simple STA hooks in C, and the Rust host has its own STA hooks.
+     * espmod_loader implements the module ones; all are called on the
      * worker and must return at once. wifi_status fills state (0 off, 1 joining, 2 up), the name, the IPv4 address
      * and the signal; the host turns it into the CBOR of wifi_info. modules_info writes CBOR (slot records). */
     int (*wifi_start)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
     void (*wifi_stop)(void);
     int (*wifi_status)(int *state, char ssid[33], char ip[16], int *rssi);
-    /* Scan for networks (blocking, a few seconds): fills up to `max` entries, strongest first, returns the count or a negative
-     * code (-5 busy, -6 no memory, -7 the driver refused). The host turns it into the CBOR array of wifi_scan. */
+    /* Nonblocking scan: first call starts it and returns -5; later calls return -5 until done, then fill up to `max`
+     * entries and return the count. The host turns them into the CBOR array of wifi_scan. */
     int (*wifi_scan)(espmod_ap_t *aps, size_t max);
-    /* The device's own (optional) network, kept by esp-wifi-loader in NVS: set (empty ssid clears) and read back (1: configured). */
+    /* The device's own (optional) network, kept in NVS by the application: set (empty ssid clears) and read back (1: configured). */
     int (*wifi_config)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
     int (*wifi_saved)(char ssid[33], int *has_psk);
     /* A named device setting (abi/API.md, nv): value NULL reads into out and returns the length; -1 bad argument, -3 storage,
-     * -4 unknown or unset, -5 buffer too small. The application answers for its own names; esp-wifi-loader's is esp_wifi_loader_nv. */
+     * -4 unknown or unset, -5 buffer too small. The application answers for its own names. */
     int (*nv)(const char *key, size_t key_len, const uint8_t *value, size_t value_len, uint8_t *out, size_t cap);
     /* The application's own packet pool (DMesh: the QUIC pool), used for every packet a module takes or is sent, instead of one of
      * this host's. NULL: the host's dynamic pool (CONFIG_ESPMOD_PKT_*). Must outlive the host; slots at least ESPMOD_PKT_SLOT_MIN. */
     const espmod_pool_ops *pool;
-    int (*loader_start)(const uint8_t *name, size_t name_len);
-    void (*loader_stop)(void);
     int (*modules_info)(uint8_t *out, size_t capacity);
     int (*module_start)(const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len);
     int (*module_stop)(const uint8_t *name, size_t name_len);
@@ -72,6 +71,10 @@ typedef struct {
      * its delay. Called from the timer task. */
     uint32_t (*next_window_ms)(void *ctx);
     void *window_ctx;
+    /* Optional subset owner, invoked on the serialized worker after profile publication. */
+    void (*transport_reconcile)(void);
+    int (*transport_set)(const uint8_t *request, size_t len, uint32_t *generation);
+    int (*transport_get)(espmod_bearer_profile *profile, uint32_t *generation);
 } espmod_host_hooks_t;
 
 /* For an application that cannot build the hook table (Rust): events only, plus the network calls when given. */
@@ -80,26 +83,28 @@ typedef struct {
     int (*wifi_start)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
     void (*wifi_stop)(void);
     int (*wifi_status)(int *state, char ssid[33], char ip[16], int *rssi);
-    /* Scan for networks (blocking, a few seconds): fills up to `max` entries, strongest first, returns the count or a negative
-     * code (-5 busy, -6 no memory, -7 the driver refused). The host turns it into the CBOR array of wifi_scan. */
+    /* Nonblocking scan: first call starts it and returns -5; later calls return -5 until done, then fill up to `max`
+     * entries and return the count. The host turns them into the CBOR array of wifi_scan. */
     int (*wifi_scan)(espmod_ap_t *aps, size_t max);
-    /* The device's own (optional) network, kept by esp-wifi-loader in NVS: set (empty ssid clears) and read back (1: configured). */
+    /* The device's own (optional) network, kept in NVS by the application: set (empty ssid clears) and read back (1: configured). */
     int (*wifi_config)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
     int (*wifi_saved)(char ssid[33], int *has_psk);
     /* A named device setting (abi/API.md, nv): value NULL reads into out and returns the length; -1 bad argument, -3 storage,
-     * -4 unknown or unset, -5 buffer too small. The application answers for its own names; esp-wifi-loader's is esp_wifi_loader_nv. */
+     * -4 unknown or unset, -5 buffer too small. The application answers for its own names. */
     int (*nv)(const char *key, size_t key_len, const uint8_t *value, size_t value_len, uint8_t *out, size_t cap);
     /* The application's own packet pool (DMesh: the QUIC pool), used for every packet a module takes or is sent, instead of one of
      * this host's. NULL: the host's dynamic pool (CONFIG_ESPMOD_PKT_*). Must outlive the host; slots at least ESPMOD_PKT_SLOT_MIN. */
     const espmod_pool_ops *pool;
-    int (*loader_start)(const uint8_t *name, size_t name_len);
-    void (*loader_stop)(void);
     int (*modules_info)(uint8_t *out, size_t capacity);
     int (*module_start)(const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len);
     int (*module_stop)(const uint8_t *name, size_t name_len);
     int (*module_manifest)(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
     int (*packet)(void *ctx, const char *module, uint32_t from, int component, int method, uint64_t id, const uint8_t *data, size_t len);
     void (*inbox_ready)(void *ctx, int component);
+    /* Optional subset owner, invoked on the serialized worker after profile publication. */
+    void (*transport_reconcile)(void);
+    int (*transport_set)(const uint8_t *request, size_t len, uint32_t *generation);
+    int (*transport_get)(espmod_bearer_profile *profile, uint32_t *generation);
 } espmod_host_ext_t;
 esp_err_t espmod_host_init_simple(espmod_host_emit_fn emit, const espmod_host_ext_t *ext);
 
@@ -110,6 +115,16 @@ esp_err_t espmod_host_init(const espmod_host_hooks_t *hooks);
 void espmod_host_set_connected(bool connected);
 /* A wake window opened (any task): modules with a WINDOW alarm get HOST_WAKE. */
 void espmod_host_wake_window(void);
+/* Desired profile committed: queued on the serialized module worker. */
+void espmod_host_transport_changed(uint32_t generation);
+/* Desired state API for C owners. Set/get copy a coherent snapshot. */
+int espmod_transport_set(const uint8_t *request, size_t len, uint32_t *generation);
+int espmod_transport_get(espmod_bearer_profile *profile, uint32_t *generation);
+
+/* Structured status for native host components, using the same cache as modules.
+ * Native publications live until replaced or cleared (len zero). Copies the map. */
+int espmod_device_info(uint8_t *out, size_t capacity);
+int espmod_info_publish(int32_t component, int32_t method, const uint8_t *data, size_t len);
 
 typedef struct espmod_instance espmod_instance_t;
 

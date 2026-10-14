@@ -1,1 +1,0 @@
-Optional: use the esp-wifi-loader code to start/stop a TCP loader accepting signed images.

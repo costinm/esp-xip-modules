@@ -31,6 +31,7 @@ enum {
 #define ESPMOD_HOST_STOP 2 /* Main asks the module to end. The instance is destroyed after the call; release what is not released by that (a radio left transmitting). */
 #define ESPMOD_HOST_NETWORK 3 /* Connectivity changed; value is 1 when main has a network path, else 0. Delivered to every running module (a handler that has nothing to do returns at once). */
 #define ESPMOD_HOST_WAKE 4 /* A wake window opened. Only if the module asked with an alarm using ALARM_WINDOW. */
+#define ESPMOD_HOST_TRANSPORT 5 /* Desired bearer profile changed; value is its generation. Read it with transport_get and reconcile. */
 
 /* Return values of a handler. */
 #define ESPMOD_RET_CONTINUE 0 /* Keep the instance. */
@@ -80,14 +81,14 @@ enum {
 #define ESPMOD_FEAT_RGBLED 32 /* rgbled_write. */
 #define ESPMOD_FEAT_SERVICE 64 /* call_service. */
 #define ESPMOD_FEAT_ALARM_FLEX 128 /* ALARM_FLEXIBLE windows are real (the host has a sleepy mode); otherwise a flexible alarm fires at its delay. */
-#define ESPMOD_FEAT_WIFI 0x100u /* wifi_start / wifi_stop / wifi_config / wifi_info / wifi_scan. */
-#define ESPMOD_FEAT_LOADER 0x200u /* loader_start / loader_stop. */
+#define ESPMOD_FEAT_WIFI 0x100u /* Optional wifi_start, wifi_stop, wifi_info, wifi_config, and wifi_scan primitives. */
 #define ESPMOD_FEAT_SERIAL 0x400u /* serial_open / serial_write / serial_close. */
 #define ESPMOD_FEAT_MODULES 0x1000u /* modules_info, module_start, module_stop, events_info, reset. */
 #define ESPMOD_FEAT_PACKETS 0x2000u /* pkt_* and send, call.pkt / call.from / call.id. */
 #define ESPMOD_FEAT_MEMORY 0x4000u /* mem_alloc / mem_free. */
 #define ESPMOD_FEAT_SOCKET 0x8000u /* Nonblocking TCP sockets and packet writes. */
-#define ESPMOD_FEAT_FLASH 0x10000u /* Module-slot flash erase, pool-packet write, and short read; writes also require a signed manifest declaration. */
+#define ESPMOD_FEAT_TRANSPORT_PROFILE 0x20000u /* Shared desired bearer profile, module notifications and optional saved startup profile. */
+#define ESPMOD_FEAT_FLASH 0x10000u /* Physical flash erase, pool-packet write and read; image policy belongs to callers. */
 
 /* SOCKET_MODE */
 #define ESPMOD_SOCKET_MODE_DIRECT 0 /* Readiness callback; the module calls nonblocking socket_read or socket_write. */
@@ -106,6 +107,50 @@ enum {
 #define ESPMOD_DMOD_MAGIC 0x444f4d44u /* 'DMOD' little endian. */
 #define ESPMOD_DMOD_HEADER_SIZE 64
 #define ESPMOD_DMOD_FLAG_FIXED_VMA 1 /* Linked at code_vma/data_vma (Xtensa); otherwise position independent (RISC-V). */
+
+/* complete desired physical bearer configuration */
+typedef struct espmod_bearer_profile {
+    uint32_t size; /* Size of this struct; caller sets it to sizeof(espmod_bearer_profile). */
+    uint32_t version; /* Profile layout version. Default=1. */
+    uint8_t ssid[33]; /* Desired ssid. Default=0. */
+    uint32_t ssid_len; /* Desired ssid_len. Default=0. */
+    uint8_t sta_passphrase[64]; /* Desired sta_passphrase. Default=0. */
+    uint32_t sta_passphrase_len; /* Desired sta_passphrase_len. Default=0. */
+    uint8_t sta_bssid[6]; /* Desired sta_bssid. Default=0. */
+    uint8_t sta_bssid_set; /* Desired sta_bssid_set. Default=0. */
+    uint8_t sta_channel; /* Desired sta_channel. Default=0. */
+    uint8_t espnow_capture; /* Desired espnow_capture. Default=0. */
+    uint8_t nan_dw_interval; /* Desired nan_dw_interval. Default=1. */
+    uint8_t now; /* Desired now. Default=0. */
+    uint8_t ndp; /* Desired ndp. Default=0. */
+    uint8_t ap; /* Desired ap. Default=1. */
+    uint8_t open; /* Desired open. Default=0. */
+    uint8_t uart; /* Desired uart. Default=1. */
+    uint8_t ble; /* Desired ble. Default=0. */
+    uint8_t uart_mode; /* Desired uart_mode. Default=2. */
+    uint32_t uart_baud; /* Desired uart_baud. Default=115200. */
+    uint8_t uart_port; /* Desired uart_port. Default=0. */
+    uint8_t radio_mode; /* Desired radio_mode. Default=0. */
+    uint32_t radio_frequency; /* Desired radio_frequency. Default=0. */
+    uint32_t radio_bandwidth; /* Desired radio_bandwidth. Default=0. */
+    uint32_t radio_bitrate; /* Desired radio_bitrate. Default=0. */
+    int32_t radio_tx_power; /* Desired radio_tx_power. Default=0. */
+    uint8_t radio_spreading_factor; /* Desired radio_spreading_factor. Default=0. */
+    uint8_t radio_coding_rate; /* Desired radio_coding_rate. Default=0. */
+    uint8_t ap_ssid[33]; /* Desired ap_ssid. Default=0. */
+    uint32_t ap_ssid_len; /* Desired ap_ssid_len. Default=0. */
+    uint8_t ap_passphrase[64]; /* Desired ap_passphrase. Default=0. */
+    uint32_t ap_passphrase_len; /* Desired ap_passphrase_len. Default=0. */
+    uint8_t run_requested; /* Desired run_requested. Default=0. */
+    uint32_t mode; /* Desired mode. Default=0. */
+    uint8_t raw_tx_rate; /* Desired raw_tx_rate. Default=0. */
+    uint8_t sta_driver_tx; /* Desired sta_driver_tx. Default=1. */
+    uint8_t sta_bssid_check_disabled; /* Desired sta_bssid_check_disabled. Default=1. */
+    uint8_t sta_ampdu_enabled; /* Desired sta_ampdu_enabled. Default=1. */
+    uint8_t sta_11b_rates_disabled; /* Desired sta_11b_rates_disabled. Default=1. */
+    uint8_t sta_raw_rx_enabled; /* Desired sta_raw_rx_enabled. Default=1. */
+} espmod_bearer_profile;
+_Static_assert(sizeof(espmod_bearer_profile) == 284, "espmod_bearer_profile layout");
 
 /* argument of spi_open */
 typedef struct espmod_spi_config {
@@ -195,43 +240,46 @@ typedef struct espmod_host {
     int (*wifi_stop)(void *user); /* slot 23: leave the network and switch the radio off */
     int (*wifi_info)(void *user, uint8_t *out, size_t capacity); /* slot 24: state of the Wi-Fi */
     int (*wifi_config)(void *user, const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len); /* slot 25: the network this device uses when it is not told one */
-    int (*loader_start)(void *user, const uint8_t *name, size_t name_len); /* slot 26: accept a signed package called name */
-    int (*loader_stop)(void *user); /* slot 27: close the upload server */
-    int (*serial_open)(void *user, int component, int method); /* slot 28: receive the lines typed on the board's serial port */
-    int (*serial_write)(void *user, const uint8_t *data, size_t len); /* slot 29: write text to the serial port */
-    int (*serial_close)(void *user); /* slot 30: give the serial port back */
-    int (*modules_info)(void *user, uint8_t *out, size_t capacity); /* slot 31: every module slot */
-    int (*module_start)(void *user, const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len); /* slot 32: start the module installed in a slot */
-    int (*module_stop)(void *user, const uint8_t *name, size_t name_len); /* slot 33: ask a module to end */
-    int (*events_info)(void *user, uint8_t *out, size_t capacity); /* slot 34: the last events modules emitted */
-    int (*reset)(void *user); /* slot 35: restart the device */
-    int (*pkt_alloc)(void *user, uint32_t *pkt); /* slot 36: take an empty packet */
-    int (*pkt_buf)(void *user, uint32_t pkt, uint8_t **ptr, size_t *max); /* slot 37: the payload window of a packet */
-    int (*pkt_keep)(void *user, uint32_t pkt); /* slot 38: keep the packet of this call after the handler returns */
-    int (*pkt_free)(void *user, uint32_t pkt); /* slot 39: give a packet back */
-    int (*send)(void *user, uint32_t pkt, size_t len, uint32_t dst, int component, int method, uint64_t id); /* slot 40: hand a packet to a module or to the application */
-    int (*pkt_info)(void *user, uint32_t *headroom, uint32_t *max); /* slot 41: the geometry of this host's packets */
-    void * (*mem_alloc)(void *user, size_t size); /* slot 42: memory that outlives a call */
-    int (*mem_free)(void *user, void *ptr); /* slot 43: give a block back */
-    int (*module_manifest)(void *user, const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity); /* slot 44: what an installed module says about itself */
-    int (*wifi_scan)(void *user, uint8_t *out, size_t capacity); /* slot 45: the networks in range */
-    int (*heap_info)(void *user, uint8_t *out, size_t capacity); /* slot 46: free memory of the device */
-    int (*nv)(void *user, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len, uint8_t *out, size_t capacity); /* slot 47: a device setting by name */
-    int (*heap_dump)(void *user, int kind); /* slot 48: print where the memory is, to the device log */
-    int (*tcp_accept)(void *user, uint16_t port, uint32_t mode, int32_t component, int32_t method, uint32_t *listener); /* slot 49: register a nonblocking TCP listener */
-    int (*socket_read)(void *user, uint32_t socket, uint8_t *out, size_t len); /* slot 50: nonblocking read into module memory or a packet span */
-    int (*socket_write)(void *user, uint32_t socket, const uint8_t *data, size_t len); /* slot 51: nonblocking POSIX-style write */
-    int (*socket_close)(void *user, uint32_t socket); /* slot 52: close a listener or accepted socket */
-    int (*socket_peer)(void *user, uint32_t socket, uint8_t *address, uint16_t *port, uint32_t *scope); /* slot 53: peer address metadata */
-    int (*pkt_span)(void *user, uint32_t pkt, uint8_t **base, size_t *capacity); /* slot 54: full mutable pool slot for framing */
-    int (*socket_write_pkt)(void *user, uint32_t socket, uint32_t pkt, uint32_t start, uint32_t len); /* slot 55: transfer a pool packet for runtime-buffered output */
-    int (*flash_erase)(void *user, uint32_t slot, uint32_t offset, uint32_t len, int32_t component, int32_t method, uint64_t id); /* slot 56: enqueue a module-slot erase */
-    int (*flash_write)(void *user, uint32_t slot, uint32_t offset, uint32_t pkt, uint32_t start, uint32_t len, int32_t component, int32_t method, uint64_t id); /* slot 57: transfer a pool packet for a module-slot write */
-    int (*flash_read)(void *user, uint32_t slot, uint32_t offset, uint8_t *out, size_t len); /* slot 58: read a module slot into module memory */
+    int (*serial_open)(void *user, int component, int method); /* slot 26: receive the lines typed on the board's serial port */
+    int (*serial_write)(void *user, const uint8_t *data, size_t len); /* slot 27: write text to the serial port */
+    int (*serial_close)(void *user); /* slot 28: give the serial port back */
+    int (*modules_info)(void *user, uint8_t *out, size_t capacity); /* slot 29: every module slot */
+    int (*module_start)(void *user, const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len); /* slot 30: start the module installed in a slot */
+    int (*module_stop)(void *user, const uint8_t *name, size_t name_len); /* slot 31: ask a module to end */
+    int (*events_info)(void *user, uint8_t *out, size_t capacity); /* slot 32: the last events modules emitted */
+    int (*reset)(void *user); /* slot 33: restart the device */
+    int (*pkt_alloc)(void *user, uint32_t *pkt); /* slot 34: take an empty packet */
+    int (*pkt_buf)(void *user, uint32_t pkt, uint8_t **ptr, size_t *max); /* slot 35: the payload window of a packet */
+    int (*pkt_keep)(void *user, uint32_t pkt); /* slot 36: keep the packet of this call after the handler returns */
+    int (*pkt_free)(void *user, uint32_t pkt); /* slot 37: give a packet back */
+    int (*send)(void *user, uint32_t pkt, size_t len, uint32_t dst, int component, int method, uint64_t id); /* slot 38: hand a packet to a module or to the application */
+    int (*pkt_info)(void *user, uint32_t *headroom, uint32_t *max); /* slot 39: the geometry of this host's packets */
+    void * (*mem_alloc)(void *user, size_t size); /* slot 40: memory that outlives a call */
+    int (*mem_free)(void *user, void *ptr); /* slot 41: give a block back */
+    int (*module_manifest)(void *user, const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity); /* slot 42: what an installed module says about itself */
+    int (*wifi_scan)(void *user, uint8_t *out, size_t capacity); /* slot 43: the networks in range */
+    int (*heap_info)(void *user, uint8_t *out, size_t capacity); /* slot 44: free memory of the device */
+    int (*nv)(void *user, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len, uint8_t *out, size_t capacity); /* slot 45: a device setting by name */
+    int (*heap_dump)(void *user, int kind); /* slot 46: print where the memory is, to the device log */
+    int (*tcp_accept)(void *user, uint16_t port, uint32_t mode, int32_t component, int32_t method, uint32_t *listener); /* slot 47: register a nonblocking TCP listener */
+    int (*socket_read)(void *user, uint32_t socket, uint8_t *out, size_t len); /* slot 48: nonblocking read into module memory or a packet span */
+    int (*socket_write)(void *user, uint32_t socket, const uint8_t *data, size_t len); /* slot 49: nonblocking POSIX-style write */
+    int (*socket_close)(void *user, uint32_t socket); /* slot 50: close a listener or accepted socket */
+    int (*socket_peer)(void *user, uint32_t socket, uint8_t *address, uint16_t *port, uint32_t *scope); /* slot 51: peer address metadata */
+    int (*pkt_span)(void *user, uint32_t pkt, uint8_t **base, size_t *capacity); /* slot 52: full mutable pool slot for framing */
+    int (*socket_write_pkt)(void *user, uint32_t socket, uint32_t pkt, uint32_t start, uint32_t len); /* slot 53: transfer a pool packet for runtime-buffered output */
+    int (*flash_erase)(void *user, uint32_t address, uint32_t offset, uint32_t len, int32_t component, int32_t method, uint64_t id); /* slot 54: enqueue a physical flash erase */
+    int (*flash_write)(void *user, uint32_t address, uint32_t offset, uint32_t pkt, uint32_t start, uint32_t len, int32_t component, int32_t method, uint64_t id); /* slot 55: transfer a pool packet for a physical flash write */
+    int (*flash_read)(void *user, uint32_t address, uint32_t offset, uint8_t *out, size_t len); /* slot 56: read physical flash into module memory */
+    int (*transport_set)(void *user, const uint8_t *request, size_t len, uint32_t *generation); /* slot 57: apply a partial desired transport request */
+    int (*transport_get)(void *user, espmod_bearer_profile *profile, uint32_t *generation); /* slot 58: read the desired bearer profile */
+    int (*device_info)(void *user, uint8_t *out, size_t capacity); /* slot 59: structured device and component status */
+    int (*info_publish)(void *user, int32_t component, int32_t method, const uint8_t *data, size_t len); /* slot 60: replace a cached component status contribution */
+    const void * (*get_component)(void *user, const char *name); /* slot 61: get a live host function table */
 } espmod_host;
 
 #if UINTPTR_MAX == 0xffffffffu
-_Static_assert(sizeof(espmod_host) == 252, "espmod_host layout");
+_Static_assert(sizeof(espmod_host) == 264, "espmod_host layout");
 #endif
 
 /* Non-zero when the host's table includes this call (older hosts are shorter). */
