@@ -12,8 +12,5 @@ publish = false
 [dependencies]
 espmod-abi = { path = "../espmod-abi" }
 
-[features]
-# The console module (modules/mod_console) starter.
-console = []
-# wifi_*, loader_* and installing uploads through esp-wifi-loader's C component and components/espmod_install.
-network = []
+[target.'cfg(target_os = "espidf")'.dependencies]
+esp-idf-sys = { version = "0.37", default-features = false, features = ["alloc_handler"] }

@@ -350,9 +350,11 @@ pub struct Host {
     pub device_info: Option<unsafe extern "C" fn(user: *mut c_void, out: *mut u8, capacity: usize) -> i32>,
     /// replace a cached component status contribution
     pub info_publish: Option<unsafe extern "C" fn(user: *mut c_void, component: i32, method: i32, data: *const u8, len: usize) -> i32>,
+    /// get a live host function table
+    pub get_component: Option<unsafe extern "C" fn(user: *mut c_void, name: *const core::ffi::c_char) -> *const u8>,
 }
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<Host>() == 260);
+const _: () = assert!(core::mem::size_of::<Host>() == 264);
 
 /// Byte offset of each host call, for `Host::has`.
 pub mod slot {
@@ -417,4 +419,5 @@ pub mod slot {
     pub const TRANSPORT_GET: usize = 248;
     pub const DEVICE_INFO: usize = 252;
     pub const INFO_PUBLISH: usize = 256;
+    pub const GET_COMPONENT: usize = 260;
 }

@@ -1,28 +1,29 @@
-# The same baseline as the C main (../../../sdkconfig.defaults), for a Rust std application.
-# Same baseline as esp-wifi-loader's Main images (docs/app-integration.md there):
-# the loader's Stage2 boots us in DIO or QIO; the driver must stay DIO.
+# Rust sample baseline. The sample does not start Wi-Fi or an uploader.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
-# Lets a module (or the loader) ask for the loader on the next boot; reserve the RTC area like the loader does.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 CONFIG_BOOTLOADER_RESERVE_RTC_MEM=y
 CONFIG_BOOTLOADER_RESERVE_RTC_SIZE=0x10
 CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC=y
 CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC_SIZE=0x20
-# The loader maps module pages itself and writes the module partition through the partition API.
 CONFIG_LOG_DEFAULT_LEVEL_WARN=y
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 CONFIG_FREERTOS_HZ=1000
-CONFIG_ESP_WIFI_NVS_ENABLED=n
-CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
-CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
-# esp-wifi-loader's Wi-Fi (esp_wifi_loader_net_*) sets up link-local IPv6
-CONFIG_LWIP_IPV6=y
-# esp-wifi-loader as a library: this application owns the network and hands upload sockets to it
-CONFIG_WL_MODE_LIBRARY=y
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# Allocation limit, not reserved RAM: accommodates the optional external flash module.
+CONFIG_ESPMOD_MEM_QUOTA=0
+
+# Rust runtime retains WPA3/SAE support.
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y
+CONFIG_ESP_WIFI_ENABLE_SAE_H2E=y
+CONFIG_ESP_WIFI_ENABLE_SAE_PK=y
+CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=y
+
+# The raw flash HAL serves an owner-controlled module. Loader state sectors
+# are inside the running loader partition; SDK partition policy must not abort.
+CONFIG_SPI_FLASH_DANGEROUS_WRITE_ALLOWED=y

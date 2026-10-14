@@ -12,15 +12,26 @@ pub struct Slot {
 // The name is a string literal.
 unsafe impl Sync for Slot {}
 
+/// Six-page module layout preset. The runtime owns names, tags,
+/// offsets and the state-log slot order; applications select this preset.
+pub static MODULE_SLOTS: [Slot; 6] = [
+    crate::slot!("lora", 43, 0x00000, 0x10000),
+    crate::slot!("flash", 44, 0x10000, 0x10000),
+    crate::slot!("hw", 45, 0x20000, 0x10000),
+    crate::slot!("hello", 46, 0x30000, 0x10000),
+    crate::slot!("test", 2, 0x40000, 0x10000),
+    crate::slot!("console", 20, 0x50000, 0x10000),
+];
+
 impl Slot {
     /// `name` must end with NUL; use the macro.
     pub const fn new(name: *const u8, tag: u16, offset: u32, size: u32) -> Self {
         Slot { name, tag, offset, size }
     }
 
-    pub fn name_ptr(&self) -> *const u8 {
-        self.name
-    }
+    pub fn name_ptr(&self) -> *const u8 { self.name }
+    pub fn offset(&self) -> u32 { self.offset }
+    pub fn size(&self) -> u32 { self.size }
 }
 
 /// `slot!("lora", 43, 0x00000, 0x10000)`: name, tag (the component number of the module), offset in the module
@@ -44,18 +55,45 @@ pub struct SlotStatus {
     pub last_runtime_ms: u32,
     pub stack_high_water_bytes: u32,
     pub last_check: i32,
+    pub needs_reboot: bool,
 }
 
 /// An event a module emitted: `(module, event id, value type, value)`; called on the host worker, return 0.
 pub type EventHandler = fn(&str, u16, u8, &[u8]) -> i32;
+
+/// The application's packet pool as the host uses it (`espmod_pool_ops`): a slot is an index; `acquire` returns one with a single
+/// reference (`reserve` slots stay free for the application), the last `release` frees it. DMesh implements it on the QUIC pool, so
+/// the packets of modules and of the network come from one budget that grows and shrinks with the heap.
+#[repr(C)]
+pub struct PoolOps {
+    pub ctx: *mut core::ffi::c_void,
+    pub acquire: unsafe extern "C" fn(*mut core::ffi::c_void, u16) -> i32,
+    pub retain: unsafe extern "C" fn(*mut core::ffi::c_void, i32),
+    pub release: unsafe extern "C" fn(*mut core::ffi::c_void, i32),
+    pub refs: unsafe extern "C" fn(*mut core::ffi::c_void, i32) -> u32,
+    pub data: unsafe extern "C" fn(*mut core::ffi::c_void, i32) -> *mut u8,
+    pub slot_size: unsafe extern "C" fn(*mut core::ffi::c_void) -> u16,
+    pub slots: unsafe extern "C" fn(*mut core::ffi::c_void) -> u16,
+    pub available: unsafe extern "C" fn(*mut core::ffi::c_void) -> u16,
+}
+unsafe impl Sync for PoolOps {}
 
 /// What the application offers its modules through the ABI beyond the hardware.
 #[derive(Clone, Copy, Default)]
 pub struct Features {
     /// `status`, `start`, `stop` of module slots for the console module (links `espmod_loader`'s by-name calls).
     pub modules: bool,
-    /// `wifi_*`, `loader_*` and installing uploads, on esp-wifi-loader's C component (needs the `network` feature).
-    pub network: bool,
+    /// Do not start the installed modules whose manifest asks for it (a console) when the host starts: the application
+    /// owns the serial port in this boot (DMesh in `uart.mode=ppp`) and starts them itself, or never.
+    pub no_autostart: bool,
+    /// The application's own device settings (`nv`, abi/API.md): called with a name, a value or NULL to read, and a buffer; returns
+    /// the length read, 0 written, or -1 bad argument, -3 storage, -4 unknown, -5 buffer too small.
+    pub nv: Option<unsafe extern "C" fn(*const core::ffi::c_char, usize, *const u8, usize, *mut u8, usize) -> i32>,
+    /// The application's own packet pool for module packets (see [`PoolOps`]); `None`: the host's own dynamic pool.
+    pub pool: Option<&'static PoolOps>,
+    /// Offer the Rust host's simple STA Wi-Fi ABI to modules. The application
+    /// must give this driver exclusive ownership of the radio while enabled.
+    pub wifi: bool,
 }
 
 #[cfg(target_os = "espidf")]
@@ -71,11 +109,20 @@ mod imp {
         wifi_start: Option<unsafe extern "C" fn(*const u8, usize, *const u8, usize) -> i32>,
         wifi_stop: Option<unsafe extern "C" fn()>,
         wifi_status: Option<unsafe extern "C" fn(*mut i32, *mut c_char, *mut c_char, *mut i32) -> i32>,
-        loader_start: Option<unsafe extern "C" fn(*const u8, usize) -> i32>,
-        loader_stop: Option<unsafe extern "C" fn()>,
+        wifi_scan: Option<unsafe extern "C" fn(*mut u8, usize) -> i32>,
+        wifi_config: Option<unsafe extern "C" fn(*const u8, usize, *const u8, usize) -> i32>,
+        wifi_saved: Option<unsafe extern "C" fn(*mut c_char, *mut i32) -> i32>,
+        nv: Option<unsafe extern "C" fn(*const c_char, usize, *const u8, usize, *mut u8, usize) -> i32>,
+        pool: *const PoolOps,
         modules_info: Option<unsafe extern "C" fn(*mut u8, usize) -> i32>,
         module_start: Option<unsafe extern "C" fn(*const u8, usize, *const u8, usize) -> i32>,
         module_stop: Option<unsafe extern "C" fn(*const u8, usize) -> i32>,
+        module_manifest: Option<unsafe extern "C" fn(*const u8, usize, *mut u8, usize) -> i32>,
+        packet: Option<unsafe extern "C" fn(*mut core::ffi::c_void, *const c_char, u32, i32, i32, u64, *const u8, usize) -> i32>,
+        inbox_ready: Option<unsafe extern "C" fn(*mut core::ffi::c_void, i32)>,
+        transport_reconcile: Option<unsafe extern "C" fn()>,
+        transport_set: Option<unsafe extern "C" fn(*const u8, usize, *mut u32) -> i32>,
+        transport_get: Option<unsafe extern "C" fn(*mut espmod_abi::BearerProfile, *mut u32) -> i32>,
     }
 
     /// `espmod_loader_config_t`.
@@ -90,6 +137,7 @@ mod imp {
     extern "C" {
         fn espmod_host_init_simple(emit: extern "C" fn(*const c_char, u16, u8, *const u8, usize) -> i32, ext: *const HostExt) -> i32;
         fn espmod_loader_init(config: *const LoaderConfig) -> i32;
+        fn espmod_loader_autostart() -> i32;
         fn espmod_loader_find(name: *const u8) -> i32;
         fn espmod_loader_slot_count() -> usize;
         fn espmod_loader_start(slot: i32, request: *const u8, len: usize) -> i32;
@@ -100,16 +148,7 @@ mod imp {
         fn espmod_loader_modules_info(out: *mut u8, capacity: usize) -> i32;
         fn espmod_loader_start_named(name: *const u8, name_len: usize, request: *const u8, request_len: usize) -> i32;
         fn espmod_loader_stop_named(name: *const u8, name_len: usize) -> i32;
-    }
-
-    #[cfg(feature = "network")]
-    extern "C" {
-        fn esp_wifi_loader_wifi_start(ssid: *const u8, ssid_len: usize, psk: *const u8, psk_len: usize) -> i32;
-        fn esp_wifi_loader_wifi_stop();
-        fn esp_wifi_loader_wifi_status(state: *mut i32, ssid: *mut c_char, ip: *mut c_char, rssi: *mut i32) -> i32;
-        fn esp_wifi_loader_server_start(name: *const u8, name_len: usize) -> i32;
-        fn esp_wifi_loader_server_stop();
-        fn espmod_install_init() -> i32;
+        fn espmod_loader_manifest_named(name: *const u8, name_len: usize, out: *mut u8, capacity: usize) -> i32;
     }
 
     extern "C" fn on_emit(module: *const c_char, id: u16, vtype: u8, value: *const u8, len: usize) -> i32 {
@@ -124,22 +163,36 @@ mod imp {
 
     pub fn init(slots: &'static [Slot], partition: &'static str, features: Features, on_event: Option<EventHandler>) -> i32 {
         debug_assert!(partition.ends_with('\0'));
+        crate::module_poll_esp::install();
+        if features.wifi {
+            let mut boot = crate::profile::snapshot();
+            if crate::settings::load_sta(&mut boot).is_ok() {
+                boot.requested_transport = Some(crate::profile::TransportKind::Sta);
+                boot.run_requested = true; boot.ap = 0;
+                let _ = crate::profile::set(boot);
+            }
+        }
         let mut ext = HostExt {
-            wifi_start: None, wifi_stop: None, wifi_status: None, loader_start: None, loader_stop: None,
-            modules_info: None, module_start: None, module_stop: None,
+            wifi_start: None, wifi_stop: None, wifi_status: None, wifi_scan: None, wifi_config: None, wifi_saved: None,
+            nv: features.nv.or(Some(crate::settings::nv_hook)),
+            pool: features.pool.map_or(core::ptr::null(), |p| p as *const PoolOps),
+            transport_reconcile: features.wifi.then_some(crate::wifi_hooks::reconcile),
+            transport_set: Some(crate::profile::set_hook), transport_get: Some(crate::profile::get_hook),
+            modules_info: None, module_start: None, module_stop: None, module_manifest: None, packet: None, inbox_ready: None,
         };
         if features.modules {
             ext.modules_info = Some(espmod_loader_modules_info);
             ext.module_start = Some(espmod_loader_start_named);
             ext.module_stop = Some(espmod_loader_stop_named);
+            ext.module_manifest = Some(espmod_loader_manifest_named);
         }
-        #[cfg(feature = "network")]
-        if features.network {
-            ext.wifi_start = Some(esp_wifi_loader_wifi_start);
-            ext.wifi_stop = Some(esp_wifi_loader_wifi_stop);
-            ext.wifi_status = Some(esp_wifi_loader_wifi_status);
-            ext.loader_start = Some(esp_wifi_loader_server_start);
-            ext.loader_stop = Some(esp_wifi_loader_server_stop);
+        if features.wifi {
+            ext.wifi_start = Some(crate::wifi_hooks::start);
+            ext.wifi_stop = Some(crate::wifi_hooks::stop);
+            ext.wifi_status = Some(crate::wifi_esp::abi_status);
+            ext.wifi_config = Some(crate::wifi_hooks::config);
+            ext.wifi_saved = Some(crate::wifi_hooks::saved);
+            ext.wifi_scan = Some(crate::wifi_esp::abi_scan);
         }
         unsafe {
             HANDLER = on_event;
@@ -147,11 +200,12 @@ mod imp {
             if rc != 0 {
                 return rc;
             }
+            if features.wifi { crate::profile::notify_modules(crate::profile::generation()); }
             let rc = espmod_loader_init(&LoaderConfig { slots: slots.as_ptr(), slot_count: slots.len(), partition: partition.as_ptr(),
                                                         default_stack_bytes: 8192 });
-            #[cfg(feature = "network")]
-            if rc == 0 && features.network {
-                return espmod_install_init();
+            if rc == 0 && features.modules && !features.no_autostart {
+                // the installed modules whose manifest asks to run at boot (a console module, if there is one)
+                espmod_loader_autostart();
             }
             rc
         }
@@ -175,6 +229,10 @@ mod imp {
         unsafe { espmod_loader_start(slot as i32, request.as_ptr(), request.len()) }
     }
     pub fn stop(slot: usize, timeout_ms: u32) -> i32 { unsafe { espmod_loader_stop(slot as i32, timeout_ms) } }
+    pub fn manifest(module: &str, out: &mut [u8]) -> Result<usize, i32> {
+        let n = unsafe { espmod_loader_manifest_named(module.as_ptr(), module.len(), out.as_mut_ptr(), out.len()) };
+        if n >= 0 { Ok(n as usize) } else { Err(n) }
+    }
     pub fn request_raw(slot: usize, component: i32, method: i32, data: &[u8], answer: &mut [u8]) -> Result<usize, i32> {
         /// How long a request to a module may take (the module answers within one handler call).
         const REQUEST_TIMEOUT_MS: u32 = 1000;
@@ -198,6 +256,7 @@ mod imp {
     pub fn start(_: usize, _: &[u8]) -> i32 { -1 }
     pub fn stop(_: usize, _: u32) -> i32 { -1 }
     pub fn request_raw(_: usize, _: i32, _: i32, _: &[u8], _: &mut [u8]) -> Result<usize, i32> { Err(-1) }
+    pub fn manifest(_: &str, _: &mut [u8]) -> Result<usize, i32> { Err(-1) }
 }
 
 /// Start the host (its worker task) and the loader over `slots` in the data partition `partition` (NUL-terminated name,
@@ -217,6 +276,9 @@ pub fn stop(slot: usize, timeout_ms: u32) -> i32 { imp::stop(slot, timeout_ms) }
 pub fn stop_all(timeout_ms: u32) -> bool {
     (0..slot_count()).fold(true, |ok, slot| stop(slot, timeout_ms) == 0 && ok)
 }
+/// The CBOR manifest of an installed module (`module_manifest`, abi/API.md): what it says about itself, read from flash. The way to learn
+/// a module's method names and ids without compiling its crate in.
+pub fn manifest(module: &str, out: &mut [u8]) -> Result<usize, i32> { imp::manifest(module, out) }
 /// One request to a running module; its answer (bytes the module defines) or the loader's error.
 pub fn request_raw(slot: usize, component: i32, method: i32, data: &[u8], answer: &mut [u8]) -> Result<usize, i32> {
     imp::request_raw(slot, component, method, data, answer)

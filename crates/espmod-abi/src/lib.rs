@@ -20,6 +20,8 @@ pub mod heap;
 mod generated;
 pub use generated::*;
 
+pub mod psa;
+
 /// Table access for a module. Copy it freely: it is a pointer.
 #[derive(Clone, Copy)]
 pub struct Hw {
@@ -102,6 +104,19 @@ impl Hw {
         let h = self.table();
         if (h.size as usize) < slot::MEM_ALLOC + 4 { return core::ptr::null_mut(); }
         match h.mem_alloc { Some(f) => unsafe { f(h.user, size) }, None => core::ptr::null_mut() }
+    }
+
+    /// A host-owned table identified by its ordinary component header. NULL if
+    /// unavailable. This does not add a context argument to native functions.
+    pub fn get_component(&self, name: &core::ffi::CStr) -> *const core::ffi::c_void {
+        let h = self.table();
+        if (h.size as usize) < core::mem::offset_of!(Host, get_component) + core::mem::size_of::<usize>() {
+            return core::ptr::null();
+        }
+        match h.get_component {
+            Some(f) => unsafe { f(h.user, name.as_ptr()).cast() },
+            None => core::ptr::null(),
+        }
     }
 
     pub fn mem_free(&self, ptr: *mut u8) -> i32 {

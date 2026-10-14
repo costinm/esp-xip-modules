@@ -1214,6 +1214,26 @@ buffers are freed. Component and method are nonnegative integers.
 | `data` | `const uint8_t *` | CBOR map; NULL is valid when len is zero. |
 | `len` | `size_t` | Map size; zero removes the contribution. |
 
+## 62. `get_component` — get a live host function table
+
+**Returns:** `const void *` — table pointer, or NULL if the name is unknown/unavailable.
+
+The leading `user` argument is the requesting module's existing runtime context,
+used for bookkeeping; it is not added to functions in the returned table.
+`name` is a NUL-terminated string. Initially `"psa"` returns the host's native PSA
+crypto table, defined by the ordinary C header `include/espmod_psa.h` and a
+hand-written Rust wrapper. Component headers need not be generated from this file.
+The PSA table is read-only and valid for the firmware lifetime. Its signatures,
+context types and error codes are native SDK ones. Lookup does not initialize
+Wi-Fi or invoke another module. Module-provided tables and entrypoint changes
+are separate future work.
+
+### Arguments
+
+| Name | Type | Description |
+|---|---|---|
+| `name` | `const char *` | NUL-terminated component name; NULL returns NULL. |
+
 # Helpers
 
 Not host calls: header-only code in `include/espmod_cbor.h` (C) and `espmod-abi`'s `cbor` module (Rust), for

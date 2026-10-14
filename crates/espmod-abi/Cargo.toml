@@ -10,8 +10,13 @@ publish = false
 # `alloc` for modules over the host heap (src/heap.rs): an explicit Allocator value (nightly), and/or the global allocator.
 allocator-api = []
 global-alloc = []
+# Standard RustCrypto trait adapters backed by the native PSA table.
+rustcrypto = ["dep:digest", "dep:p256"]
 
 [workspace]
 
 [dependencies]
 mesh-api = { git = "https://github.com/costinm/ssh-mesh", default-features = false }
+
+digest = { version = "0.10", default-features = false, optional = true }
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa-core"], optional = true }

@@ -352,11 +352,15 @@ dependencies = [
 [[package]]
 name = "espmod-abi"
 version = "0.1.0"
+dependencies = [
+ "mesh-api",
+]
 
 [[package]]
 name = "espmod-host"
 version = "0.1.0"
 dependencies = [
+ "esp-idf-sys",
  "espmod-abi",
 ]
 
@@ -621,6 +625,11 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "mesh-api"
+version = "0.1.0"
+source = "git+https://github.com/costinm/ssh-mesh#6213437569129fa94e25c200211419d6bf96a82a"
 
 [[package]]
 name = "minimal-lexical"

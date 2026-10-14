@@ -12,11 +12,23 @@ let n = espmod_host::call("lora", b"idle", 43, method, &request, &mut answer)?; 
 ```
 
 * `slot!` is the table `tools/mkmod.py --slots` reads (the file may be Rust).
-* `Features { modules, network }` choose what the ABI offers beyond the hardware: the module list for the console, and Wi-Fi +
-  uploads on esp-wifi-loader's C component (feature `network`). An application with its own network and installer
-  (DMesh) passes neither.
+* `Features { modules }` chooses whether the module list and lifecycle calls are exposed to modules.
 * Feature `console` adds `console::start()`: the console module (`modules/mod_console`), which owns the serial port.
 * `example/` is the Rust twin of `main/main.c`; `example/build.sh esp32c6` builds it with the ESP Rust toolchain.
 
-The C it needs is in `components/` (`espmod_host`, `espmod_loader`, `espmod_install` and `modules/mod_console`): give the
-build those directories (and `esp-wifi-loader/components` for `network`) as extra component dirs.
+The C it needs is in `components/` (`espmod_host` and `espmod_loader`): give the build those directories as extra component dirs.
+
+The Rust host owns the shared lwIP poller and the `MODULE_SLOTS` layout preset. Socket and flash ABI calls are declared but their event bridge is still pending; signed upload policy belongs in an optional no-std `mod_flash` module.
+
+## Desired bearers
+
+`profile` owns the shared ephemeral bearer store and atomic partial requests.
+Its types and CBOR codecs come from `espmod-abi::profile`, generated from
+[`abi/API.md`](../../abi/API.md). Products use this Rust API directly; modules
+use CBOR `transport_set` and `transport_get` in the host ABI. See
+[`espmod-abi::profile`](PROFILE.md) for publication and owner rules.
+
+`settings` owns the ESP NVS access used by the Rust Wi-Fi initializer.
+The Rust driver calls ESP-IDF directly and does not depend on `espmod_wifi`'s
+C helper implementation. The optional C Wi-Fi component uses the same `wl`
+memory settings and can reconcile the STA subset of the desired profile.

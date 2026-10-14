@@ -1,17 +1,29 @@
-//! The Rust twin of `main/main.c`: start the host and the loader over a slot table and take commands on the serial
-//! port. Everything else is in the C components (`espmod_host`, `espmod_loader`, `espmod_install`) and in `modules/mod_console` and in `espmod-host`.
-use espmod_host::{console, init, slot, Features, Slot};
+//! The Rust twin of `main/main.c`: start the host and the loader over a slot table and start the installed modules that ask
+//! to run at boot (a console module, if installed). Everything else is in the C components and in `espmod-host`.
+use espmod_host::{init, Features};
+use espmod_host::MODULE_SLOTS;
 
-/// Every module of this repository, flashed into its slot (tools/mkmod.py reads this table with `--slots`). Until the
-/// loader records which module lives where, a new module means a new line here.
-static SLOTS: [Slot; 4] = [
-    slot!("hello", 1, 0x00000, 0x10000),
-    slot!("test", 2, 0x10000, 0x10000),
-    slot!("lora", 43, 0x20000, 0x10000),
-    slot!("hw", 45, 0x30000, 0x10000),
-];
 
 fn main() {
+    app_main();
+}
+
+extern "C" {
+    fn espmod_log_to_rom();
+}
+
+/// A line on the ROM console (before and independent of ESP-IDF logging).
+fn mark(text: &'static [u8]) {
+    unsafe { esp_idf_sys::esp_rom_printf(text.as_ptr().cast()) };
+}
+
+/// Our own entry point, as DMesh's main does: with esp-idf-sys's `binstart` ESP-IDF 6.0 reaches a lock of the C library's
+/// standard streams that is not initialised yet (a load fault in `app_main`, measured on an ESP32-C6). Rust's `main` is not run.
+#[no_mangle]
+pub extern "C" fn app_main() {
+    // ESP_LOG lines would be lost: with our own app_main the C library has no stdout
+    unsafe { espmod_log_to_rom() };
+    mark(b"espmod-main: entry\n\0");
     esp_idf_sys::link_patches();
     unsafe {
         let mut err = esp_idf_sys::nvs_flash_init();
@@ -21,9 +33,10 @@ fn main() {
         }
         assert_eq!(err, 0, "nvs");
     }
-    // the host keeps the last events modules emit for the console's `events`; this application needs no handler
-    assert_eq!(init(&SLOTS, "data\0", Features { modules: true, network: true }, None), 0, "host and loader");
-    assert_eq!(console::start(), 0, "console");
+    mark(b"espmod-main: nvs ok\n\0");
+    // the host keeps the last events modules emit; this application needs no handler
+    assert_eq!(init(&MODULE_SLOTS, "data\0", Features { modules: true, no_autostart: false, nv: None, pool: None, wifi: true }, None), 0, "host and loader");
+    mark(b"espmod-main: running\n\0");
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
     }

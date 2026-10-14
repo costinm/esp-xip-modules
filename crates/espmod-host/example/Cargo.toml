@@ -10,15 +10,15 @@ resolver = "2"
 [workspace]
 
 [dependencies]
-espmod-host = { path = "..", features = ["console", "network"] }
-esp-idf-sys = { version = "0.37", default-features = false, features = ["std", "binstart"] }
+espmod-host = { path = ".." }
+esp-idf-sys = { version = "0.37", default-features = false, features = ["std"] }
 
 [build-dependencies]
 embuild = "0.33.3"
 
-# The C components come from this repository and from esp-wifi-loader (checked out next to it).
+# The C components come from this repository.
 [[package.metadata.esp-idf-sys.extra_components]]
-component_dirs = ["../../../components", "../../../modules/mod_console", "../../../../esp-wifi-loader/components"]
+component_dirs = ["../../../components"]
 
 [profile.release]
 opt-level = "s"
