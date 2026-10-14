@@ -3,7 +3,7 @@
 /* mod_console: the text interface of a device (API.md in this directory), and the only place text is made or read.
  *
  * It owns the serial port through the host (serial_open): every line typed arrives as a request, and what the handler
- * answers is printed. A line is `status`, `start NAME [TEXT]`, `stop NAME`, `events`, `reset`, `wifi ...`, `loader ...`,
+ * answers is printed. A line is `status`, `start NAME [TEXT]`, `stop NAME`, `events`, `reset`, `wifi ...`,
  * `help`, or `component.method key=value ...`: the last turns into the request payload of the module `component`
  * (tagged CBOR, named by catalog.h, generated from the modules' API.md files), calls it with the host's call(), and
  * turns its answer back into text. The host moves bytes and structured records; it formats nothing. */
@@ -113,6 +113,75 @@ static uint32_t divmod10(uint64_t *v)
 static void putu(out_t *o, uint64_t v) { char d[24]; int k = 0; do { d[k++] = (char)('0' + divmod10(&v)); } while (v); while (k) put(o, &d[--k], 1); }
 static void putn(out_t *o, int64_t v) { char b[24]; size_t n = em_itoa(b, (long)v); put(o, b, n); }
 
+/* A JSON-like dump of the host's CBOR: numeric tags stay numeric. */
+static int info_json(out_t *o, em_cbor_r *r, unsigned depth)
+{
+    em_cbor_item it;
+    if (depth > 32 || em_cbor_next(r, &it)) return -1;
+    if (it.type == EM_CBOR_MAP || it.type == EM_CBOR_ARRAY) {
+        int map = it.type == EM_CBOR_MAP;
+        put(o, map ? "{" : "[", 1);
+        for (size_t i = 0; i < it.n; i++) {
+            if (i) put(o, ",", 1);
+            if (map) { if (info_json(o, r, depth + 1)) return -1; put(o, ":", 1); }
+            if (info_json(o, r, depth + 1)) return -1;
+        }
+        put(o, map ? "}" : "]", 1);
+    } else if (it.type == EM_CBOR_TEXT || it.type == EM_CBOR_BYTES) {
+        const char *hex = "0123456789abcdef";
+        put(o, "\"", 1);
+        if (it.type == EM_CBOR_BYTES) puts_(o, "hex:");
+        for (size_t i = 0; i < it.n; i++) {
+            uint8_t c = it.data[i];
+            if (it.type == EM_CBOR_BYTES) {
+                char b[2] = {hex[c >> 4], hex[c & 15]}; put(o, b, 2);
+            } else if (c == '"' || c == '\\') {
+                put(o, "\\", 1); put(o, (const char *)&c, 1);
+            } else if (c < 32) {
+                char b[6] = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 15]}; put(o, b, 6);
+            } else put(o, (const char *)&c, 1);
+        }
+        put(o, "\"", 1);
+    } else if (it.type == EM_CBOR_UINT) putu(o, it.arg);
+    else if (it.type == EM_CBOR_NEGINT) {
+        put(o, "-", 1);
+        if (it.arg == UINT64_MAX) puts_(o, "18446744073709551616"); else putu(o, it.arg + 1);
+    } else if (it.type == EM_CBOR_BOOL) puts_(o, it.arg ? "true" : "false");
+    else if (it.type == EM_CBOR_NULL) puts_(o, "null");
+    else return -1;
+    return 0;
+}
+static void cmd_status(const espmod_host *h, out_t *o)
+{
+    if (!ESPMOD_HOST_HAS(h, device_info)) { puts_(o, "error: this host has no device info\n"); return; }
+    size_t cap = RESP_MAX;
+    uint8_t *buf = 0;
+    int n;
+    for (;;) {
+        buf = h->mem_alloc(h->user, cap);
+        if (!buf) { puts_(o, "error: out of memory\n"); return; }
+        n = h->device_info(h->user, buf, cap);
+        if (n != ESPMOD_ERR_SIZE) break;
+        h->mem_free(h->user, buf);
+        if (cap > SIZE_MAX / 2) { puts_(o, "error: status too large\n"); return; }
+        cap *= 2;
+    }
+    if (n < 0 || (size_t)n > (SIZE_MAX - 2) / 6) {
+        h->mem_free(h->user, buf); puts_(o, "error: device info unavailable\n"); return;
+    }
+    size_t text_cap = (size_t)n * 6 + 2;
+    char *text = h->mem_alloc(h->user, text_cap);
+    if (!text) { h->mem_free(h->user, buf); puts_(o, "error: out of memory\n"); return; }
+    out_t dump = {text, text_cap, 0};
+    em_cbor_r r; em_cbor_reader(&r, buf, (size_t)n);
+    if (info_json(&dump, &r, 0) || r.len) puts_(o, "error: malformed device info\n");
+    else {
+        put(&dump, "\n", 1);
+        if (h->features & ESPMOD_FEAT_SERIAL) (void)h->serial_write(h->user, (const uint8_t *)text, dump.len);
+    }
+    h->mem_free(h->user, text); h->mem_free(h->user, buf);
+}
+
 /* ---- parse ---- */
 typedef struct { char *s; size_t n; } tok_t;
 
@@ -149,7 +218,7 @@ static void local(const espmod_host *h, em_cbor_w *w, const char *text)
 
 static void help_text(out_t *o)
 {
-    puts_(o, "status | start NAME [TEXT] | stop NAME | events | reset | heap [regions|blocks|tasks|trace ...] | nv KEY[=VALUE] | wifi [ssid=NAME] [psk=SECRET] [start|stop] | loader start NAME | loader stop\n");
+    puts_(o, "status | start NAME [TEXT] | stop NAME | events | reset | heap [regions|blocks|tasks|trace ...] | nv KEY[=VALUE] | wifi [ssid=NAME] [psk=SECRET] [start|stop]\n");
     puts_(o, "component.method key=value ... (values: 12, -3, true, hex:0a0b, text, \"two words\")\n");
     for (int i = 0; i < CAT_COMPS; i++) {
         puts_(o, cname(cat_comps[i].name)); puts_(o, ":");
@@ -589,19 +658,6 @@ static void cmd_wifi(const espmod_host *h, const tok_t *t, int count, out_t *o)
     puts_(o, psk_set ? "\" psk=set\n" : "\" psk=unset\n");
 }
 
-/* `loader start NAME`: the upload server, announcing that this device wants the package NAME; `loader stop` */
-static void cmd_loader(const espmod_host *h, const tok_t *t, int count, out_t *o)
-{
-    if (!(h->features & ESPMOD_FEAT_LOADER)) { puts_(o, "error: this host has no loader\n"); return; }
-    int rc;
-    if (count == 3 && word_is(&t[1], "start")) rc = h->loader_start(h->user, (const uint8_t *)t[2].s, t[2].n);
-    else if (count == 2 && word_is(&t[1], "stop")) rc = h->loader_stop(h->user);
-    else { puts_(o, "error: loader start NAME | loader stop\n"); return; }
-    if (rc == ESPMOD_ERR_BUSY) puts_(o, "error: busy (already started)\n");
-    else if (rc) error_rc(o, "loader", rc);
-    else puts_(o, "ok\n");
-}
-
 /* The console waits for nothing. A line is a packet, the request to a module is a packet with an id, and what comes back is
  * whatever packets the module sends, whenever it sends them: one answer, several lines, a stream, a message with the same id
  * as an earlier request, an event nobody asked for. Each is printed as it arrives, like a background app writing to a terminal
@@ -718,15 +774,13 @@ static int do_line(const espmod_host *h, mem_t *mem, cstate_t *st, const uint8_t
         cmd_heap(h, t, count, o);
     } else if (word_is(&t[0], "wifi")) {
         cmd_wifi(h, t, count, o);
-    } else if (word_is(&t[0], "loader")) {
-        cmd_loader(h, t, count, o);
-    } else if (word_is(&t[0], "status") || word_is(&t[0], "events") || word_is(&t[0], "reset") ||
+    } else if (word_is(&t[0], "status")) {
+        cmd_status(h, o);
+        return o->len == 0;
+    } else if (word_is(&t[0], "events") || word_is(&t[0], "reset") ||
                word_is(&t[0], "start") || word_is(&t[0], "stop")) {
         if (!(h->features & ESPMOD_FEAT_MODULES)) { puts_(o, "error: this host has no module control\n"); return 0; }
-        if (word_is(&t[0], "status")) {
-            len = h->modules_info(h->user, buf, RESP_MAX);
-            if (len > 0) render_list(o, buf, (size_t)len, "slot");
-        } else if (word_is(&t[0], "events")) {
+        if (word_is(&t[0], "events")) {
             len = h->events_info(h->user, buf, RESP_MAX);
             if (len > 0) render_list(o, buf, (size_t)len, "event");
         } else if (word_is(&t[0], "reset")) {

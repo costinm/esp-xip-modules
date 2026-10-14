@@ -39,6 +39,11 @@ if [ -z "${IDF_PATH:-}" ] && [ -f "$EM_ESP_ROOT/esp-idf/export.sh" ]; then
     . "$IDF_PATH/export.sh" >/dev/null 2>&1
 fi
 
+# Sourcing again must keep SDK Python ahead of the host profile/system Python.
+if [ -n "${IDF_PYTHON_ENV_PATH:-}" ] && [ -x "$IDF_PYTHON_ENV_PATH/bin/python" ]; then
+    export PATH="$IDF_PYTHON_ENV_PATH/bin:$PATH"
+fi
+
 unset _em_venv _em_dir _em_target
 export EM_ENV_LOADED=1
 

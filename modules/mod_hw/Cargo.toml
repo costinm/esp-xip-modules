@@ -17,7 +17,7 @@ espmod-abi = { path = "../../crates/espmod-abi" }
 mkmod = "--stack 3072 --state 128 --features ADC,SETTINGS"
 
 [features]
-flat-image = []
+flat-image = ["espmod-abi/global-alloc"]
 
 [lib]
 crate-type = ["rlib"]

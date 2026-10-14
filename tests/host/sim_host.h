@@ -9,8 +9,8 @@
 
 typedef struct sim sim_t;
 
-extern char sim_ssid[40], sim_psk[72], sim_loader_name[40];   /* what wifi_start and loader_start were given */
-extern int sim_wifi_on, sim_loader_on;
+extern char sim_ssid[40], sim_psk[72];   /* what wifi_start was given */
+extern int sim_wifi_on;
 /* The console's calls */
 extern int sim_serial_component, sim_serial_method, sim_reset_called;
 extern char sim_serial_out[4096];                                 /* what the module wrote with serial_write */

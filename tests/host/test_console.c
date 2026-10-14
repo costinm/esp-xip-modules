@@ -143,7 +143,7 @@ int main(void)
     em_cbor_map(&mw, 3); em_cbor_uint(&mw, 1); em_cbor_text(&mw, "test", 4); em_cbor_uint(&mw, 2); em_cbor_uint(&mw, 32511); em_cbor_uint(&mw, 3); em_cbor_text(&mw, "pass=28 fail=0", 14);
     sim_events_len = (size_t)em_cbor_done(&mw);
 
-    check_line("status", "name=hello tag=1 installed=false\nname=test tag=2 installed=true version=7\n");
+    check_line("status", "{1:{4:\"main\"},2:{},3:{},4:[{1:\"hello\",2:1,3:false},{1:\"test\",2:2,3:true,5:7}],5:{}}\n");
     check_line("events", "module=test id=32511 pass=28 fail=0\n");
     check_line("start test serve it", "ok\n");
     CHECK(!strcmp(sim_started, "test") && !strcmp(sim_start_request, "serve it"));
@@ -179,12 +179,6 @@ int main(void)
     check_line("wifi scan", "ssid=\"costin\" ch=6 rssi=-41 auth=3 bssid=10:bd:a3:ac:5a:21\nssid=\"\" ch=11 rssi=-80 auth=0 bssid=01:02:03:04:05:06\n");
     check_line("wifi bogus", "error: wifi [ssid=NAME]");
     check_line("wifi ssid=", "saved_ssid=\"(flash network)\"");
-    check_line("loader start test", "ok\n");
-    CHECK(sim_loader_on && !strcmp(sim_loader_name, "test"));
-    check_line("loader start test", "error: busy");
-    check_line("loader stop", "ok\n");
-    CHECK(!sim_loader_on);
-    check_line("loader start", "error: loader start NAME");
     /* the console waits for nothing: two requests in flight, answers in any order, and messages nobody asked for */
     sim_serial_clear();
     CHECK(sim_send(s, 20, 3, 0, "test.echo value=one", 19) == 0);
@@ -221,7 +215,7 @@ int main(void)
     CHECK(sim_send(s, 20, 3, 0, "test.echo value=x", 17) == 0);
     sim_run(s, 0);
     CHECK(sim_serial_len == 0);
-    check_line("status", "name=hello");                                /* still answering lines */
+    check_line("status", "{1:{4:\"main\"}");                                /* still answering lines */
     sim_free(module_sim);
     module_sim = NULL;
     sim_stop(s);

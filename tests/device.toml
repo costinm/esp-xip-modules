@@ -1,7 +1,7 @@
 # The current lab. Boards for tests/device_test.py and provision.py; edit for yours (docs/flashing.md).
 # The test and the provisioning tool use only what is listed here, and refuse a board whose MAC differs.
-# adb, when it is not on the PATH (DMesh's environment has one)
-adb = "/ws/dmesh/target/nix/profile/bin/adb"
+# adb executable for phone-mediated tests; override with an absolute path if needed.
+adb = "adb"
 
 [[board]]
 name = "e8"

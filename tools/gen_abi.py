@@ -78,10 +78,14 @@ def array_split(field):
 
 def struct_size32(st):
     total = 0
+    max_align = 1
     for typ, name, _ in st["fields"]:
         _, n = array_split(name)
+        align = 1 if st.get("packed") else min(SIZES32[typ], 8)
+        max_align = max(max_align, align)
+        total = (total + align - 1) // align * align
         total += SIZES32[typ] * (n or 1)
-    return total
+    return (total + max_align - 1) // max_align * max_align
 
 
 def header(d):
@@ -139,7 +143,7 @@ def header(d):
 
 
 RUST_TYPES = {"int": "i32", "uint8_t": "u8", "uint16_t": "u16", "uint32_t": "u32", "int32_t": "i32", "uint64_t": "u64",
-              "size_t": "usize", "void": "()"}
+              "size_t": "usize", "char": "core::ffi::c_char", "void": "()"}
 
 
 def rust_type(ctype, prefix):
@@ -191,13 +195,16 @@ def rust(d):
         o.append(f"/// {st['doc']}")
         o.append("#[repr(C, packed)]" if st.get("packed") else "#[repr(C)]")
         ptr = any("*" in t for t, _, _ in st["fields"])
-        o.append("#[derive(Clone, Copy, Default)]" if not st.get("packed") and not ptr else "#[derive(Clone, Copy)]")
+        large_array = any((array_split(name)[1] or 0) > 32 for _, name, _ in st["fields"])
+        o.append("#[derive(Clone, Copy, Default)]" if not st.get("packed") and not ptr and not large_array else "#[derive(Clone, Copy)]")
         o.append(f"pub struct {camel(st['name'])} {{")
         for typ, name, text in st["fields"]:
             base, n = array_split(name)
             rt = RUST_TYPES.get(typ) or rust_type(typ, pre)
             o.append(f"    pub {base}: {f'[{rt}; {n}]' if n else rt}, // {text}")
         o.append("}")
+        if large_array and not ptr:
+            o.append(f"impl Default for {camel(st['name'])} {{ fn default() -> Self {{ unsafe {{ core::mem::zeroed() }} }} }}")
         o.append(f"#[cfg(target_pointer_width = \"32\")]\nconst _: () = assert!(core::mem::size_of::<{camel(st['name'])}>() == {struct_size32(st)});")
         o.append("")
     o += ["/// The host table (see abi/API.md). Slots are `None` only if a host leaves one empty; slots past `size` do not exist.",
@@ -245,6 +252,8 @@ def lock_problems(d, lock):
 
 
 def main():
+    import gen_profile
+    gen_profile.run("--check" in sys.argv)
     d = load()
     outputs = {HEADER: header(d).replace("`", ""), RUST: rust(d)}
     if "--update-lock" in sys.argv:

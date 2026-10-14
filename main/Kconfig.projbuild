@@ -1,3 +1,5 @@
-menu "esp-xip-modules main"
-
+menu "Standalone C application"
+    config ESPMOD_C_LOADER
+        bool "Run the C module host as the loader"
+        default n
 endmenu

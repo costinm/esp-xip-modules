@@ -243,9 +243,9 @@ static int h_adc(void *user, int pin, uint32_t ref, int *raw, uint32_t *mv, int 
 static int h_led(void *user, int pin, uint8_t r, uint8_t g, uint8_t b) { (void)r; (void)g; (void)b; return claim(S, pin); }
 
 
-/* Wi-Fi and the uploader: remember what the module asked for */
-char sim_ssid[40], sim_psk[72], sim_loader_name[40];
-int sim_wifi_on, sim_loader_on;
+/* Wi-Fi requested by the module. */
+char sim_ssid[40], sim_psk[72];
+int sim_wifi_on;
 static char sim_saved_ssid[40], sim_saved_psk[72];     /* what wifi_config stored */
 static int h_wifi_config(void *user, const uint8_t *ssid, size_t sn, const uint8_t *psk, size_t pn)
 {
@@ -330,16 +330,6 @@ static int h_wifi_info(void *user, uint8_t *out, size_t cap)
     }
     return em_cbor_done(&w);
 }
-static int h_loader_start(void *user, const uint8_t *name, size_t n)
-{
-    (void)user;
-    if (sim_loader_on) return ESPMOD_ERR_BUSY;
-    memcpy(sim_loader_name, name, n); sim_loader_name[n] = 0;
-    sim_loader_on = 1;
-    return 0;
-}
-static int h_loader_stop(void *user) { (void)user; sim_loader_on = 0; return 0; }
-
 /* The console's calls: the serial port, other modules, the module list, events, reset */
 int sim_serial_component = -1, sim_serial_method = -1, sim_reset_called;
 char sim_started[40], sim_start_request[80], sim_stopped[40];
@@ -357,6 +347,18 @@ static int h_serial_write(void *user, const uint8_t *d, size_t n)
     return (int)n;
 }
 static int h_serial_close(void *user) { (void)user; sim_serial_component = -1; return 0; }
+static int h_device_info(void *user, uint8_t *out, size_t cap)
+{
+    (void)user;
+    em_cbor_w w; em_cbor_init(&w, out, cap);
+    em_cbor_map(&w, 5);
+    em_cbor_uint(&w, 1); em_cbor_map(&w, 1); em_cbor_uint(&w, 4); em_cbor_text(&w, "main", 4);
+    em_cbor_uint(&w, 2); em_cbor_map(&w, 0);
+    em_cbor_uint(&w, 3); em_cbor_map(&w, 0);
+    em_cbor_uint(&w, 4); em_cbor_put(&w, sim_modules_cbor, sim_modules_len);
+    em_cbor_uint(&w, 5); em_cbor_map(&w, 0);
+    return em_cbor_done(&w);
+}
 static int h_modules_info(void *user, uint8_t *out, size_t cap) { (void)user; if (sim_modules_len > cap) return ESPMOD_ERR_SIZE; memcpy(out, sim_modules_cbor, sim_modules_len); return (int)sim_modules_len; }
 static int h_events_info(void *user, uint8_t *out, size_t cap) { (void)user; if (sim_events_len > cap) return ESPMOD_ERR_SIZE; memcpy(out, sim_events_cbor, sim_events_len); return (int)sim_events_len; }
 static int h_module_start(void *user, const uint8_t *name, size_t n, const uint8_t *req, size_t rn)
@@ -390,7 +392,7 @@ static int h_reset(void *user) { (void)user; sim_reset_called = 1; return 0; }
 #define SIM_SLOTS 8
 #define SIM_QUOTA 4
 #define SIM_INBOX 4
-#define SIM_MEM_QUOTA 8192       /* the device default (CONFIG_ESPMOD_MEM_QUOTA) */
+#define SIM_MEM_QUOTA 8192       /* explicit small cap for quota tests */
 static espmod_pool *sim_pool;
 static sim_t *routes[8];
 sim_msg_t sim_main_msgs[8];
@@ -555,7 +557,7 @@ sim_t *sim_new(espmod_handle_fn handler, uint32_t state_bytes)
     s->table = (espmod_host){
         .abi_version = ESPMOD_ABI_VERSION, .size = sizeof(espmod_host),
         .features = ESPMOD_FEAT_SETTINGS | ESPMOD_FEAT_SPI | ESPMOD_FEAT_SPI_READY | ESPMOD_FEAT_I2C | ESPMOD_FEAT_ADC |
-                    ESPMOD_FEAT_RGBLED | ESPMOD_FEAT_SERVICE | ESPMOD_FEAT_ALARM_FLEX | ESPMOD_FEAT_WIFI | ESPMOD_FEAT_LOADER | ESPMOD_FEAT_PACKETS | ESPMOD_FEAT_MEMORY | ESPMOD_FEAT_SERIAL | ESPMOD_FEAT_MODULES,
+                    ESPMOD_FEAT_RGBLED | ESPMOD_FEAT_SERVICE | ESPMOD_FEAT_ALARM_FLEX | ESPMOD_FEAT_WIFI | ESPMOD_FEAT_PACKETS | ESPMOD_FEAT_MEMORY | ESPMOD_FEAT_SERIAL | ESPMOD_FEAT_MODULES,
         .user = s, .log = h_log, .now_ms = h_now, .respond = h_respond,
         .emit = h_emit, .call_service = h_service, .get_setting = h_get_setting,
         .set_setting = h_set_setting, .gpio_config = h_gpio_config, .gpio_read = h_gpio_read, .gpio_write = h_gpio_write,
@@ -566,8 +568,8 @@ sim_t *sim_new(espmod_handle_fn handler, uint32_t state_bytes)
         .pkt_alloc = h_pkt_alloc, .pkt_buf = h_pkt_buf, .pkt_keep = h_pkt_keep, .pkt_free = h_pkt_free, .send = h_send,
         .pkt_info = h_pkt_info, .mem_alloc = h_mem_alloc, .mem_free = h_mem_free,
         .wifi_start = h_wifi_start, .wifi_stop = h_wifi_stop, .wifi_info = h_wifi_info, .wifi_scan = h_wifi_scan, .heap_info = h_heap_info, .heap_dump = h_heap_dump, .nv = h_nv, .wifi_config = h_wifi_config,
-        .loader_start = h_loader_start, .loader_stop = h_loader_stop,
         .serial_open = h_serial_open, .serial_write = h_serial_write, .serial_close = h_serial_close,
+        .device_info = h_device_info,
         .modules_info = h_modules_info, .module_start = h_module_start, .module_stop = h_module_stop, .module_manifest = h_module_manifest,
         .events_info = h_events_info, .reset = h_reset,
     };

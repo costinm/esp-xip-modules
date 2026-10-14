@@ -10,10 +10,21 @@ mkdir -p target
 # esp-wifi-loader owns sign.py, wl_format.py, upload.py ... (tests/loader_tools.py finds them)
 export ESP_WIFI_LOADER_DIR="${ESP_WIFI_LOADER_DIR:-$ROOT/../esp-wifi-loader}"
 if [[ $what == abi || $what == all ]]; then
+    python3 tests/test_dependencies.py
     python3 tools/gen_abi.py --check
     python3 tools/gen_catalog.py --check
 fi
 if [[ $what == c || $what == all ]]; then
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_info_cache tests/host/test_info_cache.c -lpthread
+    target/test_info_cache
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_profile tests/host/test_profile.c
+    target/test_profile
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/espmod_pool/include \
+        -o target/test_flash_hal tests/host/test_flash_hal.c components/espmod_pool/src/pool.c
+    target/test_flash_hal
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/espmod_pool/include \
+        -o target/test_socket_hal tests/host/test_socket_hal.c components/espmod_pool/src/pool.c -lpthread
+    target/test_socket_hal
     # the checks a device makes before it maps or installs a module
     gcc -Wall -Wextra -fsanitize=address,undefined -g -I include -I components/espmod_pool/include -I components/espmod_loader/include -I tests/host \
         -o target/test_check tests/host/test_check.c components/espmod_loader/src/espmod_check.c
@@ -46,5 +57,4 @@ if [[ $what == rust || $what == all ]]; then
 fi
 if [[ $what == python || $what == all ]]; then
     python3 tests/test_tools.py      # tools, ABI generator, module build (needs the toolchains for that part)
-    python3 tests/test_install.py    # the module sink of esp-wifi-loader, compiled for the host
 fi

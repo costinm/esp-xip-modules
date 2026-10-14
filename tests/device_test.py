@@ -43,27 +43,17 @@ class Transport:
             self._console.close()
             self._console = None
 
-    def network_up(self, wait=60):
-        """`wifi start` on the console, then poll `wifi` until the board has joined; returns its address."""
-        self.control("wifi start")
-        for _ in range(wait):
-            m = re.search(r"state=up .*ip=(\d+\.\d+\.\d+\.\d+)", self.control("wifi"))
-            if m:
-                return m.group(1)
-            self.sleep(1)
-        raise Failed("the Wi-Fi did not come up (`wifi` on the console)")
-
     def upload(self, body: bytes, name):
-        """Nothing is on the network except for the upload: Wi-Fi and the uploader are started for it and stopped after."""
-        self.host = self.network_up()
-        self.control(f"loader start {name}")
-        try:
-            if self.phone:
-                return upload.send_adb(self.phone, self.host, MODULE_PORT, body[16:])      # send_adb adds the transport header
-            return upload.send(self.host, MODULE_PORT, body[16:])
-        finally:
-            self.control("loader stop")
-            self.control("wifi stop")
+        """Send to the loader endpoint selected by the bench control plane.
+
+        This runtime starts no built-in installer. The loader performs writes;
+        its provisioning/reset/startup is owned by the selected bench setup.
+        """
+        if not self.host:
+            raise Failed("a loader upload endpoint is required")
+        if self.phone:
+            return upload.send_adb(self.phone, self.host, MODULE_PORT, body[16:])
+        return upload.send(self.host, MODULE_PORT, body[16:])
 
 
 class Failed(Exception):

@@ -358,6 +358,11 @@ class Manifest(unittest.TestCase):
         self.assertEqual(m[6], "serve")
         self.assertEqual(m[4][0][0], "Row")
 
+    def test_flash_slot_declaration_is_in_manifest(self):
+        m, _ = cbor_decode(mkmod.manifest_of_api(self.API, flash_slots=(3, 1, 3)))
+        self.assertEqual(m[7], [1, 3])
+        self.assertNotIn(7, cbor_decode(mkmod.manifest_of_api(self.API))[0])
+
     def test_the_manifest_sits_after_the_code_inside_the_image(self):
         m = mkmod.manifest_of_api(self.API)
         image = dmod.pack(b"\x01\x02\x03\x04" * 5, 0x44, 7, manifest=m)
@@ -389,28 +394,19 @@ class SlotTable(unittest.TestCase):
 
 
 class UpdateNetwork(unittest.TestCase):
-    """The upload opens the board's Wi-Fi and uploader through the console and closes them again."""
-
-    def test_upload_starts_waits_sends_and_stops(self):
+    """The bench delegates uploads to its configured loader endpoint."""
+    def test_upload_uses_loader_without_main_installer_commands(self):
         import device_test
-        said = []
-
-        class T(device_test.Transport):
-            def control(self, line, timeout=15):
-                said.append(line)
-                return "state=up ssid=\"x\" ip=192.168.49.7 connected=1 rssi=-40 port=5227" if len(said) > 2 else "state=joining"
-
-        t = T(None, None, "unused")
-        t.sleep = lambda s: None
-        orig = device_test.upload.send
-        device_test.upload.send = lambda host, port, body: "OK %s %d" % (host, port)
+        t = device_test.Transport("192.0.2.1", None, "unused")
+        t.control = lambda *args: self.fail("upload must not start firmware services")
+        original = device_test.upload.send
+        sent = []
+        device_test.upload.send = lambda host, port, body: sent.append((host, port, body)) or "OK"
         try:
-            self.assertEqual(t.upload(b"x" * 20, "test"), "OK 192.168.49.7 5227")
+            self.assertEqual(t.upload(b"h" * 16 + b"image", "test"), "OK")
         finally:
-            device_test.upload.send = orig
-        self.assertEqual(said[0], "wifi start")
-        self.assertIn("loader start test", said)
-        self.assertEqual(said[-2:], ["loader stop", "wifi stop"])
+            device_test.upload.send = original
+        self.assertEqual(sent, [("192.0.2.1", 5227, b"image")])
 
 
 class ConsoleAnswer(unittest.TestCase):

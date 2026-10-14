@@ -76,7 +76,7 @@ def cbor(obj):
     raise TypeError(obj)
 
 
-def manifest_of_api(api_text, autostart=None):
+def manifest_of_api(api_text, autostart=None, flash_slots=()):
     """The manifest of a module (abi/API.md, module_manifest): the catalog of its API.md in compact CBOR, what the console
     needs instead of IDs compiled into it. b"" when the file describes no module.
 
@@ -84,7 +84,8 @@ def manifest_of_api(api_text, autostart=None):
        3: [{1: method id, 2: method name, 3: request fields (index), 4: response fields (index)}, ...],
        4: [[type name, [fields]], ...],                      (record types the fields refer to; absent if none)
        5: [[fields], ...],                                   (the field lists the methods point at, each stored once)
-       6: start request}                                     (only if the module starts at boot: text, may be empty)
+       6: start request,                                     (only if the module starts at boot: text, may be empty)
+       7: flash slot indices}                                (only if flash writes are declared)
       field = [tag, name, kind]  or  [tag, name, kind, type name]
       kind  = 0 any, 1 text, 2 bool, 3 uint, 4 int, 5 bytes, 6 map, 7 array   (the kinds of the console's text syntax)
     """
@@ -119,6 +120,8 @@ def manifest_of_api(api_text, autostart=None):
     doc[5] = lists
     if autostart is not None:
         doc[6] = autostart
+    if flash_slots:
+        doc[7] = sorted(set(flash_slots))
     return cbor(doc)
 
 
@@ -151,6 +154,7 @@ def cargo_link(cfg, cargo, window, link_script, tmp):
     -Zbuild-std). Xtensa Rust cannot produce PIC: it is linked at the slot's fixed address (like C).
     """
     manifest, binname, features = cargo
+    features = ",".join(filter(None, [features, "espmod-abi/global-alloc", "espmod-abi/allocator-api"]))
     target = cfg["rust_target"]
     tool = cfg["prefix"] + "-"
     srcdir = os.path.join(os.path.dirname(os.path.abspath(manifest)), "src")
@@ -185,9 +189,15 @@ def cargo_link(cfg, cargo, window, link_script, tmp):
 
 
 def build(chip, slot, sources, out, stack=8192, features=0, state=0, defines=(), keep_elf=None, cargo=None, slot_file=None,
-          autostart=None):
+          autostart=None, flash_slots=()):
     cfg = CHIPS[chip]
-    tag, offset, slot_size = (slots(slot_file) if slot_file else slots())[slot]
+    layout = slots(slot_file) if slot_file else slots()
+    tag, offset, slot_size = layout[slot]
+    if flash_slots:
+        if not features & dmod.FEATURES["FLASH"]:
+            sys.exit("--flash-slots requires --features FLASH")
+        if any(index < 0 or index >= len(layout) or list(layout)[index] == slot for index in flash_slots):
+            sys.exit("--flash-slots must name existing slots other than the module's own slot")
     tool = cfg["prefix"] + "-"
     window = (cfg["code_base"] + offset) if cfg["fixed"] else 0          # image start
     data_window = (cfg["data_base"] + offset) if cfg["fixed"] else 0
@@ -241,9 +251,9 @@ def build(chip, slot, sources, out, stack=8192, features=0, state=0, defines=(),
                 entry = int(line.split()[-1], 16)
         code = open(raw, "rb").read()
         api = api_beside(sources, cargo)
-        manifest = manifest_of_api(open(api).read(), autostart) if api else b""
-        if autostart is not None and not api:
-            sys.exit("--autostart is recorded in the manifest, which is made from an API.md next to the sources")
+        manifest = manifest_of_api(open(api).read(), autostart, flash_slots) if api else b""
+        if (autostart is not None or flash_slots) and not api:
+            sys.exit("--autostart and --flash-slots require an API.md next to the sources")
         image = dmod.pack(code, entry - window, tag, code_vma=window, data_vma=data_window, stack_bytes=stack,
                           required_features=features, fixed_vma=cfg["fixed"], state_bytes=state, manifest=manifest)
     if len(image) > slot_size:
@@ -268,6 +278,8 @@ def main():
     ap.add_argument("--list-slots", action="store_true")
     ap.add_argument("--autostart", nargs="?", const="", default=None, metavar="REQUEST",
                     help="start this module at boot (recorded in its manifest) with REQUEST as its start request")
+    ap.add_argument("--flash-slots", default="", metavar="INDICES",
+                    help="comma-separated module slot indices this image may erase/write (signed manifest key 7)")
     ap.add_argument("--elf", help="also keep the linked ELF here (objdump -d)")
     ap.add_argument("--cargo", metavar="MANIFEST:BIN[:FEATURES]",
                     help="build a Rust module: the bin BIN of the crate at MANIFEST (e.g. fw/mod_lora/Cargo.toml:mod_lora:flat-image)")
@@ -288,8 +300,12 @@ def main():
     feat = 0
     for item in a.features.split(","):
         feat |= dmod.FEATURES[item.upper()] if item.upper() in dmod.FEATURES else int(item, 0)
+    try:
+        flash_slots = tuple(int(item, 0) for item in a.flash_slots.split(",") if item)
+    except ValueError:
+        ap.error("--flash-slots requires comma-separated integer indices")
     build(a.chip, a.slot, a.sources, a.out, a.stack, feat, a.state, keep_elf=a.elf, cargo=cargo, slot_file=a.slots,
-          autostart=a.autostart)
+          autostart=a.autostart, flash_slots=flash_slots)
 
 
 if __name__ == "__main__":

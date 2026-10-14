@@ -12,16 +12,28 @@ CONFIG_BOOTLOADER_RESERVE_RTC_MEM=y
 CONFIG_BOOTLOADER_RESERVE_RTC_SIZE=0x10
 CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC=y
 CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC_SIZE=0x20
-# The loader maps module pages itself and writes the module partition through the partition API.
+# C runtime diagnostics: keep host warnings; SDK drivers are quiet in CMakeLists.txt.
 CONFIG_LOG_DEFAULT_LEVEL_WARN=y
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 CONFIG_FREERTOS_HZ=1000
-CONFIG_ESP_WIFI_NVS_ENABLED=n
+
+# Allocation limit, not reserved RAM: accommodates the optional external flash module.
+CONFIG_ESPMOD_MEM_QUOTA=0
+
+# Keep the C sample small; the Rust runtime has its own WPA3-enabled defaults.
 CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
-CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
-# esp-wifi-loader's Wi-Fi (esp_wifi_loader_net_*) sets up link-local IPv6
-CONFIG_LWIP_IPV6=y
-# esp-wifi-loader as a library: this application owns the network and hands upload sockets to it
-CONFIG_WL_MODE_LIBRARY=y
+CONFIG_ESP_WIFI_ENABLE_SAE_H2E=n
+CONFIG_ESP_WIFI_ENABLE_SAE_PK=n
+CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n
+
+# Preserve checks, without source paths/expressions or verbose SDK check messages.
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+CONFIG_COMPILER_OPTIMIZATION_CHECKS_SILENT=y
+CONFIG_LWIP_ESP_LWIP_ASSERT=y
+CONFIG_LWIP_DEBUG=n
+
+# The raw flash HAL serves an owner-controlled module. Loader state sectors
+# are inside the running loader partition; SDK partition policy must not abort.
+CONFIG_SPI_FLASH_DANGEROUS_WRITE_ALLOWED=y

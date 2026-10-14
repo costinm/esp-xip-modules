@@ -9,7 +9,7 @@ console, one or many, answers or not, are printed as they arrive. Before sending
 **manifest** (`module_manifest`: the methods the installed image says it has) and refuses a method that is not in it. `parse` (1) and `render`
 (2) below are the two halves of that, for a caller that has its own transport.
 
-Commands: `status` (the slots), `start NAME [TEXT]`, `stop NAME`, `events` (the last events modules emitted), `reset`,
+Commands: `status` (the host device_info map, including Wi-Fi, heap, slots and cached component status), `start NAME [TEXT]`, `stop NAME`, `events` (the last events modules emitted), `reset`,
 `wifi [ssid=NAME] [psk=SECRET] [start|stop]` (the network is a setting of this module, never in an image; an empty ssid is
 the flash network), `loader start NAME` / `loader stop` (the upload server, which announces that the device wants the
 package NAME), `help`.
@@ -55,7 +55,7 @@ value looks like (`name=123` stays text when `name` is a `string`).
 
 # Types
 
-## `slot` — one module slot (`status`; the host's `modules_info`)
+## `slot` — one module slot (device_info modules; the host's `modules_info`)
 
 | Tag | Field | Type | Description |
 |---:|---|---|---|

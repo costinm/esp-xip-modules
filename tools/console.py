@@ -20,17 +20,32 @@ import sys
 import time
 import tomllib
 
-sys.path.insert(0, os.path.join(os.environ.get("ESP_WIFI_LOADER_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "esp-wifi-loader"), "tools"))
-import reset  # noqa: E402  (esp-wifi-loader)
-
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
 
 LOG_LINE = re.compile(r"^\x1b?\[?[0-9;]*m?[IWEDV] \(\d+\) ")      # ESP-IDF log lines: "W (1234) tag: text"
 
 
-class Console(reset.Port):
-    """esp-wifi-loader's serial port (open, reset, read) plus the command line of main."""
+class Console:
+    """Serial command reader; signing/upload tools are independent."""
+    def __init__(self, path):
+        self.path, self.ser = path, None
+
+    def open(self):
+        self.ser = self._open_serial(self.path)
+        return self
+
+    def close(self):
+        if self.ser is not None:
+            self.ser.close()
+            self.ser = None
+
+    def read(self, seconds):
+        text = []
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            text.append(self.ser.read(256).decode(errors="replace"))
+        return "".join(text)
 
     @staticmethod
     def _open_serial(path):
