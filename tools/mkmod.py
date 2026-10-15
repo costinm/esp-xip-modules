@@ -37,10 +37,16 @@ CFLAGS = ["-std=gnu11", "-Os", "-Wall", "-Wextra", "-Werror", "-ffreestanding", 
           "-fno-tree-loop-distribute-patterns"]
 
 
-def slots(path=os.path.join(ROOT, "main", "main.c")):
-    """The slot table of main: {name: (tag, offset, size)}. A C main lists {"name", tag, offset, size} in main_slots[];
+def slots(path=os.path.join(ROOT, "crates", "espmod-host", "src", "loader.rs")):
+    """The product slot table shared by the C and Rust examples: {name: (tag, offset, size)}. A C main lists {"name", tag, offset, size} in main_slots[];
     a Rust one lists slot!("name", tag, offset, size) (espmod-host), anywhere in the file."""
-    text = open(path).read()
+    with open(path) as source:
+        text = source.read()
+    # Compatibility with callers selecting the C example explicitly. Its C
+    # initializer is now generated from the shared product table.
+    if (os.path.realpath(path) == os.path.realpath(os.path.join(ROOT, "main", "main.c"))
+            and '#include "product-slots.inc"' in text):
+        return slots()
     if "main_slots[]" in text:
         block = text[text.index("main_slots[]"):]
         block = block[:block.index("};")]
@@ -274,7 +280,7 @@ def main():
     ap.add_argument("--state", type=int, default=0, help="size of the zeroed state block passed to every call, bytes (<= 4096)")
     ap.add_argument("--features", default="0", help="ESPMOD_FEAT_* bits the module needs, e.g. SPI,SETTINGS")
     ap.add_argument("--slots", metavar="FILE",
-                    help="C file with the main_slots[] table of the application (default: main/main.c)")
+                    help="C or Rust product slot table (default: crates/espmod-host/src/loader.rs)")
     ap.add_argument("--list-slots", action="store_true")
     ap.add_argument("--autostart", nargs="?", const="", default=None, metavar="REQUEST",
                     help="start this module at boot (recorded in its manifest) with REQUEST as its start request")

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build main and the modules. Uses idf.py from the PATH, else ./env.sh (scripts/esp-deps.sh installs it);
 # in the container it is already set up.
-#   scripts/build.sh [esp32|esp32s3|esp32c6|all]
-# The modules are built for the slot table in main/main.c. Output:
+#   scripts/build.sh [esp32|esp32s3|esp32c6|all] [main|loader]
+# One runtime/configuration; main|loader selects the destination size check only.
+# The modules use the shared product slot table in crates/espmod-host/src/loader.rs. Output:
 #   target/out/<cpu>/main.bin                    the image `main` (sign it: docs/releasing.md)
 #   target/out/<cpu>/modules/<name>.dmod         unsigned module images
 # Nothing here is signed or keyed: sign the results with your own key (docs/releasing.md); a device pins the key of
@@ -17,32 +18,50 @@ command -v idf.py >/dev/null 2>&1 || { echo "idf.py not found: run scripts/esp-d
 CPUS="${1:-all}"
 ROLE="${2:-main}"
 case "$ROLE" in main|loader);; *) echo 'usage: scripts/build.sh [cpu|all] [main|loader]' >&2; exit 2;; esac
-slots="$ROOT/main/main.c"
-[[ $ROLE == loader ]] && slots="$ROOT/crates/espmod-host/src/loader.rs"
+slots="$ROOT/crates/espmod-host/src/loader.rs"
 [[ $CPUS == all ]] && CPUS="esp32 esp32s3 esp32c6"
 
 for cpu in $CPUS; do
     out="$ROOT/target/out/$cpu"
-[[ $ROLE == loader ]] && out="$out/c-loader"
-mkdir -p "$out/modules"
-if [[ $ROLE == loader ]]; then
+    mkdir -p "$out/modules"
     python3 "$ROOT/tools/gen_slots.py" "$slots" "$out/product-slots.inc"
-fi
     defaults="$ROOT/sdkconfig.defaults"
     [[ -f $ROOT/sdkconfig.$cpu.defaults ]] && defaults="$defaults;$ROOT/sdkconfig.$cpu.defaults"
-    [[ $ROLE == loader ]] && defaults="$defaults;$ROOT/sdkconfig.loader.defaults"
     rm -f "$out/main.sdkconfig"
     IDF_TARGET=$cpu idf.py -C "$ROOT" -B "$out/main-build" \
         -D SDKCONFIG="$out/main.sdkconfig" -D SDKCONFIG_DEFAULTS="$defaults" -D ESPMOD_PRODUCT_INCLUDE="$out" build
     # Stage2 boots Main in DIO or QIO; the driver must stay DIO (esp-wifi-loader docs/app-integration.md).
     grep -qxF 'CONFIG_ESPTOOLPY_FLASHMODE_DIO=y' "$out/main.sdkconfig" ||
         { echo "$cpu: flash driver must be DIO" >&2; exit 1; }
-    cp "$out/main-build/esp-xip-modules.bin" "$out/$ROLE.bin"
+    image="$out/main-build/esp-xip-modules.bin"
+    # Destination is a packaging choice; it does not alter the runtime.
+    # Use the SDK parser so hexadecimal sizes and K/M suffixes stay consistent.
+    python3 - "$IDF_PATH" "$ROOT/partitions.csv" "$ROLE" "$image" "$out" <<'PY_CHECK'
+import pathlib, shutil, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / 'components/partition_table'))
+from gen_esp32part import PartitionTable
+table = PartitionTable.from_csv(pathlib.Path(sys.argv[2]).read_text())
+role, image, out = sys.argv[3], pathlib.Path(sys.argv[4]), pathlib.Path(sys.argv[5])
+part = next(p for p in table if p.name == role)
+capacity = part.size - (8192 if role == 'loader' else 0)
+size = image.stat().st_size
+if size > capacity:
+    raise SystemExit(f'{role}: image {size} bytes exceeds usable capacity {capacity}')
+print(f'{role}: image {size} bytes fits at {part.offset:#x}; usable capacity {capacity}')
+for name in ['runtime.bin', 'main.bin']:
+    shutil.copyfile(image, out / name)
+loader = next(p for p in table if p.name == 'loader')
+legacy = out / 'c-loader/loader.bin'
+if size <= loader.size - 8192:
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(image, legacy)
+else:
+    legacy.unlink(missing_ok=True)
+PY_CHECK
 
     # every module: modules/mod_<name>/ with the sources of the slot <name>. C modules: the .c files, options in a
     # comment (/* mkmod: --state 64 --stack 4096 */). Rust modules: a Cargo.toml (bin mod_<name>, feature flat-image),
-    # options in [package.metadata] mkmod = "...". A module without a slot in main_slots[] is linked into main
-    # only.
+    # options in [package.metadata] mkmod = "...". Modules absent from the product table are skipped.
     for dir in "$ROOT"/modules/mod_*/; do
         name="$(basename "$dir")"; slot="${name#mod_}"
         # a module may name the slot it shares with another (mod_rtest and mod_test: the one `test` slot): --slot in its options
@@ -60,5 +79,8 @@ fi
             "$ROOT/scripts/build-mod.sh" "$dir" --chip "$cpu" --slots "$slots" --slot "$slot" --out "$out/modules"
         fi
     done
+    # Existing deployment callers use this path; modules have one shared build.
+    mkdir -p "$out/c-loader/modules"
+    cp "$out/modules/"*.dmod "$out/c-loader/modules/"
 done
 (cd "$ROOT/target/out" && find . -name '*.bin' -o -name '*.dmod' | sort | xargs sha256sum > SHA256SUMS)

@@ -55,7 +55,7 @@ static void test_dmod(void)
 }
 
 /* package = public key (65) | signature (64) | header (216) | block table (8 per block) | image */
-static void test_package(const char *path, int cpu)
+static void test_package(const char *path, int cpu, uint32_t slot_offset)
 {
     FILE *f = fopen(path, "rb");
     CHECK(f != NULL);
@@ -68,7 +68,7 @@ static void test_package(const char *path, int cpu)
     memcpy(&blocks, pkg + 65 + 64 + 18, 2);
     const uint8_t *image = pkg + 345 + (size_t)blocks * 8;
     /* the image inside is a module for slot tag 2 and passes the device's header check */
-    espmod_slot_rules_t rules = {.tag = 2, .slot_offset = 0x10000, .slot_size = 0x10000, .host_features = 0xff,
+    espmod_slot_rules_t rules = {.tag = 2, .slot_offset = slot_offset, .slot_size = 0x10000, .host_features = 0xff,
                                  .max_stack_bytes = 65536, .fixed_vma = cpu != 13,
                                  .code_base = cpu == 9 ? 0x43000000 : 0x40300000, .data_base = cpu == 9 ? 0x3d000000 : 0x3f700000};
     CHECK(espmod_dmod_check((const espmod_dmod_header *)image, &rules) == EMD_OK);
@@ -77,7 +77,7 @@ static void test_package(const char *path, int cpu)
 int main(int argc, char **argv)
 {
     test_dmod();
-    if (argc == 4) test_package(argv[1], atoi(argv[3]));
+    if (argc == 5) test_package(argv[1], atoi(argv[3]), (uint32_t)strtoul(argv[4], NULL, 0));
     puts(failures ? "FAILED" : "checks ok");
     return failures != 0;
 }

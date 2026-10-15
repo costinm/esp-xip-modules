@@ -68,10 +68,11 @@ class Dmod(unittest.TestCase):
 
 
 class Slots(unittest.TestCase):
-    def test_slot_table_is_read_from_main(self):
+    def test_shared_product_slots_preserve_the_installed_layout(self):
         s = mkmod.slots()
-        self.assertEqual(s["console"], (20, 0, 0x10000))
-        self.assertEqual(s["test"], (2, 0x10000, 0x10000))
+        self.assertEqual(s["console"], (20, 0x50000, 0x10000))
+        self.assertEqual(s["test"], (2, 0x40000, 0x10000))
+        self.assertEqual(s, mkmod.slots(os.path.join(ROOT, "main", "main.c")))
         tags = [t for t, _, _ in s.values()]
         self.assertEqual(len(set(tags)), len(tags))
         spans = sorted((o, o + z) for _, o, z in s.values())
@@ -252,7 +253,7 @@ class Build(unittest.TestCase):
             image = self.build(chip, "test", "mod_test/mod_test.c")
             path = os.path.join(tempfile.mkdtemp(), "t.wlpkg")
             open(path, "wb").write(sign.make_package(key, chip, 1, "test", image, "module"))
-            r = subprocess.run([exe, path, "test", str(cpu)], capture_output=True, text=True)
+            r = subprocess.run([exe, path, "test", str(cpu), hex(mkmod.slots()["test"][1])], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, chip + "\n" + r.stdout)
 
     def test_a_module_with_state_is_rejected(self):
@@ -390,7 +391,7 @@ class SlotTable(unittest.TestCase):
         with open(path, "w") as f:
             f.write('static S: [Slot; 2] = [slot!("lora", 43, 0x00000, 0x10000), slot!("hw", 45, 0x10000, 0x10000)];\n')
         self.assertEqual(mkmod.slots(path), {"lora": (43, 0, 0x10000), "hw": (45, 0x10000, 0x10000)})
-        self.assertIn("test", mkmod.slots())      # main/main.c
+        self.assertIn("test", mkmod.slots())      # shared product table
 
 
 class UpdateNetwork(unittest.TestCase):

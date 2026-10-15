@@ -6,7 +6,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
 # Lets a module (or the loader) ask for the loader on the next boot; reserve the RTC area like the loader does.
 CONFIG_BOOTLOADER_RESERVE_RTC_MEM=y
 CONFIG_BOOTLOADER_RESERVE_RTC_SIZE=0x10
@@ -37,3 +37,6 @@ CONFIG_LWIP_DEBUG=n
 # The raw flash HAL serves an owner-controlled module. Loader state sectors
 # are inside the running loader partition; SDK partition policy must not abort.
 CONFIG_SPI_FLASH_DANGEROUS_WRITE_ALLOWED=y
+
+# Preserve calibration/settings when deploying this runtime to either partition.
+CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=n

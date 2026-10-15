@@ -36,6 +36,8 @@
               cp -r crates/espmod-abi $out/share/esp-xip-modules/crates/
               mkdir -p $out/share/esp-xip-modules/main
               cp main/main.c $out/share/esp-xip-modules/main/
+              mkdir -p $out/share/esp-xip-modules/crates/espmod-host/src
+              cp crates/espmod-host/src/loader.rs $out/share/esp-xip-modules/crates/espmod-host/src/
               makeWrapper $out/share/esp-xip-modules/scripts/build-mod.sh $out/bin/build-mod.sh \
                 --set ESPMOD_TOOL_ROOT $out/share/esp-xip-modules \
                 --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.python3 pkgs.bash pkgs.coreutils ]}

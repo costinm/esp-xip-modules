@@ -3,8 +3,10 @@
 #include <string.h>
 #include "esp_chip_info.h"
 #include "esp_flash.h"
+#include "esp_cpu.h"
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
+#include "bootloader_common.h"
 #include "espmod_cbor.h"
 #include "internal.h"
 
@@ -30,6 +32,34 @@ int espmod_info_publish(int32_t component, int32_t method, const uint8_t *data, 
 }
 void em_info_release(uint32_t owner) { if (info_mutex && owner) info_release(owner); }
 
+/* Stage2's SDK boot path can retain the actual loaded partition, including a
+ * fallback, in the existing CRC-protected RTC record. Older Stage2 builds leave
+ * it unset. Cross-check against the running image so stale retained data cannot
+ * misreport the partition after a bootloader update or different boot path. */
+static const esp_partition_t *running_partition(void)
+{
+    const esp_partition_t *image = esp_ota_get_running_partition();
+#if CONFIG_BOOTLOADER_RESERVE_RTC_MEM
+    /* ESP32 RTC FAST memory is accessible only on PRO_CPU. Other callers
+     * retain the running-image fallback instead of reading it from APP_CPU. */
+    if (esp_cpu_get_core_id() != 0) return image;
+    const esp_partition_pos_t *rtc = bootloader_common_get_rtc_retain_mem_partition();
+    if (rtc && rtc->size && (!image || image->address == rtc->offset)) {
+        esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_APP,
+                                                         ESP_PARTITION_SUBTYPE_ANY, NULL);
+        while (it) {
+            const esp_partition_t *part = esp_partition_get(it);
+            if (part->address == rtc->offset && part->size == rtc->size) {
+                esp_partition_iterator_release(it);
+                return part;
+            }
+            it = esp_partition_next(it);
+        }
+    }
+#endif
+    return image;
+}
+
 int em_device_info(const espmod_host_hooks_t *hooks, uint8_t *out, size_t cap)
 {
     if (!out || !cap) return ESPMOD_ERR_ARG;
@@ -38,7 +68,7 @@ int em_device_info(const espmod_host_hooks_t *hooks, uint8_t *out, size_t cap)
     esp_chip_info_t chip; esp_chip_info(&chip);
     uint32_t flash_size = 0;
     if (esp_flash_get_size(NULL, &flash_size) != ESP_OK) return ESPMOD_ERR_IO;
-    const esp_partition_t *part = esp_ota_get_running_partition();
+    const esp_partition_t *part = running_partition();
     em_cbor_map(&w, 5);
     em_cbor_uint(&w, 1); em_cbor_map(&w, part ? 6 : 3);
     em_cbor_uint(&w, 1); em_cbor_uint(&w, (uint64_t)(esp_timer_get_time() / 1000));

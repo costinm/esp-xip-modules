@@ -1,5 +1,6 @@
-# Build-time table only. The image is written at `main` (0xf0000, 0x290000) of the device's real table, which Stage2 wrote
-# (esp-wifi-loader boot/partitions/*.csv); modules live in its `data` partition (0x380000, 0x80000).
+# Common build-time layout for the C runtime in either app partition.
+# Deployment keeps Stage2's installed table. The build script validates the
+# selected destination and reserves the loader's final 8 KiB for its state log.
 nvs,        data, nvs,     0x9000,   0x6000,
 phy_init,   data, phy,     0xf000,   0x1000,
 loader,     app,  factory, 0x10000,  0xe0000,

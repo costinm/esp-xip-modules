@@ -15,19 +15,10 @@
 
 static const char *TAG = "main";
 
-/* Every module of this repository, flashed into its slot (tools/mkmod.py reads this table). Until the loader records
- * which module lives where, a new module means a new line here. */
+/* Both C and Rust runtimes use the product slot table in espmod-host/src/loader.rs.
+ * The build script generates this C initializer from that same source. */
 const espmod_slot_t main_slots[] = {
-#if CONFIG_ESPMOD_C_LOADER
 #include "product-slots.inc"
-#else
-    {"console", 20, 0x00000, 0x10000}, /* modules/mod_console: the debug front end; the module is optional, the slot is not */
-    {"test",  2, 0x10000, 0x10000},   /* modules/mod_test (C) or modules/mod_rtest (Rust): the same slot and tag, installed in turn */
-    {"lora",  43, 0x20000, 0x10000},   /* modules/mod_lora (Rust); the tags are the component numbers of DMesh */
-    {"hw",    45, 0x30000, 0x10000},   /* modules/mod_hw (Rust) */
-    /* room for more (flash: data partition 0x80000 = eight 64 KB pages); placeholders until the loader records the table */
-    {"app5",  5, 0x40000, 0x10000}, {"app6", 6, 0x50000, 0x10000}, {"app7", 7, 0x60000, 0x10000}, {"app8", 8, 0x70000, 0x10000},
-#endif
 };
 
 /* Services modules can call (mod_test uses both). */
@@ -53,10 +44,9 @@ static int on_service(void *ctx, const char *module, uint16_t tag, const uint8_t
     return ESPMOD_ERR_NOTFOUND;
 }
 
-#if CONFIG_ESPMOD_C_LOADER
-/* The C loader sample may use its existing wl credentials as a boot input.
+/* Saved credentials are a boot input in either application partition.
  * This is a volatile request; it never creates a separate profile setting. */
-static void loader_network(const espmod_host_hooks_t *hooks)
+static void boot_network(const espmod_host_hooks_t *hooks)
 {
     espmod_bearer_profile profile = {.size = sizeof(profile)};
     uint32_t generation;
@@ -82,8 +72,6 @@ static void loader_network(const espmod_host_hooks_t *hooks)
     if (len > 0) (void)espmod_transport_set(request, (size_t)len, &generation);
 }
 
-#endif
-
 void app_main(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -93,8 +81,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
-    /* Module lifecycle is exposed through generic host hooks. The optional STA
-     * Wi-Fi driver is available to modules, but starts no radio at boot. */
+    /* Module lifecycle and desired Wi-Fi state use the same hooks in either partition. */
     espmod_host_hooks_t hooks = {
         .call_service = on_service,
         .modules_info = espmod_loader_modules_info, .module_start = espmod_loader_start_named,
@@ -106,9 +93,7 @@ void app_main(void)
                                         .partition = "data", .default_stack_bytes = 8192};
     ESP_ERROR_CHECK(espmod_loader_init(&cfg));
     /* What runs at boot is what is installed and asks for it in its manifest (the console module, if it is installed). */
-#if CONFIG_ESPMOD_C_LOADER
-    loader_network(&hooks);
-#endif
+    boot_network(&hooks);
     espmod_loader_autostart();
     ESP_LOGW(TAG, "ready");
 }
