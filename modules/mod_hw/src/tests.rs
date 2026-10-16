@@ -1,7 +1,7 @@
 //! The module against a fake host table: alarms and interrupts are recorded and fired by hand.
 use super::*;
 use core::ffi::c_void;
-use espmod_abi::{CallView, Host};
+use xip_abi::{CallView, Host};
 use std::cell::RefCell;
 use std::vec::Vec;
 
@@ -53,7 +53,7 @@ unsafe extern "C" fn adc_read(user: *mut c_void, _pin: i32, _ref: u32, raw: *mut
 
 fn table(world: &RefCell<World>) -> Host {
     let mut h: Host = unsafe { core::mem::zeroed() };
-    h.abi_version = espmod_abi::ABI_VERSION;
+    h.abi_version = xip_abi::ABI_VERSION;
     h.size = core::mem::size_of::<Host>() as u32;
     h.user = world as *const _ as *mut c_void;
     h.log = Some(log); h.now_ms = Some(now_ms); h.respond = Some(respond); h.emit = Some(emit);
@@ -177,7 +177,7 @@ fn the_probe_with_a_pin_list() {
 fn a_short_press_is_classified_on_release() {
     let mut rig = Rig::new(0);
     assert_eq!(rig.call(M_BUTTON, 0, &[], true), 0);
-    assert_eq!(rig.world.borrow().registered, [(0, espmod_abi::IRQ_BOTH as i32, COMPONENT, M_BUTTON_IRQ)]);
+    assert_eq!(rig.world.borrow().registered, [(0, xip_abi::IRQ_BOTH as i32, COMPONENT, M_BUTTON_IRQ)]);
     rig.world.borrow_mut().now = 10_000;
     rig.call(M_BUTTON_IRQ, 0, &[], false);
     rig.world.borrow_mut().now = 10_120;
@@ -217,7 +217,7 @@ fn the_host_stop_releases_everything() {
     let mut rig = Rig::new(0);
     rig.call(M_BUTTON, 0, &[], true);
     let hw = unsafe { Hw::new(&rig.host) }.unwrap();
-    let view = CallView { component: 0, method: espmod_abi::HOST_STOP as i32, value: 0, flags: 0, data: &[], pkt: 0, from: 0, id: 0 };
+    let view = CallView { component: 0, method: xip_abi::HOST_STOP as i32, value: 0, flags: 0, data: &[], pkt: 0, from: 0, id: 0 };
     assert_eq!(rig.module.handle(&hw, &view), 0);
     assert_eq!(rig.world.borrow().unregistered, [0]);
 }
@@ -228,7 +228,7 @@ fn a_host_table_without_adc_answers_with_an_error() {
     rig.host.adc_read = None;
     assert_eq!(rig.call(M_BATTERY, 0, &[], true), 0);
     let w = rig.world.borrow();
-    assert_eq!(cbor::get_int(&w.responses[0], 9), Ok(Some(espmod_abi::ERR_UNSUPPORTED as i64)));
+    assert_eq!(cbor::get_int(&w.responses[0], 9), Ok(Some(xip_abi::ERR_UNSUPPORTED as i64)));
 }
 
 #[test]

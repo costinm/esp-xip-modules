@@ -10,14 +10,14 @@ publish = false
 [workspace]
 
 [dependencies]
-espmod-abi = { path = "../../crates/espmod-abi" }
+xip-abi = { path = "../../crates/xip-abi" }
 
 [package.metadata]
 # Options for tools/mkmod.py (scripts/build.sh): stack the deepest handler needs, state block, host features used.
 mkmod = "--stack 6144 --state 768 --features SPI,SPI_READY"
 
 [features]
-flat-image = ["espmod-abi/global-alloc"]
+flat-image = ["xip-abi/global-alloc"]
 
 [lib]
 crate-type = ["rlib"]

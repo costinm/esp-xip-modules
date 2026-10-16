@@ -3,7 +3,7 @@
 # in the container it is already set up.
 #   scripts/build.sh [esp32|esp32s3|esp32c6|all] [main|loader]
 # One runtime/configuration; main|loader selects the destination size check only.
-# The modules use the shared product slot table in crates/espmod-host/src/loader.rs. Output:
+# The modules use the shared product slot table in crates/xip-runtime-esp/src/loader.rs. Output:
 #   target/out/<cpu>/main.bin                    the image `main` (sign it: docs/releasing.md)
 #   target/out/<cpu>/modules/<name>.dmod         unsigned module images
 # Nothing here is signed or keyed: sign the results with your own key (docs/releasing.md); a device pins the key of
@@ -18,7 +18,7 @@ command -v idf.py >/dev/null 2>&1 || { echo "idf.py not found: run scripts/esp-d
 CPUS="${1:-all}"
 ROLE="${2:-main}"
 case "$ROLE" in main|loader);; *) echo 'usage: scripts/build.sh [cpu|all] [main|loader]' >&2; exit 2;; esac
-slots="$ROOT/crates/espmod-host/src/loader.rs"
+slots="$ROOT/crates/xip-runtime-esp/src/loader.rs"
 [[ $CPUS == all ]] && CPUS="esp32 esp32s3 esp32c6"
 
 for cpu in $CPUS; do
@@ -29,7 +29,7 @@ for cpu in $CPUS; do
     [[ -f $ROOT/sdkconfig.$cpu.defaults ]] && defaults="$defaults;$ROOT/sdkconfig.$cpu.defaults"
     rm -f "$out/main.sdkconfig"
     IDF_TARGET=$cpu idf.py -C "$ROOT" -B "$out/main-build" \
-        -D SDKCONFIG="$out/main.sdkconfig" -D SDKCONFIG_DEFAULTS="$defaults" -D ESPMOD_PRODUCT_INCLUDE="$out" build
+        -D SDKCONFIG="$out/main.sdkconfig" -D SDKCONFIG_DEFAULTS="$defaults" -D XIP_PRODUCT_INCLUDE="$out" build
     # Stage2 boots Main in DIO or QIO; the driver must stay DIO (esp-wifi-loader docs/app-integration.md).
     grep -qxF 'CONFIG_ESPTOOLPY_FLASHMODE_DIO=y' "$out/main.sdkconfig" ||
         { echo "$cpu: flash driver must be DIO" >&2; exit 1; }
@@ -70,8 +70,8 @@ PY_CHECK
         [[ $opts =~ --slot[[:space:]]+([a-z0-9_]+) ]] && { slot="${BASH_REMATCH[1]}"; opts="${opts/--slot ${slot}/}"; }
         python3 "$ROOT/tools/mkmod.py" --chip "$cpu" --slots "$slots" --list-slots | grep -q "^$slot:" || { echo "$name: no slot, not packed"; continue; }
         if [[ -f $dir/Cargo.toml ]]; then
-            if [[ -z ${EM_RUST_ESP_BIN:-} && -z ${EM_RUST_MODULES:-} ]]; then
-                echo "$name: Rust module skipped (needs the esp toolchain: . ./env.sh finds it in an ESP-IDF install made with DMesh, or set EM_RUST_MODULES=1 when cargo has it)"
+            if [[ -z ${XIP_RUST_ESP_BIN:-} && -z ${XIP_RUST_MODULES:-} ]]; then
+                echo "$name: Rust module skipped (needs the esp toolchain: . ./env.sh finds it in an ESP-IDF install made with DMesh, or set XIP_RUST_MODULES=1 when cargo has it)"
                 continue
             fi
             "$ROOT/scripts/build-mod.sh" "$dir" --chip "$cpu" --slots "$slots" --slot "$slot" --out "$out/modules"

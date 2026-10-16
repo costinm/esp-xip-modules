@@ -1,7 +1,7 @@
 //! `mod_rtest`: the device test of the ABI in Rust, the twin of `mod_test` (C). It answers to the same component (2), methods and
 //! events, so the two are installed in turn in the one `test` slot and the same tests (`tests/device_test.py`, the console) drive
 //! both. It calls every entry of the host table and reports one event per check; on top of the C module it uses `alloc` through
-//! both allocators of `espmod-abi` (the global one and an explicit one) and checks that a failed allocation is an error, not an abort.
+//! both allocators of `xip-abi` (the global one and an explicit one) and checks that a failed allocation is an error, not an abort.
 //!
 //! The start request picks the mode: empty or `selftest` (every check that needs no wiring; finishes with 0 when all pass),
 //! `serve`, `alarm`, `gpio A B`, `spi SCK MISO MOSI CS [BUS]`. Events: `0x7e00 + n` per check, text `"<name> ok"` or
@@ -18,8 +18,8 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use espmod_abi::cbor::{self, Writer};
-use espmod_abi::{
+use xip_abi::cbor::{self, Writer};
+use xip_abi::{
     CallView, Hw, Module, SpiConfig, ADDR_MAIN, ALARM_EXACT, ERR_ARG, ERR_BUSY, ERR_NOMEM, ERR_NOTFOUND, ERR_SIZE, FEAT_MEMORY,
     FEAT_PACKETS, FEAT_SETTINGS, GPIO_INPUT, GPIO_OUTPUT, GPIO_PULL_DOWN, GPIO_PULL_NONE, HOST_START, HOST_STOP, IRQ_BOTH,
     PKT_HEADROOM, PKT_MAX, VALUE_BYTES, VALUE_EMPTY, VALUE_TEXT,
@@ -142,7 +142,7 @@ impl State {
         l.int(self.fail as i64);
         hw.emit(EV_SUMMARY, VALUE_TEXT, l.bytes());
         hw.log(l.bytes());
-        if self.fail != 0 { -(self.fail as i32) } else { espmod_abi::RET_DONE as i32 }
+        if self.fail != 0 { -(self.fail as i32) } else { xip_abi::RET_DONE as i32 }
     }
 
     fn cbor_checks(&mut self, hw: &Hw) {
@@ -256,7 +256,7 @@ impl State {
     }
 
     fn selftest(&mut self, hw: &Hw) -> i32 {
-        self.check(hw, "abi", hw.abi_version() == espmod_abi::ABI_VERSION, hw.abi_version() as i32);
+        self.check(hw, "abi", hw.abi_version() == xip_abi::ABI_VERSION, hw.abi_version() as i32);
         self.check(hw, "log", hw.log(b"mod_rtest log") == 0, 0);
         let t0 = hw.now_ms();
         self.check(hw, "time", hw.now_ms() >= t0, 0);
@@ -295,7 +295,7 @@ impl State {
         // argument validation: rejected before touching hardware
         self.check(hw, "gpio-bad-pin", hw.gpio_config(500, GPIO_OUTPUT, GPIO_PULL_NONE, 0) == ERR_ARG, 0);
         self.check(hw, "gpio-unowned", hw.gpio_read(0) < 0, 0);
-        self.check(hw, "irq-bad-pin", hw.irq_register(-1, espmod_abi::IRQ_RISING, C_TEST, M_IRQ) < 0, 0);
+        self.check(hw, "irq-bad-pin", hw.irq_register(-1, xip_abi::IRQ_RISING, C_TEST, M_IRQ) < 0, 0);
         self.check(hw, "irq-unknown", hw.irq_unregister(0) == ERR_NOTFOUND, 0);
         let mut bad = SpiConfig::new(2);
         bad.mode = 9;
@@ -318,7 +318,7 @@ impl State {
         let one = hw.alarm_set(30, 0, 0, ALARM_EXACT, C_TEST, M_ONESHOT);
         self.periodic = hw.alarm_set(10, 0, 10, ALARM_EXACT, C_TEST, M_TICK);
         self.check(hw, "alarms-set", one >= 0 && self.periodic >= 0 && one != self.periodic, one);
-        espmod_abi::RET_CONTINUE as i32
+        xip_abi::RET_CONTINUE as i32
     }
 
     fn alarm_fired(&mut self, hw: &Hw, call: &CallView) -> i32 {
@@ -333,7 +333,7 @@ impl State {
                 self.check(hw, "periodic-cancel", hw.alarm_cancel(self.periodic) == 0, 0);
             }
         }
-        if self.done_oneshot != 0 && self.ticks >= 3 { self.finish(hw) } else { espmod_abi::RET_CONTINUE as i32 }
+        if self.done_oneshot != 0 && self.ticks >= 3 { self.finish(hw) } else { xip_abi::RET_CONTINUE as i32 }
     }
 
     /// `gpio A B`: A drives, B reads; B's edges arrive as `M_IRQ` calls.
@@ -352,7 +352,7 @@ impl State {
         self.check(hw, "irq-register", hw.irq_register(b, IRQ_BOTH, C_TEST, M_IRQ) == 0, 0);
         hw.alarm_set(150, 0, 0, ALARM_EXACT, C_TEST, M_TIMEOUT);
         hw.gpio_write(a, 1); // the edge comes back as an M_IRQ call
-        espmod_abi::RET_CONTINUE as i32
+        xip_abi::RET_CONTINUE as i32
     }
 
     fn gpio_irq(&mut self, hw: &Hw, call: &CallView) -> i32 {
@@ -365,7 +365,7 @@ impl State {
         } else {
             self.irq_seen = self.irq_seen.saturating_add(1);
         }
-        espmod_abi::RET_CONTINUE as i32
+        xip_abi::RET_CONTINUE as i32
     }
 
     fn gpio_masked(&mut self, hw: &Hw) -> i32 {
@@ -416,7 +416,7 @@ impl State {
             w.map(2).uint(1).uint(self.calls as u64).uint(2).uint(self.mode as u64);
             if let Some(e) = w.finish() { hw.respond(e); }
         }
-        espmod_abi::RET_CONTINUE as i32
+        xip_abi::RET_CONTINUE as i32
     }
 }
 
@@ -439,12 +439,12 @@ impl Module for State {
                 hw.emit(EV_SUMMARY, VALUE_TEXT, b"stopped");
                 return 0;
             }
-            if !call.is_host(HOST_START) { return espmod_abi::RET_CONTINUE as i32; } // NETWORK, WAKE: not used
+            if !call.is_host(HOST_START) { return xip_abi::RET_CONTINUE as i32; } // NETWORK, WAKE: not used
             let d = call.data;
             if d.starts_with(b"serve") {
                 self.mode = MODE_SERVE;
                 hw.log(b"mod_rtest serving");
-                return espmod_abi::RET_CONTINUE as i32;
+                return xip_abi::RET_CONTINUE as i32;
             }
             if d.starts_with(b"alarm") { self.mode = MODE_ALARM; return self.alarm_start(hw); }
             if d.starts_with(b"gpio ") { self.mode = MODE_GPIO; return self.gpio_start(hw, d); }
@@ -452,13 +452,13 @@ impl Module for State {
             self.mode = MODE_SELFTEST;
             return self.selftest(hw);
         }
-        if call.component != C_TEST { return espmod_abi::RET_CONTINUE as i32; }
+        if call.component != C_TEST { return xip_abi::RET_CONTINUE as i32; }
         match call.method {
             M_ONESHOT | M_TICK => self.alarm_fired(hw, call),
             M_IRQ => self.gpio_irq(hw, call),
             M_MASKED => self.gpio_masked(hw),
             M_TIMEOUT => {
-                if self.irq_seen != 0 { return espmod_abi::RET_CONTINUE as i32; }
+                if self.irq_seen != 0 { return xip_abi::RET_CONTINUE as i32; }
                 self.check(hw, "irq-event", false, -1);
                 self.finish(hw)
             }
@@ -470,26 +470,26 @@ impl Module for State {
                     }
                     let _ = hw.send(call.pkt, call.data.len(), call.from, C_TEST, M_PKT_REPLY, call.id);
                 }
-                espmod_abi::RET_CONTINUE as i32
+                xip_abi::RET_CONTINUE as i32
             }
             M_PKT_REPLY => {
                 hw.emit(EV_PKT, VALUE_TEXT, b"reply");
-                espmod_abi::RET_CONTINUE as i32
+                xip_abi::RET_CONTINUE as i32
             }
             M_PKT_KEEP => {
                 if call.pkt != 0 && self.kept == 0 && hw.pkt_keep(call.pkt) == 0 { self.kept = call.pkt; }
-                espmod_abi::RET_CONTINUE as i32
+                xip_abi::RET_CONTINUE as i32
             }
             M_MEM_LEAK => {
                 let _ = hw.mem_alloc(64);
-                espmod_abi::RET_CONTINUE as i32
+                xip_abi::RET_CONTINUE as i32
             }
             M_PKT_DROP => {
                 if self.kept != 0 {
                     hw.pkt_free(self.kept);
                     self.kept = 0;
                 }
-                espmod_abi::RET_CONTINUE as i32
+                xip_abi::RET_CONTINUE as i32
             }
             _ => self.request(hw, call),
         }
@@ -498,11 +498,11 @@ impl Module for State {
 
 const _: () = assert!(core::mem::size_of::<State>() <= STATE_BYTES);
 
-/// Export `espmod_handle` for the flash image.
+/// Export `xip_handle` for the flash image.
 #[macro_export]
 macro_rules! export {
     () => {
-        espmod_abi::export_module!($crate::State, state = $crate::STATE_BYTES);
+        xip_abi::export_module!($crate::State, state = $crate::STATE_BYTES);
     };
 }
 

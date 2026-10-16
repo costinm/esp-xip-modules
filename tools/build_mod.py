@@ -57,14 +57,14 @@ def main():
     layout_file.write_text(''.join(f'{n}\t{tag}\t{offset}\t{size}\n'
                                   for n, (tag, offset, size) in layout.items()))
     env = dict(os.environ)
-    if rust and not env.get('EM_RUST_ESP_BIN') and env.get('IDF_PATH'):
+    if rust and not env.get('XIP_RUST_ESP_BIN') and env.get('IDF_PATH'):
         # The SDK harness installs ESP Rust alongside ESP-IDF. This works
         # across calling repositories without knowing their env variable names.
         rust_bin = Path(env['IDF_PATH']).resolve().parent / 'rustup/toolchains/esp/bin'
         if (rust_bin / 'cargo').is_file():
-            env['EM_RUST_ESP_BIN'] = str(rust_bin)
-    env['ESPMOD_SLOT_LAYOUT'] = str(layout_file)
-    env['ESPMOD_SLOT'] = slot
+            env['XIP_RUST_ESP_BIN'] = str(rust_bin)
+    env['XIP_SLOT_LAYOUT'] = str(layout_file)
+    env['XIP_SLOT'] = slot
     env.setdefault('CARGO_TARGET_DIR', str(directory / 'target' / 'cargo'))
     command = ['python3', str(Path(mkmod.ROOT) / 'tools' / 'mkmod.py'),
                '--chip', args.chip, '--slot', slot, *options,

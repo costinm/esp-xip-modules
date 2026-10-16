@@ -3,7 +3,7 @@
 //! ([`machine::Radio`]): the host calls it for requests, for the radio's interrupt line and for its own alarm, and
 //! between calls nothing runs.
 //!
-//! Everything LoRa-specific lives here. The drivers use only the [`hal::Hal`] trait; [`espmod`] implements it
+//! Everything LoRa-specific lives here. The drivers use only the [`hal::Hal`] trait; [`xip`] implements it
 //! over the esp-xip-modules host table and exports the handler, so the same code runs as a flash module
 //! (`mod_lora.dmod`, bin `mod_lora` with feature `flat-image`) or linked into an application. The host tests run
 //! the machine against a scripted fake.
@@ -14,7 +14,7 @@ extern crate std;
 
 pub mod command;
 pub mod config;
-pub mod espmod;
+pub mod xip;
 pub mod frames;
 pub mod fsk;
 pub mod hal;

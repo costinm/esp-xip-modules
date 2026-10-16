@@ -20,7 +20,7 @@ CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 CONFIG_FREERTOS_HZ=1000
 
 # Allocation limit, not reserved RAM: accommodates the optional external flash module.
-CONFIG_ESPMOD_MEM_QUOTA=0
+CONFIG_XIP_MEM_QUOTA=0
 
 # Keep the C sample small; the Rust runtime has its own WPA3-enabled defaults.
 CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n

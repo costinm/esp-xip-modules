@@ -1,6 +1,6 @@
 /* Position independent module (RISC-V): code is linked at the end of the 64-byte image header and
  * contains no absolute addresses, so any mapping address works. */
-ENTRY(espmod_handle)
+ENTRY(xip_handle)
 
 SECTIONS {
   . = MODULE_VMA;

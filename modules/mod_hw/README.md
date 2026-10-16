@@ -10,7 +10,7 @@ for the button (stays running until stopped). The text `battery` or `button` wor
 arrays (value type 5): 111 battery, 110 ADC sample, 101/102/103 short/long/double press.
 
 ```sh
-EM_RUST_MODULES=1 scripts/build.sh esp32c6          # target/out/<chip>/modules/mod_hw.dmod, then sign and install
+XIP_RUST_MODULES=1 scripts/build.sh esp32c6          # target/out/<chip>/modules/mod_hw.dmod, then sign and install
 cargo test                                         # the module against a fake host table
 ```
 

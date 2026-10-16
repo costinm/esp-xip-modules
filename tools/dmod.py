@@ -1,5 +1,5 @@
 """The module image header (DMOD). Layout and constants come from abi/API.md, the same source as
-include/espmod.h, so the packer, the tests and the device cannot disagree."""
+include/xip.h, so the packer, the tests and the device cannot disagree."""
 import os
 import struct
 import sys

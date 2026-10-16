@@ -6,17 +6,17 @@ version = 4
 name = "esp-mod-hw"
 version = "0.2.0"
 dependencies = [
- "espmod-abi",
-]
-
-[[package]]
-name = "espmod-abi"
-version = "0.1.0"
-dependencies = [
- "mesh-api",
+ "xip-abi",
 ]
 
 [[package]]
 name = "mesh-api"
 version = "0.1.0"
 source = "git+https://github.com/costinm/ssh-mesh#6213437569129fa94e25c200211419d6bf96a82a"
+
+[[package]]
+name = "xip-abi"
+version = "0.1.0"
+dependencies = [
+ "mesh-api",
+]

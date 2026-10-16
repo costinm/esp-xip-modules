@@ -10,7 +10,7 @@ publish = false
 [workspace]
 
 [dependencies]
-espmod-abi = { path = "../../crates/espmod-abi", features = ["global-alloc", "allocator-api"] }
+xip-abi = { path = "../../crates/xip-abi", features = ["global-alloc", "allocator-api"] }
 
 [package.metadata]
 # Options for tools/mkmod.py (scripts/build.sh). The slot is mod_test's: install one or the other.
@@ -18,7 +18,7 @@ mkmod = "--slot test --stack 4096 --state 64"
 
 [features]
 flat-image = []
-# a static library for tests/host/test_rtest.c (a panic handler, since there is no std)
+# the panic handler of a no_std library built as a shared object for crates/xip-runtime-host (scripts/build-host-modules.sh)
 sim = []
 
 [lib]

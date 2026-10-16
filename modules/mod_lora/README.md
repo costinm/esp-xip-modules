@@ -9,8 +9,8 @@ through the esp-xip-modules host table (GPIO, interrupts, SPI, time, events). Th
 
 | Form | How |
 |---|---|
-| flash module `mod_lora.dmod` | `scripts/build.sh esp32c6` (needs the ESP Rust toolchain: `EM_RUST_MODULES=1`), or DMesh's `scripts/build-modules.sh`, signed and installed through the loader (below) |
-| linked into an application | an instance whose handler is `esp_mod_lora::espmod`'s exported handler (`espmod_instance_create`) |
+| flash module `mod_lora.dmod` | `scripts/build.sh esp32c6` (needs the ESP Rust toolchain: `XIP_RUST_MODULES=1`), or DMesh's `scripts/build-modules.sh`, signed and installed through the loader (below) |
+| linked into an application | an instance whose handler is `esp_mod_lora::xip`'s exported handler (`xip_instance_create`) |
 | host tests | `cargo test` in this directory: the drivers run against a scripted fake board |
 
 ## Layout
@@ -22,7 +22,7 @@ through the esp-xip-modules host table (GPIO, interrupts, SPI, time, events). Th
 | `command.rs` | the request format (below) and its parser |
 | `sx127x.rs`, `sx126x.rs`, `fsk.rs` | the chip drivers (LoRa mode; FSK of both chips) |
 | `run.rs`, `entry.rs` | the RX loops and the entry (`rx`, `tx`, `probe`, ...) |
-| `espmod.rs` | `Hal` over the esp-xip-modules host table, and the `espmod_entry` adapter: the only file that sees the C ABI |
+| `xip.rs` | `Hal` over the esp-xip-modules host table, and the `xip_entry` adapter: the only file that sees the C ABI |
 | `frames.rs` | Meshtastic-style framing helpers |
 
 ## Requests

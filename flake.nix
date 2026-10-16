@@ -21,7 +21,7 @@
         in
         {
           module-tools = pkgs.stdenvNoCC.mkDerivation {
-            pname = "espmod-module-tools";
+            pname = "xip-module-tools";
             version = "0.1.0";
             src = pkgs.lib.cleanSourceWith {
               src = ./.;
@@ -33,13 +33,13 @@
               cp scripts/build-mod.sh $out/share/esp-xip-modules/scripts/
               cp -r tools include abi $out/share/esp-xip-modules/
               cp -r modules/common $out/share/esp-xip-modules/modules/
-              cp -r crates/espmod-abi $out/share/esp-xip-modules/crates/
+              cp -r crates/xip-abi $out/share/esp-xip-modules/crates/
               mkdir -p $out/share/esp-xip-modules/main
               cp main/main.c $out/share/esp-xip-modules/main/
-              mkdir -p $out/share/esp-xip-modules/crates/espmod-host/src
-              cp crates/espmod-host/src/loader.rs $out/share/esp-xip-modules/crates/espmod-host/src/
+              mkdir -p $out/share/esp-xip-modules/crates/xip-runtime-esp/src
+              cp crates/xip-runtime-esp/src/loader.rs $out/share/esp-xip-modules/crates/xip-runtime-esp/src/
               makeWrapper $out/share/esp-xip-modules/scripts/build-mod.sh $out/bin/build-mod.sh \
-                --set ESPMOD_TOOL_ROOT $out/share/esp-xip-modules \
+                --set XIP_TOOL_ROOT $out/share/esp-xip-modules \
                 --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.python3 pkgs.bash pkgs.coreutils ]}
             '';
           };

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Generate the module ABI from abi/API.md (the format of the ssh-mesh and DMesh API.md files).
 
-  gen_abi.py            write include/espmod.h and the Rust mirror (crates/espmod-abi)
+  gen_abi.py            write include/xip.h and the Rust mirror (crates/xip-abi)
   gen_abi.py --check    fail if those files are stale or a released slot changed (CI)
-  gen_abi.py --update-lock   record the current table as abi/espmod.lock (at a release)
+  gen_abi.py --update-lock   record the current table as abi/xip.lock (at a release)
 """
 import json
 import os
@@ -15,9 +15,9 @@ from apimd import num, prose, sections, sections_top, tables, top_text  # noqa: 
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 SRC = os.path.join(ROOT, "abi", "API.md")
-LOCK = os.path.join(ROOT, "abi", "espmod.lock")
-HEADER = os.path.join(ROOT, "include", "espmod.h")
-RUST = os.path.join(ROOT, "crates", "espmod-abi", "src", "generated.rs")
+LOCK = os.path.join(ROOT, "abi", "xip.lock")
+HEADER = os.path.join(ROOT, "include", "xip.h")
+RUST = os.path.join(ROOT, "crates", "xip-abi", "src", "generated.rs")
 
 SIZES32 = {"uint8_t": 1, "uint16_t": 2, "uint32_t": 4, "int32_t": 4, "uint64_t": 8, "size_t": 4, "const uint8_t *": 4}
 
@@ -25,7 +25,7 @@ SIZES32 = {"uint8_t": 1, "uint16_t": 2, "uint32_t": 4, "int32_t": 4, "uint64_t":
 def load():
     with open(SRC) as f:
         text = f.read()
-    meta = dict(kv.split("=") for kv in re.search(r"<!-- espmod-abi: (.*?) -->", text).group(1).split())
+    meta = dict(kv.split("=") for kv in re.search(r"<!-- xip-abi: (.*?) -->", text).group(1).split())
     d = {"abi": {"version": int(meta["version"]), "prefix": meta["prefix"], "released": meta["released"] == "true"},
          "error": [], "constants": [], "struct": [], "entry": []}
     top = {h: body for h, body in sections_top(text)}
@@ -116,8 +116,8 @@ def header(d):
             o.append(f"_Static_assert(sizeof({tname}) == {struct_size32(st)}, \"{tname} layout\");")
         o.append("")
     n = len(d["entry"])
-    o += ["/* The host table. The module receives it in espmod_entry() and keeps nothing from it after returning.",
-          " * Every slot is always filled; a feature the host lacks returns ESPMOD_ERR_UNSUPPORTED. */",
+    o += ["/* The host table. The module receives it in xip_entry() and keeps nothing from it after returning.",
+          " * Every slot is always filled; a feature the host lacks returns XIP_ERR_UNSUPPORTED. */",
           f"typedef struct {abi['prefix']}_host {{",
           f"    uint32_t abi_version; /* {P}_ABI_VERSION of the host */",
           "    uint32_t size;        /* sizeof of the host's table: slots beyond it do not exist */",
@@ -133,8 +133,8 @@ def header(d):
           f"#define {P}_HOST_HAS(host, call) \\",
           f"    ((host)->size >= offsetof({abi['prefix']}_host, call) + sizeof((host)->call))", "",
           "/* The one symbol a module exports. The host calls it for every event (docs: abi/API.md, Model):",
-          " * call->component == ESPMOD_HOST_COMPONENT is the host's own (START, STOP, ...). `state` is the module's",
-          " * zeroed state block. Return ESPMOD_RET_CONTINUE, ESPMOD_RET_DONE or a negative error. */",
+          " * call->component == XIP_HOST_COMPONENT is the host's own (START, STOP, ...). `state` is the module's",
+          " * zeroed state block. Return XIP_RET_CONTINUE, XIP_RET_DONE or a negative error. */",
           f"typedef int (*{abi['prefix']}_handle_fn)(const {abi['prefix']}_host *host, void *state,",
           f"                                          const {abi['prefix']}_call *call);",
           f"int {abi['prefix']}_handle(const {abi['prefix']}_host *host, void *state, const {abi['prefix']}_call *call);",
@@ -147,7 +147,7 @@ RUST_TYPES = {"int": "i32", "uint8_t": "u8", "uint16_t": "u16", "uint32_t": "u32
 
 
 def rust_type(ctype, prefix):
-    """Map a C type spelling from the table ('const uint8_t *', 'size_t *', 'espmod_event *') to Rust."""
+    """Map a C type spelling from the table ('const uint8_t *', 'size_t *', 'xip_event *') to Rust."""
     t = ctype.strip()
     const = t.startswith("const ")
     t = t.removeprefix("const ").strip()
@@ -271,7 +271,7 @@ def main():
                 msg = "\n".join(problems)
                 if d["abi"].get("released"):
                     sys.exit("released ABI changed:\n" + msg)
-                print("note: abi/espmod.lock differs (ABI not released yet):\n" + msg)
+                print("note: abi/xip.lock differs (ABI not released yet):\n" + msg)
         print("abi ok")
         return
     for path, text in outputs.items():

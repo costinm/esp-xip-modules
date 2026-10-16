@@ -21,7 +21,7 @@ import dmod  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
-# Where each chip runs modules. Must match components/espmod_loader/src/loader.c (tests/test_tools.py checks).
+# Where each chip runs modules. Must match components/xip_loader/src/loader.c (tests/test_tools.py checks).
 CHIPS = {
     "esp32":   dict(prefix="xtensa-esp32-elf", fixed=True, code_base=0x40300000, data_base=0x3F700000,
                     arch=["-mtext-section-literals"], rust_target="xtensa-esp32-espidf"),
@@ -37,9 +37,9 @@ CFLAGS = ["-std=gnu11", "-Os", "-Wall", "-Wextra", "-Werror", "-ffreestanding", 
           "-fno-tree-loop-distribute-patterns"]
 
 
-def slots(path=os.path.join(ROOT, "crates", "espmod-host", "src", "loader.rs")):
+def slots(path=os.path.join(ROOT, "crates", "xip-runtime-esp", "src", "loader.rs")):
     """The product slot table shared by the C and Rust examples: {name: (tag, offset, size)}. A C main lists {"name", tag, offset, size} in main_slots[];
-    a Rust one lists slot!("name", tag, offset, size) (espmod-host), anywhere in the file."""
+    a Rust one lists slot!("name", tag, offset, size) (xip-runtime-esp), anywhere in the file."""
     with open(path) as source:
         text = source.read()
     # Compatibility with callers selecting the C example explicitly. Its C
@@ -160,7 +160,7 @@ def cargo_link(cfg, cargo, window, link_script, tmp):
     -Zbuild-std). Xtensa Rust cannot produce PIC: it is linked at the slot's fixed address (like C).
     """
     manifest, binname, features = cargo
-    features = ",".join(filter(None, [features, "espmod-abi/global-alloc", "espmod-abi/allocator-api"]))
+    features = ",".join(filter(None, [features, "xip-abi/global-alloc", "xip-abi/allocator-api"]))
     target = cfg["rust_target"]
     tool = cfg["prefix"] + "-"
     srcdir = os.path.join(os.path.dirname(os.path.abspath(manifest)), "src")
@@ -171,15 +171,15 @@ def cargo_link(cfg, cargo, window, link_script, tmp):
                  "-C", "llvm-args=--min-jump-table-entries=1000000"] if cfg["fixed"] else ["-C", "relocation-model=pic"]
         rustflags = ["-C", "opt-level=s", "-C", "lto=fat", "-C", "codegen-units=1", *extra,
                      "-C", f"link-arg=-Wl,--defsym=MODULE_VMA={window + dmod.HEADER_SIZE}",
-                     "-C", "link-arg=-Wl,-e,espmod_handle", "-C", "link-arg=-Wl,-u,espmod_handle",
+                     "-C", "link-arg=-Wl,-e,xip_handle", "-C", "link-arg=-Wl,-u,xip_handle",
                      "-C", f"link-arg=-T{link_script}", "-C", "link-arg=-nostdlib", "-C", "link-arg=-Wl,--gc-sections"]
         if cfg["fixed"]:
             rustflags += ["-C", f"link-arg=-Wl,--defsym=MODULE_DATA_VMA={data_vma}"]
         # cargo fingerprints linker arguments poorly: make the second pass really relink.
         os.utime(os.path.join(srcdir, "bin", binname + ".rs"))
         env = dict(os.environ)
-        if env.get("EM_RUST_ESP_BIN"):   # env.sh: the esp toolchain (nightly with rust-src) shared with the ESP-IDF install
-            env["PATH"] = env["EM_RUST_ESP_BIN"] + os.pathsep + env["PATH"]
+        if env.get("XIP_RUST_ESP_BIN"):   # env.sh: the esp toolchain (nightly with rust-src) shared with the ESP-IDF install
+            env["PATH"] = env["XIP_RUST_ESP_BIN"] + os.pathsep + env["PATH"]
         run(["cargo", "rustc", "--manifest-path", manifest, "--bin", binname, "--features", features,
              "--target", target, "--release", "-Zbuild-std=core,alloc,compiler_builtins",
              "-Zbuild-std-features=compiler-builtins-mem", "--config", f'target.{target}.linker="{tool}gcc"',
@@ -210,7 +210,7 @@ def build(chip, slot, sources, out, stack=8192, features=0, state=0, defines=(),
     link_script = os.path.join(ROOT, "modules", "common", "link-fixed.x" if cfg["fixed"] else "link.x")
     with tempfile.TemporaryDirectory() as tmp:
         objs = []
-        for src in ([] if cargo else list(sources) + [os.path.join(ROOT, "modules", "common", "espmod_rt.c")]):
+        for src in ([] if cargo else list(sources) + [os.path.join(ROOT, "modules", "common", "xip_rt.c")]):
             obj = os.path.join(tmp, os.path.basename(src) + ".o")
             run([tool + "gcc", *CFLAGS, *cfg["arch"], *[f"-D{d}" for d in defines],
                  "-I", os.path.join(ROOT, "include"), "-I", os.path.join(ROOT, "modules", "common"),
@@ -220,7 +220,7 @@ def build(chip, slot, sources, out, stack=8192, features=0, state=0, defines=(),
 
         def link_c(data_vma):
             args = [tool + "gcc", *cfg["arch"], "-nostdlib", "-static", "-Wl,--gc-sections", "-Wl,--no-relax",
-                    "-Wl,-z,norelro", "-Wl,--build-id=none", "-Wl,-e,espmod_handle", "-Wl,-u,espmod_handle",
+                    "-Wl,-z,norelro", "-Wl,--build-id=none", "-Wl,-e,xip_handle", "-Wl,-u,xip_handle",
                     f"-Wl,-T,{link_script}", f"-Wl,--defsym=MODULE_VMA={window + dmod.HEADER_SIZE}"]
             if cfg["fixed"]:
                 args.append(f"-Wl,--defsym=MODULE_DATA_VMA={data_vma}")
@@ -278,9 +278,9 @@ def main():
     ap.add_argument("--out")
     ap.add_argument("--stack", type=int, default=8192, help="stack the deepest handler needs, bytes")
     ap.add_argument("--state", type=int, default=0, help="size of the zeroed state block passed to every call, bytes (<= 4096)")
-    ap.add_argument("--features", default="0", help="ESPMOD_FEAT_* bits the module needs, e.g. SPI,SETTINGS")
+    ap.add_argument("--features", default="0", help="XIP_FEAT_* bits the module needs, e.g. SPI,SETTINGS")
     ap.add_argument("--slots", metavar="FILE",
-                    help="C or Rust product slot table (default: crates/espmod-host/src/loader.rs)")
+                    help="C or Rust product slot table (default: crates/xip-runtime-esp/src/loader.rs)")
     ap.add_argument("--list-slots", action="store_true")
     ap.add_argument("--autostart", nargs="?", const="", default=None, metavar="REQUEST",
                     help="start this module at boot (recorded in its manifest) with REQUEST as its start request")

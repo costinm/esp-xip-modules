@@ -19,41 +19,29 @@ if [[ $what == c || $what == all ]]; then
     target/test_info_cache
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_profile tests/host/test_profile.c
     target/test_profile
-    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/espmod_pool/include \
-        -o target/test_flash_hal tests/host/test_flash_hal.c components/espmod_pool/src/pool.c
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include \
+        -o target/test_flash_hal tests/host/test_flash_hal.c components/xip_runtime/src/xip_pool.c
     target/test_flash_hal
-    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/espmod_pool/include \
-        -o target/test_socket_hal tests/host/test_socket_hal.c components/espmod_pool/src/pool.c -lpthread
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include \
+        -o target/test_socket_hal tests/host/test_socket_hal.c components/xip_runtime/src/xip_pool.c -lpthread
     target/test_socket_hal
     # the checks a device makes before it maps or installs a module
-    gcc -Wall -Wextra -fsanitize=address,undefined -g -I include -I components/espmod_pool/include -I components/espmod_loader/include -I tests/host \
-        -o target/test_check tests/host/test_check.c components/espmod_loader/src/espmod_check.c
+    gcc -Wall -Wextra -fsanitize=address,undefined -g -I include -I components/xip_runtime/include -I components/xip_loader/include -I tests/host \
+        -o target/test_check tests/host/test_check.c components/xip_loader/src/xip_check.c
     target/test_check
-    # the console module (text <-> tagged CBOR) and the CBOR helpers
-    gcc -Wall -Wextra -fsanitize=address,undefined -g -DESPMOD_LINKED=1 -I include -I modules/common -I modules/mod_console \
-        -I tests/host -I components/espmod_pool/include -o target/test_console tests/host/test_console.c tests/host/sim_host.c components/espmod_pool/src/pool.c modules/mod_console/mod_console.c modules/mod_test/mod_test.c
-    target/test_console
-    # mod_hello and mod_test, the sources that become flash images, against a simulated host
-    gcc -Wall -Wextra -fsanitize=address,undefined -g -I components/espmod_pool/include -o target/test_pool tests/host/test_pool.c \
-        components/espmod_pool/src/pool.c -lpthread
+    # the packet pool
+    gcc -Wall -Wextra -fsanitize=address,undefined -g -I components/xip_runtime/include -o target/test_pool tests/host/test_pool.c \
+        components/xip_runtime/src/xip_pool.c -lpthread
     target/test_pool
-    gcc -Wall -Wextra -fsanitize=address,undefined -g -DESPMOD_LINKED=1 -I include -I modules/common -I tests/host \
-        -I components/espmod_pool/include -o target/test_modules tests/host/test_modules.c tests/host/sim_host.c \
-        components/espmod_pool/src/pool.c modules/mod_hello/mod_hello.c \
-        modules/mod_test/mod_test.c
-    target/test_modules
-    # the same tests against the Rust twin (modules/mod_rtest), as a static library for the PC
-    RUSTC_BOOTSTRAP=1 cargo rustc --quiet --release --lib --crate-type staticlib --features sim --manifest-path modules/mod_rtest/Cargo.toml
-    gcc -Wall -Wextra -fsanitize=address,undefined -g -DTEST_HANDLE=espmod_handle -DNO_HELLO -I include -I modules/common -I tests/host \
-        -I components/espmod_pool/include -o target/test_rtest tests/host/test_modules.c tests/host/sim_host.c \
-        components/espmod_pool/src/pool.c modules/mod_rtest/target/release/libesp_mod_rtest.a -lpthread -ldl
-    target/test_rtest
 fi
 if [[ $what == rust || $what == all ]]; then
     # the crates and the Rust modules: logic on a PC (the images are built by scripts/build.sh with the esp toolchain)
-    for crate in crates/espmod-abi crates/espmod-host modules/mod_lora modules/mod_hw; do
+    for crate in crates/xip-abi crates/xip-runtime-esp modules/mod_lora modules/mod_hw; do
         cargo test --quiet --manifest-path "$crate/Cargo.toml"
     done
+    # the host-runtime runs the modules (C and Rust, built for this machine) against the host table: virtual time, fixtures
+    scripts/build-host-modules.sh >/dev/null
+    cargo test --quiet --manifest-path crates/xip-runtime-host/Cargo.toml
 fi
 if [[ $what == python || $what == all ]]; then
     python3 tests/test_tools.py      # tools, ABI generator, module build (needs the toolchains for that part)

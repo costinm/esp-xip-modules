@@ -1,0 +1,29 @@
+[package]
+name = "xip-main"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The Rust twin of esp-xip-modules' main/main.c: host and loader over a slot table, and the serial console"
+publish = false
+resolver = "2"
+
+[workspace]
+
+[dependencies]
+xip-runtime-esp = { path = ".." }
+esp-idf-sys = { version = "0.37", default-features = false, features = ["std"] }
+
+[build-dependencies]
+embuild = "0.33.3"
+
+# The C components come from this repository.
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["../../../components"]
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+panic = "abort"
+
+[patch.crates-io]
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys.git", rev = "8369f610a31e9c90a5479ed7f366f983589dfa0a" }

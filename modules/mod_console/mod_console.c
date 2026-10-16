@@ -8,7 +8,7 @@
  * (tagged CBOR, named by catalog.h, generated from the modules' API.md files), calls it with the host's call(), and
  * turns its answer back into text. The host moves bytes and structured records; it formats nothing. */
 /* mkmod: --state 8 --stack 6144 --features SERIAL,PACKETS,MEMORY --autostart */
-#include "espmod_module.h"
+#include "xip_module.h"
 #include "catalog.h"
 
 #define C_CONSOLE 20
@@ -84,18 +84,18 @@ static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && 
 /* The blocks one call took with mem_alloc, given back together at the end of the handler: this module's own bookkeeping, the
  * host has no notion of per-call memory. */
 typedef struct { void *p[16]; int n; } mem_t;
-static void *take(const espmod_host *h, mem_t *mem, size_t size)
+static void *take(const xip_host *h, mem_t *mem, size_t size)
 {
     void *b = mem->n < 16 ? h->mem_alloc(h->user, size) : 0;
     if (b) mem->p[mem->n++] = b;
     return b;
 }
-static void give_back(const espmod_host *h, mem_t *mem) { while (mem->n) (void)h->mem_free(h->user, mem->p[--mem->n]); }
+static void give_back(const xip_host *h, mem_t *mem) { while (mem->n) (void)h->mem_free(h->user, mem->p[--mem->n]); }
 
 /* Output buffer for text. */
 typedef struct { char *p; size_t cap, len; } out_t;
 static void put(out_t *o, const char *s, size_t n) { for (size_t i = 0; i < n && o->len + 1 < o->cap; i++) o->p[o->len++] = s[i]; }
-static void puts_(out_t *o, const char *s) { put(o, s, em_strlen(s)); }
+static void puts_(out_t *o, const char *s) { put(o, s, xip_strlen(s)); }
 /* v / 10 and v % 10 with 32-bit operations only: a module links no libgcc (no __udivdi3) */
 static uint32_t divmod10(uint64_t *v)
 {
@@ -111,15 +111,15 @@ static uint32_t divmod10(uint64_t *v)
     return r;
 }
 static void putu(out_t *o, uint64_t v) { char d[24]; int k = 0; do { d[k++] = (char)('0' + divmod10(&v)); } while (v); while (k) put(o, &d[--k], 1); }
-static void putn(out_t *o, int64_t v) { char b[24]; size_t n = em_itoa(b, (long)v); put(o, b, n); }
+static void putn(out_t *o, int64_t v) { char b[24]; size_t n = xip_itoa(b, (long)v); put(o, b, n); }
 
 /* A JSON-like dump of the host's CBOR: numeric tags stay numeric. */
-static int info_json(out_t *o, em_cbor_r *r, unsigned depth)
+static int info_json(out_t *o, xip_cbor_r *r, unsigned depth)
 {
-    em_cbor_item it;
-    if (depth > 32 || em_cbor_next(r, &it)) return -1;
-    if (it.type == EM_CBOR_MAP || it.type == EM_CBOR_ARRAY) {
-        int map = it.type == EM_CBOR_MAP;
+    xip_cbor_item it;
+    if (depth > 32 || xip_cbor_next(r, &it)) return -1;
+    if (it.type == XIP_CBOR_MAP || it.type == XIP_CBOR_ARRAY) {
+        int map = it.type == XIP_CBOR_MAP;
         put(o, map ? "{" : "[", 1);
         for (size_t i = 0; i < it.n; i++) {
             if (i) put(o, ",", 1);
@@ -127,13 +127,13 @@ static int info_json(out_t *o, em_cbor_r *r, unsigned depth)
             if (info_json(o, r, depth + 1)) return -1;
         }
         put(o, map ? "}" : "]", 1);
-    } else if (it.type == EM_CBOR_TEXT || it.type == EM_CBOR_BYTES) {
+    } else if (it.type == XIP_CBOR_TEXT || it.type == XIP_CBOR_BYTES) {
         const char *hex = "0123456789abcdef";
         put(o, "\"", 1);
-        if (it.type == EM_CBOR_BYTES) puts_(o, "hex:");
+        if (it.type == XIP_CBOR_BYTES) puts_(o, "hex:");
         for (size_t i = 0; i < it.n; i++) {
             uint8_t c = it.data[i];
-            if (it.type == EM_CBOR_BYTES) {
+            if (it.type == XIP_CBOR_BYTES) {
                 char b[2] = {hex[c >> 4], hex[c & 15]}; put(o, b, 2);
             } else if (c == '"' || c == '\\') {
                 put(o, "\\", 1); put(o, (const char *)&c, 1);
@@ -142,18 +142,18 @@ static int info_json(out_t *o, em_cbor_r *r, unsigned depth)
             } else put(o, (const char *)&c, 1);
         }
         put(o, "\"", 1);
-    } else if (it.type == EM_CBOR_UINT) putu(o, it.arg);
-    else if (it.type == EM_CBOR_NEGINT) {
+    } else if (it.type == XIP_CBOR_UINT) putu(o, it.arg);
+    else if (it.type == XIP_CBOR_NEGINT) {
         put(o, "-", 1);
         if (it.arg == UINT64_MAX) puts_(o, "18446744073709551616"); else putu(o, it.arg + 1);
-    } else if (it.type == EM_CBOR_BOOL) puts_(o, it.arg ? "true" : "false");
-    else if (it.type == EM_CBOR_NULL) puts_(o, "null");
+    } else if (it.type == XIP_CBOR_BOOL) puts_(o, it.arg ? "true" : "false");
+    else if (it.type == XIP_CBOR_NULL) puts_(o, "null");
     else return -1;
     return 0;
 }
-static void cmd_status(const espmod_host *h, out_t *o)
+static void cmd_status(const xip_host *h, out_t *o)
 {
-    if (!ESPMOD_HOST_HAS(h, device_info)) { puts_(o, "error: this host has no device info\n"); return; }
+    if (!XIP_HOST_HAS(h, device_info)) { puts_(o, "error: this host has no device info\n"); return; }
     size_t cap = RESP_MAX;
     uint8_t *buf = 0;
     int n;
@@ -161,7 +161,7 @@ static void cmd_status(const espmod_host *h, out_t *o)
         buf = h->mem_alloc(h->user, cap);
         if (!buf) { puts_(o, "error: out of memory\n"); return; }
         n = h->device_info(h->user, buf, cap);
-        if (n != ESPMOD_ERR_SIZE) break;
+        if (n != XIP_ERR_SIZE) break;
         h->mem_free(h->user, buf);
         if (cap > SIZE_MAX / 2) { puts_(o, "error: status too large\n"); return; }
         cap *= 2;
@@ -173,11 +173,11 @@ static void cmd_status(const espmod_host *h, out_t *o)
     char *text = h->mem_alloc(h->user, text_cap);
     if (!text) { h->mem_free(h->user, buf); puts_(o, "error: out of memory\n"); return; }
     out_t dump = {text, text_cap, 0};
-    em_cbor_r r; em_cbor_reader(&r, buf, (size_t)n);
+    xip_cbor_r r; xip_cbor_reader(&r, buf, (size_t)n);
     if (info_json(&dump, &r, 0) || r.len) puts_(o, "error: malformed device info\n");
     else {
         put(&dump, "\n", 1);
-        if (h->features & ESPMOD_FEAT_SERIAL) (void)h->serial_write(h->user, (const uint8_t *)text, dump.len);
+        if (h->features & XIP_FEAT_SERIAL) (void)h->serial_write(h->user, (const uint8_t *)text, dump.len);
     }
     h->mem_free(h->user, text); h->mem_free(h->user, buf);
 }
@@ -208,12 +208,12 @@ static int tokenize(char *line, size_t len, tok_t *t)
     return count;
 }
 
-static void local(const espmod_host *h, em_cbor_w *w, const char *text)
+static void local(const xip_host *h, xip_cbor_w *w, const char *text)
 {
     (void)h;
-    em_cbor_map(w, 1);
-    em_cbor_uint(w, 12);
-    em_cbor_text(w, text, em_strlen(text));
+    xip_cbor_map(w, 1);
+    xip_cbor_uint(w, 12);
+    xip_cbor_text(w, text, xip_strlen(text));
 }
 
 static void help_text(out_t *o)
@@ -228,40 +228,40 @@ static void help_text(out_t *o)
 }
 
 /* Encode `value` for a field of kind `kind`; 0 on success. */
-static int encode_value(em_cbor_w *w, unsigned kind, const char *v, size_t n)
+static int encode_value(xip_cbor_w *w, unsigned kind, const char *v, size_t n)
 {
     uint64_t u;
     if (kind == CAT_K_MAP || kind == CAT_K_ARRAY) return -1;
-    if (kind == CAT_K_TEXT) { em_cbor_text(w, v, n); return 0; }
+    if (kind == CAT_K_TEXT) { xip_cbor_text(w, v, n); return 0; }
     if (kind == CAT_K_BOOL || kind == CAT_K_ANY) {
-        if (n == 4 && same(v, "true", 4)) { em_cbor_bool(w, 1); return 0; }
-        if (n == 5 && same(v, "false", 5)) { em_cbor_bool(w, 0); return 0; }
+        if (n == 4 && same(v, "true", 4)) { xip_cbor_bool(w, 1); return 0; }
+        if (n == 5 && same(v, "false", 5)) { xip_cbor_bool(w, 0); return 0; }
         if (kind == CAT_K_BOOL) return -1;
     }
     if (kind == CAT_K_BYTES || (kind == CAT_K_ANY && n > 4 && same(v, "hex:", 4))) {
         if (n >= 4 && same(v, "hex:", 4)) { v += 4; n -= 4; }
         if (n % 2) return -1;
-        em_cbor_head(w, 2, n / 2);
+        xip_cbor_head(w, 2, n / 2);
         for (size_t i = 0; i < n; i += 2) {
             int hi = hexval(v[i]), lo = hexval(v[i + 1]);
             if (hi < 0 || lo < 0) return -1;
             uint8_t b = (uint8_t)(hi << 4 | lo);
-            em_cbor_put(w, &b, 1);
+            xip_cbor_put(w, &b, 1);
         }
         return 0;
     }
-    if (digits(v, n, &u)) { em_cbor_uint(w, u); return 0; }
-    if (n > 1 && v[0] == '-' && digits(v + 1, n - 1, &u) && u <= 0x7fffffffffffffffull) { em_cbor_int(w, -(int64_t)u); return 0; }
-    if (kind == CAT_K_ANY) { em_cbor_text(w, v, n); return 0; }
+    if (digits(v, n, &u)) { xip_cbor_uint(w, u); return 0; }
+    if (n > 1 && v[0] == '-' && digits(v + 1, n - 1, &u) && u <= 0x7fffffffffffffffull) { xip_cbor_int(w, -(int64_t)u); return 0; }
+    if (kind == CAT_K_ANY) { xip_cbor_text(w, v, n); return 0; }
     return -1;   /* a number was expected */
 }
 
-static void do_parse(const espmod_host *h, mem_t *mem, const uint8_t *line_in, size_t line_len, em_cbor_w *w)
+static void do_parse(const xip_host *h, mem_t *mem, const uint8_t *line_in, size_t line_len, xip_cbor_w *w)
 {
     char *line = take(h, mem, line_len + 1);
     tok_t *t = take(h, mem, sizeof(tok_t) * MAX_TOKENS);
     if (!line || !t) { local(h, w, "error: out of memory"); return; }
-    em_copy(line, line_in, line_len);
+    xip_copy(line, line_in, line_len);
     int count = tokenize(line, line_len, t);
     if (count < 0) { local(h, w, "error: too many words"); return; }
     if (count == 0) { local(h, w, ""); return; }
@@ -320,7 +320,7 @@ static void do_parse(const espmod_host *h, mem_t *mem, const uint8_t *line_in, s
     if (positional) {
         unsigned fi = 0;
         for (int i = used; i < count; i++) {
-            if (em_strlen(t[i].s) != t[i].n) continue;     /* key=value: its key was cut at the '=' */
+            if (xip_strlen(t[i].s) != t[i].n) continue;     /* key=value: its key was cut at the '=' */
             while (fi < m->nreq) {                         /* the next declared field not given by name */
                 int taken = 0;
                 for (int k = 0; k < na; k++) taken |= as[k].tag == req[fi].tag;
@@ -337,7 +337,7 @@ static void do_parse(const espmod_host *h, mem_t *mem, const uint8_t *line_in, s
                 size_t jn = 0;
                 for (int j = i; j < count; j++) {
                     if (j > i) joined[jn++] = ' ';
-                    em_copy(joined + jn, t[j].s, t[j].n);
+                    xip_copy(joined + jn, t[j].s, t[j].n);
                     jn += t[j].n;
                 }
                 v = joined; vn = jn; i = count;
@@ -348,53 +348,53 @@ static void do_parse(const espmod_host *h, mem_t *mem, const uint8_t *line_in, s
     }
     uint8_t *out = take(h, mem, OUT_MAX);
     if (!out) { local(h, w, "error: out of memory"); return; }
-    em_cbor_w body;
-    em_cbor_init(&body, out, OUT_MAX);
-    em_cbor_map(&body, (size_t)na);
+    xip_cbor_w body;
+    xip_cbor_init(&body, out, OUT_MAX);
+    xip_cbor_map(&body, (size_t)na);
     for (int k = 0; k < na; k++) {
-        em_cbor_uint(&body, as[k].tag);
+        xip_cbor_uint(&body, as[k].tag);
         if (encode_value(&body, as[k].kind, as[k].v, as[k].n)) { local(h, w, "error: bad value"); return; }
     }
-    int blen = em_cbor_done(&body);
+    int blen = xip_cbor_done(&body);
     if (blen < 0) { local(h, w, "error: request too long"); return; }
-    em_cbor_map(w, 3);
-    em_cbor_uint(w, 1); em_cbor_uint(w, c->id);
-    em_cbor_uint(w, 2); em_cbor_uint(w, m->id);
-    em_cbor_uint(w, 5); em_cbor_put(w, out, (size_t)blen);
+    xip_cbor_map(w, 3);
+    xip_cbor_uint(w, 1); xip_cbor_uint(w, c->id);
+    xip_cbor_uint(w, 2); xip_cbor_uint(w, m->id);
+    xip_cbor_uint(w, 5); xip_cbor_put(w, out, (size_t)blen);
 }
 
 /* ---- render ---- */
-static void render_item(out_t *o, em_cbor_r *r, const cat_field *f, int depth);
+static void render_item(out_t *o, xip_cbor_r *r, const cat_field *f, int depth);
 
-static void render_scalar(out_t *o, const em_cbor_item *it, int quote)
+static void render_scalar(out_t *o, const xip_cbor_item *it, int quote)
 {
-    if (it->type == EM_CBOR_UINT) putu(o, it->arg);
-    else if (it->type == EM_CBOR_NEGINT) { put(o, "-", 1); putu(o, it->arg + 1); }
-    else if (it->type == EM_CBOR_BOOL) puts_(o, it->arg ? "true" : "false");
-    else if (it->type == EM_CBOR_NULL) puts_(o, "null");
-    else if (it->type == EM_CBOR_TEXT) {
+    if (it->type == XIP_CBOR_UINT) putu(o, it->arg);
+    else if (it->type == XIP_CBOR_NEGINT) { put(o, "-", 1); putu(o, it->arg + 1); }
+    else if (it->type == XIP_CBOR_BOOL) puts_(o, it->arg ? "true" : "false");
+    else if (it->type == XIP_CBOR_NULL) puts_(o, "null");
+    else if (it->type == XIP_CBOR_TEXT) {
         int space = 0;
         for (size_t i = 0; i < it->n; i++) if (it->data[i] == ' ' || it->data[i] == '=') space = 1;
         if (quote && (space || !it->n)) put(o, "\"", 1);
         put(o, (const char *)it->data, it->n);
         if (quote && (space || !it->n)) put(o, "\"", 1);
-    } else if (it->type == EM_CBOR_BYTES) {
+    } else if (it->type == XIP_CBOR_BYTES) {
         puts_(o, "hex:");
         for (size_t i = 0; i < it->n; i++) { char b[2] = {"0123456789abcdef"[it->data[i] >> 4], "0123456789abcdef"[it->data[i] & 15]}; put(o, b, 2); }
     }
 }
 
 /* A map as `name=value` words. `rec` is the record the keys belong to (fields of cat_fields) or none. */
-static void render_pairs(out_t *o, em_cbor_r *r, size_t pairs, const cat_field *list, unsigned count, int depth)
+static void render_pairs(out_t *o, xip_cbor_r *r, size_t pairs, const cat_field *list, unsigned count, int depth)
 {
     for (size_t i = 0; i < pairs; i++) {
-        em_cbor_item k;
-        if (em_cbor_next(r, &k)) return;
-        const cat_field *f = k.type == EM_CBOR_UINT ? field_by_tag(list, count, (unsigned)k.arg) : 0;
+        xip_cbor_item k;
+        if (xip_cbor_next(r, &k)) return;
+        const cat_field *f = k.type == XIP_CBOR_UINT ? field_by_tag(list, count, (unsigned)k.arg) : 0;
         if (i) put(o, " ", 1);
         if (f && f->name && same("text", cname(f->name), 4) && f->kind == CAT_K_TEXT) {
-            em_cbor_item v;
-            if (em_cbor_next(r, &v)) return;
+            xip_cbor_item v;
+            if (xip_cbor_next(r, &v)) return;
             render_scalar(o, &v, 0);
             continue;
         }
@@ -404,16 +404,16 @@ static void render_pairs(out_t *o, em_cbor_r *r, size_t pairs, const cat_field *
     }
 }
 
-static void render_item(out_t *o, em_cbor_r *r, const cat_field *f, int depth)
+static void render_item(out_t *o, xip_cbor_r *r, const cat_field *f, int depth)
 {
-    em_cbor_item it;
-    if (em_cbor_next(r, &it)) return;
+    xip_cbor_item it;
+    if (xip_cbor_next(r, &it)) return;
     const cat_record *rec = f && f->record ? &cat_records[f->record - 1] : 0;
-    if (it.type == EM_CBOR_MAP) {
+    if (it.type == XIP_CBOR_MAP) {
         put(o, "{", 1);
         if (depth < 4) render_pairs(o, r, it.n, rec ? &cat_fields[rec->first] : cat_fields, rec ? rec->count : 0, depth);
         put(o, "}", 1);
-    } else if (it.type == EM_CBOR_ARRAY) {
+    } else if (it.type == XIP_CBOR_ARRAY) {
         put(o, "[", 1);
         for (size_t i = 0; i < it.n && depth < 4; i++) { if (i) put(o, " ", 1); render_item(o, r, f && f->kind == CAT_K_ARRAY && f->record ? f : 0, depth + 1); }
         put(o, "]", 1);
@@ -422,42 +422,42 @@ static void render_item(out_t *o, em_cbor_r *r, const cat_field *f, int depth)
     }
 }
 
-static void do_render(const espmod_host *h, mem_t *mem, const uint8_t *data, size_t len, em_cbor_w *w)
+static void do_render(const xip_host *h, mem_t *mem, const uint8_t *data, size_t len, xip_cbor_w *w)
 {
     char *text = take(h, mem, OUT_MAX);
     if (!text) return;
     out_t o = {text, OUT_MAX, 0};
     int64_t comp = 0, meth = 0;
-    em_cbor_get_int(data, len, 1, &comp);
-    em_cbor_get_int(data, len, 2, &meth);
+    xip_cbor_get_int(data, len, 1, &comp);
+    xip_cbor_get_int(data, len, 2, &meth);
     const uint8_t *err; size_t en;
-    em_cbor_r res;
-    if (em_cbor_get_str(data, len, 7, EM_CBOR_TEXT, &err, &en) == 0) {
+    xip_cbor_r res;
+    if (xip_cbor_get_str(data, len, 7, XIP_CBOR_TEXT, &err, &en) == 0) {
         puts_(&o, "error: "); put(&o, (const char *)err, en);
-    } else if (em_cbor_get(data, len, 6, &res) == 0) {
+    } else if (xip_cbor_get(data, len, 6, &res) == 0) {
         const cat_method *m = method_of((unsigned)comp, (unsigned)meth);
         const cat_field *resp = m ? &cat_fields[m->resp] : cat_fields;
         unsigned nresp = m ? m->nresp : 0;
-        em_cbor_item map;
-        em_cbor_r r = res;
-        if (em_cbor_next(&r, &map) || map.type != EM_CBOR_MAP) puts_(&o, "error: bad answer");
+        xip_cbor_item map;
+        xip_cbor_r r = res;
+        if (xip_cbor_next(&r, &map) || map.type != XIP_CBOR_MAP) puts_(&o, "error: bad answer");
         else if (map.n == 0) puts_(&o, "ok");
         else {
             size_t scalars = 0;
             for (size_t i = 0; i < map.n; i++) {
-                em_cbor_item k, v;
-                if (em_cbor_next(&r, &k)) break;
-                const cat_field *f = k.type == EM_CBOR_UINT ? field_by_tag(resp, nresp, (unsigned)k.arg) : 0;
-                em_cbor_r probe = r;
-                if (em_cbor_next(&probe, &v)) break;
-                if (v.type == EM_CBOR_ARRAY && f && f->record) {
+                xip_cbor_item k, v;
+                if (xip_cbor_next(&r, &k)) break;
+                const cat_field *f = k.type == XIP_CBOR_UINT ? field_by_tag(resp, nresp, (unsigned)k.arg) : 0;
+                xip_cbor_r probe = r;
+                if (xip_cbor_next(&probe, &v)) break;
+                if (v.type == XIP_CBOR_ARRAY && f && f->record) {
                     /* a list of records: one line each, after the scalar words */
                     if (scalars) { put(&o, "\n", 1); scalars = 0; }
                     r = probe;
                     const cat_record *rec = &cat_records[f->record - 1];
                     for (size_t e = 0; e < v.n; e++) {
-                        em_cbor_item rm;
-                        if (em_cbor_next(&r, &rm) || rm.type != EM_CBOR_MAP) break;
+                        xip_cbor_item rm;
+                        if (xip_cbor_next(&r, &rm) || rm.type != XIP_CBOR_MAP) break;
                         render_pairs(&o, &r, rm.n, &cat_fields[rec->first], rec->count, 1);
                         put(&o, "\n", 1);
                     }
@@ -465,7 +465,7 @@ static void do_render(const espmod_host *h, mem_t *mem, const uint8_t *data, siz
                 }
                 if (scalars++) put(&o, " ", 1);
                 if (f && f->name && f->kind == CAT_K_TEXT && same("text", cname(f->name), 4)) {
-                    em_cbor_next(&r, &v);
+                    xip_cbor_next(&r, &v);
                     render_scalar(&o, &v, 0);
                     continue;
                 }
@@ -481,9 +481,9 @@ static void do_render(const espmod_host *h, mem_t *mem, const uint8_t *data, siz
     }
     if (!o.len) puts_(&o, "ok");
     if (o.p[o.len - 1] != '\n') put(&o, "\n", 1);
-    em_cbor_map(w, 1);
-    em_cbor_uint(w, 1);
-    em_cbor_text(w, o.p, o.len);
+    xip_cbor_map(w, 1);
+    xip_cbor_uint(w, 1);
+    xip_cbor_text(w, o.p, o.len);
 }
 
 /* ---- the command line ---- */
@@ -492,10 +492,10 @@ static void do_render(const espmod_host *h, mem_t *mem, const uint8_t *data, siz
 /* The bytes of the item stored under `key` of a CBOR map. */
 static int raw_value(const uint8_t *map, size_t len, uint64_t key, const uint8_t **p, size_t *n)
 {
-    em_cbor_r v;
-    if (em_cbor_get(map, len, key, &v)) return -1;
-    em_cbor_r after = v;
-    if (em_cbor_skip(&after)) return -1;
+    xip_cbor_r v;
+    if (xip_cbor_get(map, len, key, &v)) return -1;
+    xip_cbor_r after = v;
+    if (xip_cbor_skip(&after)) return -1;
     *p = v.p;
     *n = v.len - after.len;
     return 0;
@@ -503,7 +503,7 @@ static int raw_value(const uint8_t *map, size_t len, uint64_t key, const uint8_t
 
 static const cat_record *record_named(const char *name)
 {
-    for (int i = 0; i < CAT_RECORDS; i++) if (same(name, cname(cat_records[i].name), em_strlen(name))) return &cat_records[i];
+    for (int i = 0; i < CAT_RECORDS; i++) if (same(name, cname(cat_records[i].name), xip_strlen(name))) return &cat_records[i];
     return 0;
 }
 
@@ -511,19 +511,19 @@ static const cat_record *record_named(const char *name)
 static void render_list(out_t *o, const uint8_t *data, size_t len, const char *record)
 {
     const cat_record *rec = record_named(record);
-    em_cbor_r r;
-    em_cbor_item it;
-    em_cbor_reader(&r, data, len);
-    if (!rec || em_cbor_next(&r, &it) || it.type != EM_CBOR_ARRAY) { puts_(o, "error: bad answer\n"); return; }
+    xip_cbor_r r;
+    xip_cbor_item it;
+    xip_cbor_reader(&r, data, len);
+    if (!rec || xip_cbor_next(&r, &it) || it.type != XIP_CBOR_ARRAY) { puts_(o, "error: bad answer\n"); return; }
     for (size_t i = 0; i < it.n; i++) {
-        em_cbor_item m;
-        if (em_cbor_next(&r, &m) || m.type != EM_CBOR_MAP) break;
+        xip_cbor_item m;
+        if (xip_cbor_next(&r, &m) || m.type != XIP_CBOR_MAP) break;
         render_pairs(o, &r, m.n, &cat_fields[rec->first], rec->count, 1);
         put(o, "\n", 1);
     }
 }
 
-static int word_is(const tok_t *t, const char *w) { return t->n == em_strlen(w) && same(t->s, w, t->n); }
+static int word_is(const tok_t *t, const char *w) { return t->n == xip_strlen(w) && same(t->s, w, t->n); }
 
 static void error_rc(out_t *o, const char *what, int rc)
 {
@@ -531,7 +531,7 @@ static void error_rc(out_t *o, const char *what, int rc)
 }
 
 /* `heap`: free memory, from heap_info (bytes) */
-static void cmd_heap(const espmod_host *h, const tok_t *t, int count, out_t *o)
+static void cmd_heap(const xip_host *h, const tok_t *t, int count, out_t *o)
 {
     if (count > 1) {            /* `heap regions|blocks|tasks|trace start|trace dump|trace stop`: printed to the device log */
         int kind = word_is(&t[1], "regions") ? 0 : word_is(&t[1], "blocks") ? 1 : word_is(&t[1], "tasks") ? 2 :
@@ -546,7 +546,7 @@ static void cmd_heap(const espmod_host *h, const tok_t *t, int count, out_t *o)
     if (n < 0) { error_rc(o, "heap", n); return; }
     for (int k = 0; k < 6; k++) {                 /* (no table of pointers: a module image has no relocations) */
         int64_t v = 0;
-        em_cbor_get_int(info, (size_t)n, (uint64_t)k + 1, &v);
+        xip_cbor_get_int(info, (size_t)n, (uint64_t)k + 1, &v);
         puts_(o, k == 0 ? "free=" : k == 1 ? " largest=" : k == 2 ? " min_free=" : k == 3 ? " total=" : k == 4 ? " internal_free=" : " internal_largest=");
         putn(o, v);
     }
@@ -554,7 +554,7 @@ static void cmd_heap(const espmod_host *h, const tok_t *t, int count, out_t *o)
 }
 
 /* `nv KEY` shows a device setting, `nv KEY=VALUE` sets it, `nv KEY=` restores the default (nv: the application answers for its names) */
-static void cmd_nv(const espmod_host *h, const tok_t *t, int count, out_t *o)
+static void cmd_nv(const xip_host *h, const tok_t *t, int count, out_t *o)
 {
     if (count != 2) { puts_(o, "error: nv KEY | nv KEY=VALUE | nv KEY=\n"); return; }
     size_t eq = 0;
@@ -562,7 +562,7 @@ static void cmd_nv(const espmod_host *h, const tok_t *t, int count, out_t *o)
     const int write = eq < t[1].n;
     uint8_t val[48];
     int rc = h->nv(h->user, (const uint8_t *)t[1].s, eq, write ? (const uint8_t *)t[1].s + eq + 1 : 0, write ? t[1].n - eq - 1 : 0, val, sizeof(val));
-    if (rc == ESPMOD_ERR_NOTFOUND && !write) { put(o, t[1].s, eq); puts_(o, " is unknown or not set\n"); return; }
+    if (rc == XIP_ERR_NOTFOUND && !write) { put(o, t[1].s, eq); puts_(o, " is unknown or not set\n"); return; }
     if (rc < 0) { error_rc(o, "nv", rc); return; }
     put(o, t[1].s, eq);
     if (write) { puts_(o, write && t[1].n == eq + 1 ? " restored to the default (applies at the next start)\n" : " set (applies at the next start)\n"); return; }
@@ -570,31 +570,31 @@ static void cmd_nv(const espmod_host *h, const tok_t *t, int count, out_t *o)
 }
 
 /* `wifi scan`: one line per network in range, strongest first (wifi_scan: the first call starts it, a later one has the list) */
-static void wifi_scan_list(const espmod_host *h, out_t *o)
+static void wifi_scan_list(const xip_host *h, out_t *o)
 {
     uint8_t buf[1024];
     int n = h->wifi_scan(h->user, buf, sizeof(buf));
-    if (n == ESPMOD_ERR_BUSY) { puts_(o, "scanning; run `wifi scan` again in a few seconds\n"); return; }
+    if (n == XIP_ERR_BUSY) { puts_(o, "scanning; run `wifi scan` again in a few seconds\n"); return; }
     if (n < 0) { error_rc(o, "wifi scan", n); return; }
-    em_cbor_r r;
-    em_cbor_item arr;
-    em_cbor_reader(&r, buf, (size_t)n);
-    if (em_cbor_next(&r, &arr) || arr.type != EM_CBOR_ARRAY) { puts_(o, "error: bad scan answer\n"); return; }
+    xip_cbor_r r;
+    xip_cbor_item arr;
+    xip_cbor_reader(&r, buf, (size_t)n);
+    if (xip_cbor_next(&r, &arr) || arr.type != XIP_CBOR_ARRAY) { puts_(o, "error: bad scan answer\n"); return; }
     for (size_t i = 0; i < arr.n; i++) {
         const uint8_t *entry = r.p;
-        em_cbor_r skip = r;
-        if (em_cbor_skip(&skip)) break;
+        xip_cbor_r skip = r;
+        if (xip_cbor_skip(&skip)) break;
         const size_t elen = (size_t)(skip.p - entry);
         const uint8_t *name, *bssid;
         size_t nn, bn;
         int64_t rssi = 0, ch = 0, auth = 0;
-        em_cbor_get_str(entry, elen, 1, EM_CBOR_BYTES, &name, &nn);
-        em_cbor_get_int(entry, elen, 3, &rssi);
-        em_cbor_get_int(entry, elen, 4, &ch);
-        em_cbor_get_int(entry, elen, 5, &auth);
+        xip_cbor_get_str(entry, elen, 1, XIP_CBOR_BYTES, &name, &nn);
+        xip_cbor_get_int(entry, elen, 3, &rssi);
+        xip_cbor_get_int(entry, elen, 4, &ch);
+        xip_cbor_get_int(entry, elen, 5, &auth);
         puts_(o, "ssid=\""); put(o, (const char *)name, nn); puts_(o, "\" ch="); putn(o, ch);
         puts_(o, " rssi="); putn(o, rssi); puts_(o, " auth="); putn(o, auth);
-        if (em_cbor_get_str(entry, elen, 2, EM_CBOR_BYTES, &bssid, &bn) == 0 && bn == 6) {
+        if (xip_cbor_get_str(entry, elen, 2, XIP_CBOR_BYTES, &bssid, &bn) == 0 && bn == 6) {
             char hex[17 + 7] = " bssid=";
             for (int k = 0; k < 6; k++) {
                 hex[7 + k * 3] = "0123456789abcdef"[bssid[k] >> 4];
@@ -611,16 +611,16 @@ static void wifi_scan_list(const espmod_host *h, out_t *o)
 /* `wifi ssid=NAME psk=SECRET` stores the device's network (wifi_config: esp-wifi-loader's settings, never an image; both in
  * one line, `psk=` alone keeps the name, an empty `ssid=` clears it); `wifi start` joins it if a scan sees it, else the flash
  * network; `wifi` shows the state; `wifi stop` leaves. The network is optional: installs work without it. */
-static void cmd_wifi(const espmod_host *h, const tok_t *t, int count, out_t *o)
+static void cmd_wifi(const xip_host *h, const tok_t *t, int count, out_t *o)
 {
-    if (!(h->features & ESPMOD_FEAT_WIFI)) { puts_(o, "error: this host has no Wi-Fi\n"); return; }
+    if (!(h->features & XIP_FEAT_WIFI)) { puts_(o, "error: this host has no Wi-Fi\n"); return; }
     uint8_t info[128];
     int n = h->wifi_info(h->user, info, sizeof(info));
     const uint8_t *text; size_t tn;
     char ssid[40], psk[72];
     size_t sn = 0, pn = 0;
     int set_ssid = 0, set_psk = 0;
-    if (n > 0 && em_cbor_get_str(info, (size_t)n, 5, EM_CBOR_TEXT, &text, &tn) == 0 && tn < sizeof(ssid)) { em_copy(ssid, text, tn); sn = tn; }
+    if (n > 0 && xip_cbor_get_str(info, (size_t)n, 5, XIP_CBOR_TEXT, &text, &tn) == 0 && tn < sizeof(ssid)) { xip_copy(ssid, text, tn); sn = tn; }
     for (int i = 1; i < count; i++) {
         int rc = 0;
         if (word_is(&t[i], "scan")) {
@@ -634,8 +634,8 @@ static void cmd_wifi(const espmod_host *h, const tok_t *t, int count, out_t *o)
             size_t eq = 0;
             while (eq < t[i].n && t[i].s[eq] != '=') eq++;
             const size_t vn = eq < t[i].n ? t[i].n - eq - 1 : 0;
-            if (eq == 4 && same(t[i].s, "ssid", 4) && vn < sizeof(ssid)) { em_copy(ssid, t[i].s + eq + 1, vn); sn = vn; set_ssid = 1; }
-            else if (eq == 3 && same(t[i].s, "psk", 3) && vn < sizeof(psk)) { em_copy(psk, t[i].s + eq + 1, vn); pn = vn; set_psk = 1; }
+            if (eq == 4 && same(t[i].s, "ssid", 4) && vn < sizeof(ssid)) { xip_copy(ssid, t[i].s + eq + 1, vn); sn = vn; set_ssid = 1; }
+            else if (eq == 3 && same(t[i].s, "psk", 3) && vn < sizeof(psk)) { xip_copy(psk, t[i].s + eq + 1, vn); pn = vn; set_psk = 1; }
             else { puts_(o, "error: wifi [ssid=NAME] [psk=SECRET] [start|stop] (empty value clears)\n"); return; }
         }
         if (rc) { error_rc(o, "wifi", rc); return; }
@@ -646,15 +646,15 @@ static void cmd_wifi(const espmod_host *h, const tok_t *t, int count, out_t *o)
     }
     n = h->wifi_info(h->user, info, sizeof(info));
     int64_t state = 0, rssi = 0;
-    if (n > 0) em_cbor_get_int(info, (size_t)n, 1, &state);
+    if (n > 0) xip_cbor_get_int(info, (size_t)n, 1, &state);
     puts_(o, "state="); puts_(o, state == 2 ? "up" : state == 1 ? "joining" : "off");
-    if (state == 2 && em_cbor_get_str(info, (size_t)n, 2, EM_CBOR_TEXT, &text, &tn) == 0) { puts_(o, " ssid=\""); put(o, (const char *)text, tn); puts_(o, "\""); }
-    if (state == 2 && em_cbor_get_str(info, (size_t)n, 3, EM_CBOR_TEXT, &text, &tn) == 0) { puts_(o, " ip="); put(o, (const char *)text, tn); }
-    if (state == 2 && em_cbor_get_int(info, (size_t)n, 4, &rssi) == 0) { puts_(o, " rssi="); putn(o, rssi); }
+    if (state == 2 && xip_cbor_get_str(info, (size_t)n, 2, XIP_CBOR_TEXT, &text, &tn) == 0) { puts_(o, " ssid=\""); put(o, (const char *)text, tn); puts_(o, "\""); }
+    if (state == 2 && xip_cbor_get_str(info, (size_t)n, 3, XIP_CBOR_TEXT, &text, &tn) == 0) { puts_(o, " ip="); put(o, (const char *)text, tn); }
+    if (state == 2 && xip_cbor_get_int(info, (size_t)n, 4, &rssi) == 0) { puts_(o, " rssi="); putn(o, rssi); }
     puts_(o, " saved_ssid=\"");
-    if (n > 0 && em_cbor_get_str(info, (size_t)n, 5, EM_CBOR_TEXT, &text, &tn) == 0) put(o, (const char *)text, tn); else puts_(o, "(flash network)");
-    em_cbor_r pv; em_cbor_item pit;
-    const int psk_set = n > 0 && em_cbor_get(info, (size_t)n, 6, &pv) == 0 && em_cbor_next(&pv, &pit) == 0 && pit.type == EM_CBOR_BOOL && pit.arg;
+    if (n > 0 && xip_cbor_get_str(info, (size_t)n, 5, XIP_CBOR_TEXT, &text, &tn) == 0) put(o, (const char *)text, tn); else puts_(o, "(flash network)");
+    xip_cbor_r pv; xip_cbor_item pit;
+    const int psk_set = n > 0 && xip_cbor_get(info, (size_t)n, 6, &pv) == 0 && xip_cbor_next(&pv, &pit) == 0 && pit.type == XIP_CBOR_BOOL && pit.arg;
     puts_(o, psk_set ? "\" psk=set\n" : "\" psk=unset\n");
 }
 
@@ -666,48 +666,48 @@ typedef struct {
     uint32_t next_id;
 } cstate_t;
 
-static void render_answer(const espmod_host *h, mem_t *mem, int64_t comp, int64_t meth, const uint8_t *res, size_t rn, const char *err, out_t *o)
+static void render_answer(const xip_host *h, mem_t *mem, int64_t comp, int64_t meth, const uint8_t *res, size_t rn, const char *err, out_t *o)
 {
     uint8_t *tmp = take(h, mem, RESP_MAX);
     uint8_t *out = take(h, mem, RESP_MAX);
     if (!tmp || !out) { puts_(o, "error: out of memory\n"); return; }
     /* the answer for render: {1: component, 2: method, 6: result} or {7: error} */
-    em_cbor_w w;
-    em_cbor_init(&w, tmp, RESP_MAX);
-    em_cbor_map(&w, 3);
-    em_cbor_uint(&w, 1); em_cbor_uint(&w, (uint64_t)comp);
-    em_cbor_uint(&w, 2); em_cbor_uint(&w, (uint64_t)meth);
-    if (err) { em_cbor_uint(&w, 7); em_cbor_text(&w, err, em_strlen(err)); }
-    else { em_cbor_uint(&w, 6); if (rn) em_cbor_put(&w, res, rn); else em_cbor_map(&w, 0); }
-    int tl = em_cbor_done(&w);
+    xip_cbor_w w;
+    xip_cbor_init(&w, tmp, RESP_MAX);
+    xip_cbor_map(&w, 3);
+    xip_cbor_uint(&w, 1); xip_cbor_uint(&w, (uint64_t)comp);
+    xip_cbor_uint(&w, 2); xip_cbor_uint(&w, (uint64_t)meth);
+    if (err) { xip_cbor_uint(&w, 7); xip_cbor_text(&w, err, xip_strlen(err)); }
+    else { xip_cbor_uint(&w, 6); if (rn) xip_cbor_put(&w, res, rn); else xip_cbor_map(&w, 0); }
+    int tl = xip_cbor_done(&w);
     if (tl <= 0) { puts_(o, "error: answer too large\n"); return; }
-    em_cbor_w r;
-    em_cbor_init(&r, out, RESP_MAX);
+    xip_cbor_w r;
+    xip_cbor_init(&r, out, RESP_MAX);
     do_render(h, mem, tmp, (size_t)tl, &r);
-    int rl = em_cbor_done(&r);
+    int rl = xip_cbor_done(&r);
     const uint8_t *text; size_t tn;
-    if (rl > 0 && em_cbor_get_str(out, (size_t)rl, 1, EM_CBOR_TEXT, &text, &tn) == 0) put(o, (const char *)text, tn);
+    if (rl > 0 && xip_cbor_get_str(out, (size_t)rl, 1, XIP_CBOR_TEXT, &text, &tn) == 0) put(o, (const char *)text, tn);
 }
 
 /* The manifest of the installed module (abi/API.md, module_manifest) is the module's own word on which methods it has; when
  * it has one, a method it does not list is refused here instead of being sent. No manifest, no such slot or a manifest too
  * large for the buffer: the catalog's word stands. */
-static int manifest_allows(const espmod_host *h, mem_t *mem, int64_t component, int64_t method, out_t *o)
+static int manifest_allows(const xip_host *h, mem_t *mem, int64_t component, int64_t method, out_t *o)
 {
     const char *name = 0;
     for (int i = 0; i < CAT_COMPS; i++) if (cat_comps[i].id == component) name = cname(cat_comps[i].name);
-    if (!name || !(h->features & ESPMOD_FEAT_MODULES) || !ESPMOD_HOST_HAS(h, module_manifest)) return 1;
+    if (!name || !(h->features & XIP_FEAT_MODULES) || !XIP_HOST_HAS(h, module_manifest)) return 1;
     uint8_t *m = take(h, mem, 1024);
     if (!m) return 1;
-    int n = h->module_manifest(h->user, (const uint8_t *)name, em_strlen(name), m, 1024);
-    em_cbor_r r;
-    em_cbor_item it;
-    if (n <= 0 || em_cbor_get(m, (size_t)n, 3, &r) || em_cbor_next(&r, &it) || it.type != EM_CBOR_ARRAY) return 1;
+    int n = h->module_manifest(h->user, (const uint8_t *)name, xip_strlen(name), m, 1024);
+    xip_cbor_r r;
+    xip_cbor_item it;
+    if (n <= 0 || xip_cbor_get(m, (size_t)n, 3, &r) || xip_cbor_next(&r, &it) || it.type != XIP_CBOR_ARRAY) return 1;
     for (size_t i = 0; i < it.n; i++) {
-        em_cbor_r start = r;                                       /* {1: id, 2: name, 3: request fields, 4: response fields} */
+        xip_cbor_r start = r;                                       /* {1: id, 2: name, 3: request fields, 4: response fields} */
         int64_t id = -1;
-        if (em_cbor_skip(&r)) return 1;
-        if (em_cbor_get_int(start.p, start.len - r.len, 1, &id) == 0 && id == method) return 1;
+        if (xip_cbor_skip(&r)) return 1;
+        if (xip_cbor_get_int(start.p, start.len - r.len, 1, &id) == 0 && id == method) return 1;
     }
     puts_(o, "error: "); puts_(o, name); puts_(o, " does not list method "); putn(o, method); puts_(o, " in its manifest\n");
     return 0;
@@ -715,23 +715,23 @@ static int manifest_allows(const espmod_host *h, mem_t *mem, int64_t component, 
 
 /* `NAME.METHOD key=value`: the request payload by the catalog, sent as a packet to the module. 1 when it was sent (the answer
  * comes later); 0 when `o` already has the text (a syntax error, or nobody to send to). */
-static int cmd_call(const espmod_host *h, mem_t *mem, cstate_t *st, const uint8_t *line, size_t n, out_t *o)
+static int cmd_call(const xip_host *h, mem_t *mem, cstate_t *st, const uint8_t *line, size_t n, out_t *o)
 {
     uint8_t *req = take(h, mem, RESP_MAX);
     if (!req) { puts_(o, "error: out of memory\n"); return 0; }
-    em_cbor_w w;
-    em_cbor_init(&w, req, RESP_MAX);
+    xip_cbor_w w;
+    xip_cbor_init(&w, req, RESP_MAX);
     do_parse(h, mem, line, n, &w);
-    int len = em_cbor_done(&w);
+    int len = xip_cbor_done(&w);
     const uint8_t *text; size_t tn;
     if (len <= 0) { puts_(o, "error: bad request\n"); return 0; }
-    if (em_cbor_get_str(req, (size_t)len, 12, EM_CBOR_TEXT, &text, &tn) == 0) {     /* answered by the parser */
+    if (xip_cbor_get_str(req, (size_t)len, 12, XIP_CBOR_TEXT, &text, &tn) == 0) {     /* answered by the parser */
         put(o, (const char *)text, tn);
         return 0;
     }
     int64_t comp = 0, meth = 0;
     const uint8_t *fields; size_t fn;
-    if (em_cbor_get_int(req, (size_t)len, 1, &comp) || em_cbor_get_int(req, (size_t)len, 2, &meth) ||
+    if (xip_cbor_get_int(req, (size_t)len, 1, &comp) || xip_cbor_get_int(req, (size_t)len, 2, &meth) ||
         raw_value(req, (size_t)len, 5, &fields, &fn)) { puts_(o, "error: bad request\n"); return 0; }
 
     if (!manifest_allows(h, mem, comp, meth, o)) return 0;
@@ -744,22 +744,22 @@ static int cmd_call(const espmod_host *h, mem_t *mem, cstate_t *st, const uint8_
         puts_(o, "error: request too long\n");
         return 0;
     }
-    em_copy(window, fields, fn);
+    xip_copy(window, fields, fn);
     if (++st->next_id == 0) st->next_id = 1;
     int rc = h->send(h->user, pkt, fn, (uint32_t)comp, (int)comp, (int)meth, st->next_id);
-    if (rc == ESPMOD_ERR_NOTFOUND) { puts_(o, "error: module not running (start it)\n"); return 0; }
-    if (rc == ESPMOD_ERR_BUSY) { puts_(o, "error: busy (the module has no room for it yet)\n"); return 0; }
+    if (rc == XIP_ERR_NOTFOUND) { puts_(o, "error: module not running (start it)\n"); return 0; }
+    if (rc == XIP_ERR_BUSY) { puts_(o, "error: busy (the module has no room for it yet)\n"); return 0; }
     if (rc) { error_rc(o, "send", rc); return 0; }
     return 1;
 }
 
 /* One line in; the text goes to the out_t. Returns 1 when the answer is still to come. */
-static int do_line(const espmod_host *h, mem_t *mem, cstate_t *st, const uint8_t *line_in, size_t n, out_t *o)
+static int do_line(const xip_host *h, mem_t *mem, cstate_t *st, const uint8_t *line_in, size_t n, out_t *o)
 {
     char *line = take(h, mem, n + 1);
     tok_t *t = take(h, mem, sizeof(tok_t) * MAX_TOKENS);
     if (!line || !t) { puts_(o, "error: out of memory\n"); return 0; }
-    em_copy(line, line_in, n);
+    xip_copy(line, line_in, n);
     int count = tokenize(line, n, t);
     if (count < 0) { puts_(o, "error: too many words\n"); return 0; }
     if (count == 0) return 0;
@@ -769,7 +769,7 @@ static int do_line(const espmod_host *h, mem_t *mem, cstate_t *st, const uint8_t
     if (word_is(&t[0], "help")) {
         help_text(o);
     } else if (word_is(&t[0], "nv")) {
-        if (ESPMOD_HOST_HAS(h, nv)) cmd_nv(h, t, count, o); else puts_(o, "error: this host has no device settings\n");
+        if (XIP_HOST_HAS(h, nv)) cmd_nv(h, t, count, o); else puts_(o, "error: this host has no device settings\n");
     } else if (word_is(&t[0], "heap")) {
         cmd_heap(h, t, count, o);
     } else if (word_is(&t[0], "wifi")) {
@@ -779,7 +779,7 @@ static int do_line(const espmod_host *h, mem_t *mem, cstate_t *st, const uint8_t
         return o->len == 0;
     } else if (word_is(&t[0], "events") || word_is(&t[0], "reset") ||
                word_is(&t[0], "start") || word_is(&t[0], "stop")) {
-        if (!(h->features & ESPMOD_FEAT_MODULES)) { puts_(o, "error: this host has no module control\n"); return 0; }
+        if (!(h->features & XIP_FEAT_MODULES)) { puts_(o, "error: this host has no module control\n"); return 0; }
         if (word_is(&t[0], "events")) {
             len = h->events_info(h->user, buf, RESP_MAX);
             if (len > 0) render_list(o, buf, (size_t)len, "event");
@@ -798,12 +798,12 @@ static int do_line(const espmod_host *h, mem_t *mem, cstate_t *st, const uint8_t
                 size_t rn = 0;
                 for (int j = 2; j < count; j++) {
                     if (j > 2) rest[rn++] = ' ';
-                    em_copy(rest + rn, t[j].s, t[j].n);
+                    xip_copy(rest + rn, t[j].s, t[j].n);
                     rn += t[j].n;
                 }
                 rc = h->module_start(h->user, (const uint8_t *)t[1].s, t[1].n, (const uint8_t *)rest, rn);
             }
-            if (rc == ESPMOD_ERR_NOTFOUND) puts_(o, "error: unknown module\n");
+            if (rc == XIP_ERR_NOTFOUND) puts_(o, "error: unknown module\n");
             else if (rc) error_rc(o, word_is(&t[0], "stop") ? "stop" : "start", rc);
             else puts_(o, "ok\n");
         }
@@ -815,21 +815,21 @@ static int do_line(const espmod_host *h, mem_t *mem, cstate_t *st, const uint8_t
     return 0;
 }
 
-static void say(const espmod_host *h, const out_t *o)
+static void say(const xip_host *h, const out_t *o)
 {
-    if (o->len && (h->features & ESPMOD_FEAT_SERIAL)) (void)h->serial_write(h->user, (const uint8_t *)o->p, o->len);
+    if (o->len && (h->features & XIP_FEAT_SERIAL)) (void)h->serial_write(h->user, (const uint8_t *)o->p, o->len);
 }
 
-static int handle(const espmod_host *h, mem_t *mem, void *state, const espmod_call *c)
+static int handle(const xip_host *h, mem_t *mem, void *state, const xip_call *c)
 {
     cstate_t *st = state;
-    if (c->component == ESPMOD_HOST_COMPONENT) {
-        if (c->method == ESPMOD_HOST_START && (h->features & ESPMOD_FEAT_SERIAL)) (void)h->serial_open(h->user, C_CONSOLE, M_LINE);
-        else if (c->method == ESPMOD_HOST_STOP && (h->features & ESPMOD_FEAT_SERIAL)) (void)h->serial_close(h->user);
-        return ESPMOD_RET_CONTINUE;
+    if (c->component == XIP_HOST_COMPONENT) {
+        if (c->method == XIP_HOST_START && (h->features & XIP_FEAT_SERIAL)) (void)h->serial_open(h->user, C_CONSOLE, M_LINE);
+        else if (c->method == XIP_HOST_STOP && (h->features & XIP_FEAT_SERIAL)) (void)h->serial_close(h->user);
+        return XIP_RET_CONTINUE;
     }
     /* a message from a module: print it as the answer to (component, method) it carries; it may be one of many */
-    if (c->pkt && c->from != ESPMOD_ADDR_MAIN && !(c->component == C_CONSOLE && c->method == M_LINE)) {
+    if (c->pkt && c->from != XIP_ADDR_MAIN && !(c->component == C_CONSOLE && c->method == M_LINE)) {
         char *text = take(h, mem, OUT_MAX);
         if (text) {
             out_t o = {text, OUT_MAX, 0};
@@ -838,40 +838,40 @@ static int handle(const espmod_host *h, mem_t *mem, void *state, const espmod_ca
             if (o.p[o.len - 1] != '\n') put(&o, "\n", 1);
             say(h, &o);
         }
-        return ESPMOD_RET_CONTINUE;
+        return XIP_RET_CONTINUE;
     }
-    if (c->component != C_CONSOLE) return ESPMOD_RET_CONTINUE;
+    if (c->component != C_CONSOLE) return XIP_RET_CONTINUE;
     if (c->method == M_LINE && c->pkt) {
         char *text = take(h, mem, OUT_MAX);
         if (!text) {                    /* memory is refused: say so, the reply cannot be built */
-            if (h->features & ESPMOD_FEAT_SERIAL) (void)h->serial_write(h->user, (const uint8_t *)"error: out of memory\n", 21);
-            return ESPMOD_RET_CONTINUE;
+            if (h->features & XIP_FEAT_SERIAL) (void)h->serial_write(h->user, (const uint8_t *)"error: out of memory\n", 21);
+            return XIP_RET_CONTINUE;
         }
         out_t o = {text, OUT_MAX, 0};
-        if (do_line(h, mem, st, c->data, c->len, &o)) return ESPMOD_RET_CONTINUE;      /* what the module says comes as packets */
+        if (do_line(h, mem, st, c->data, c->len, &o)) return XIP_RET_CONTINUE;      /* what the module says comes as packets */
         say(h, &o);
-        return ESPMOD_RET_CONTINUE;
+        return XIP_RET_CONTINUE;
     }
-    if (!(c->flags & 1)) return ESPMOD_RET_CONTINUE;
+    if (!(c->flags & 1)) return XIP_RET_CONTINUE;
     uint8_t *buf = take(h, mem, RESP_MAX);
-    if (!buf) return ESPMOD_RET_CONTINUE;
-    em_cbor_w w;
-    em_cbor_init(&w, buf, RESP_MAX);
+    if (!buf) return XIP_RET_CONTINUE;
+    xip_cbor_w w;
+    xip_cbor_init(&w, buf, RESP_MAX);
     if (c->method == M_PARSE) {
         const uint8_t *line; size_t n;
-        if (em_cbor_get_str(c->data, c->len, 1, EM_CBOR_TEXT, &line, &n) == 0) do_parse(h, mem, line, n, &w);
+        if (xip_cbor_get_str(c->data, c->len, 1, XIP_CBOR_TEXT, &line, &n) == 0) do_parse(h, mem, line, n, &w);
         else local(h, &w, "error: no line");
     } else if (c->method == M_RENDER) {
         do_render(h, mem, c->data, c->len, &w);
     } else {
-        return ESPMOD_RET_CONTINUE;
+        return XIP_RET_CONTINUE;
     }
-    int n = em_cbor_done(&w);
+    int n = xip_cbor_done(&w);
     if (n > 0) h->respond(h->user, buf, (size_t)n);
-    return ESPMOD_RET_CONTINUE;
+    return XIP_RET_CONTINUE;
 }
 
-ESPMOD_HANDLER(console)(const espmod_host *h, void *state, const espmod_call *c)
+XIP_HANDLER(console)(const xip_host *h, void *state, const xip_call *c)
 {
     mem_t m = {{0}, 0};
     const int rc = handle(h, &m, state, c);

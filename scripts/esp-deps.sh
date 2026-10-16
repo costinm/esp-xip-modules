@@ -5,8 +5,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO_ROOT/env.sh"
-ESP_ROOT="$EM_ESP_ROOT"
-PROFILE="${EM_NIX_PROFILE:-$REPO_ROOT/target/nix/profile}"
+ESP_ROOT="$XIP_ESP_ROOT"
+PROFILE="${XIP_NIX_PROFILE:-$REPO_ROOT/target/nix/profile}"
 IDF_VERSION="v6.0.2"
 JOBS="${ESP_IDF_GIT_JOBS:-8}"
 export NIX_CONFIG="${NIX_CONFIG:-experimental-features = nix-command flakes}"

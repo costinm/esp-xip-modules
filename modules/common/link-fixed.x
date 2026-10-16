@@ -2,7 +2,7 @@
  * and at MODULE_DATA_VMA - (text size) for read-only data. Literals and strings are ordinary data loads,
  * which use the data-bus alias of the same pages; the load address stays contiguous so objcopy
  * produces one flash image. tools/mkmod.py links twice to learn the size of .text. */
-ENTRY(espmod_handle)
+ENTRY(xip_handle)
 
 SECTIONS {
   . = MODULE_VMA;

@@ -181,7 +181,7 @@ impl Sim {
 }
 
 fn map(fields: &[(u64, i64)], data: Option<&[u8]>) -> Vec<u8> {
-    use espmod_abi::cbor::Writer;
+    use xip_abi::cbor::Writer;
     let mut buf = [0u8; 400];
     let mut w = Writer::new(&mut buf);
     w.map(fields.len() + data.is_some() as usize);
@@ -522,6 +522,6 @@ fn an_fsk_transmission_waits_in_fstx_then_sends() {
 #[test]
 fn the_cargo_toml_asks_for_the_state_block_the_code_needs() {
     let toml = include_str!("../Cargo.toml");
-    let want = std::format!("--state {}", crate::espmod::STATE_BYTES);
+    let want = std::format!("--state {}", crate::xip::STATE_BYTES);
     assert!(toml.contains(&want), "Cargo.toml must say `{want}`");
 }

@@ -47,7 +47,7 @@ jobs:
             target/out/${{ matrix.cpu }}/main.bin
             target/out/${{ matrix.cpu }}/modules/*.dmod
   # Signs main and the modules with the repository key and replaces the rolling release `latest`.
-  # Needs keys/modules.pub (committed) and the repository secret EM_SIGNING_KEY (docs/releasing.md).
+  # Needs keys/modules.pub (committed) and the repository secret XIP_SIGNING_KEY (docs/releasing.md).
   # The logic is in scripts/publish-release.sh and scripts/publish-latest.sh: run them locally to test.
   publish:
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
@@ -65,13 +65,13 @@ jobs:
       - name: Is this repository set up for releases?
         id: ready
         run: |
-          if [ -f keys/modules.pub ] && [ -n "$KEY" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "no keys/modules.pub or EM_SIGNING_KEY: skipping the release"; fi
+          if [ -f keys/modules.pub ] && [ -n "$KEY" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "no keys/modules.pub or XIP_SIGNING_KEY: skipping the release"; fi
         env:
-          KEY: ${{ secrets.EM_SIGNING_KEY }}
+          KEY: ${{ secrets.XIP_SIGNING_KEY }}
       - name: Sign and collect
         if: steps.ready.outputs.ok == 'true'
         env:
-          EM_SIGNING_KEY: ${{ secrets.EM_SIGNING_KEY }}
+          XIP_SIGNING_KEY: ${{ secrets.XIP_SIGNING_KEY }}
         run: |
           sudo apt-get install -y --no-install-recommends openssl
           for d in dl/firmware-*; do mkdir -p "target/out/${d#dl/firmware-}"; cp -r "$d"/* "target/out/${d#dl/firmware-}/"; done

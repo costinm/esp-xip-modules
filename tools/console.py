@@ -10,7 +10,7 @@ Commands (docs/protocol.md): status, start, stop, events, wifi, loader, help, re
 
 Opening the port does not reset the board (the USB-Serial/JTAG block resets the chip only when DTR goes low while RTS
 is high; this tool leaves the lines alone). What modules log() and emit() appears as lines like
-  W (1234) espmod: test: mod_test log
+  W (1234) xip: test: mod_test log
   W (1250) main: test event 0x7eff: pass=28 fail=0
 """
 import argparse

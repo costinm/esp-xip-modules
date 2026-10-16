@@ -8,16 +8,16 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
-#include "espmod_host.h"
-#include "espmod_loader.h"
-#include "espmod_wifi.h"
-#include "espmod_transport.h"
+#include "xip_runtime.h"
+#include "xip_loader.h"
+#include "xip_wifi.h"
+#include "xip_transport.h"
 
 static const char *TAG = "main";
 
-/* Both C and Rust runtimes use the product slot table in espmod-host/src/loader.rs.
+/* Both C and Rust runtimes use the product slot table in xip-runtime-esp/src/loader.rs.
  * The build script generates this C initializer from that same source. */
-const espmod_slot_t main_slots[] = {
+const xip_slot_t main_slots[] = {
 #include "product-slots.inc"
 };
 
@@ -29,28 +29,28 @@ static int on_service(void *ctx, const char *module, uint16_t tag, const uint8_t
 {
     (void)ctx; (void)module; (void)timeout_ms;
     if (tag == SERVICE_ECHO) {
-        if (req_len > cap) return ESPMOD_ERR_SIZE;
+        if (req_len > cap) return XIP_ERR_SIZE;
         if (req_len) memcpy(resp, req, req_len);
         *resp_len = req_len;
         return 0;
     }
     if (tag == SERVICE_UPTIME_MS) {
         uint64_t ms = (uint64_t)(esp_timer_get_time() / 1000);
-        if (cap < sizeof(ms)) return ESPMOD_ERR_SIZE;
+        if (cap < sizeof(ms)) return XIP_ERR_SIZE;
         memcpy(resp, &ms, sizeof(ms));
         *resp_len = sizeof(ms);
         return 0;
     }
-    return ESPMOD_ERR_NOTFOUND;
+    return XIP_ERR_NOTFOUND;
 }
 
 /* Saved credentials are a boot input in either application partition.
  * This is a volatile request; it never creates a separate profile setting. */
-static void boot_network(const espmod_host_hooks_t *hooks)
+static void boot_network(const xip_host_hooks_t *hooks)
 {
-    espmod_bearer_profile profile = {.size = sizeof(profile)};
+    xip_bearer_profile profile = {.size = sizeof(profile)};
     uint32_t generation;
-    if (!espmod_transport_get(&profile, &generation) && profile.ssid_len) return;
+    if (!xip_transport_get(&profile, &generation) && profile.ssid_len) return;
     char ssid[33] = {0}, secret[64] = {0};
     nvs_handle_t nvs;
     if (nvs_open("wl", NVS_READONLY, &nvs) != ESP_OK) return;
@@ -62,14 +62,14 @@ static void boot_network(const espmod_host_hooks_t *hooks)
     /* Add the shared boot keys, preserving the loader's original keys. */
     if (!hooks->wifi_config || hooks->wifi_config((const uint8_t *)ssid, n-1,
                                                 (const uint8_t *)secret, m-1)) return;
-    uint8_t request[128]; em_cbor_w w; em_cbor_init(&w, request, sizeof(request));
-    em_cbor_map(&w, 4);
-    em_cbor_uint(&w, 1); em_cbor_uint(&w, 1);
-    em_cbor_uint(&w, 2); em_cbor_text(&w, ssid, n-1);
-    em_cbor_uint(&w, 17); em_cbor_text(&w, secret, m-1);
-    em_cbor_uint(&w, 16); em_cbor_uint(&w, 0);
-    int len = em_cbor_done(&w);
-    if (len > 0) (void)espmod_transport_set(request, (size_t)len, &generation);
+    uint8_t request[128]; xip_cbor_w w; xip_cbor_init(&w, request, sizeof(request));
+    xip_cbor_map(&w, 4);
+    xip_cbor_uint(&w, 1); xip_cbor_uint(&w, 1);
+    xip_cbor_uint(&w, 2); xip_cbor_text(&w, ssid, n-1);
+    xip_cbor_uint(&w, 17); xip_cbor_text(&w, secret, m-1);
+    xip_cbor_uint(&w, 16); xip_cbor_uint(&w, 0);
+    int len = xip_cbor_done(&w);
+    if (len > 0) (void)xip_transport_set(request, (size_t)len, &generation);
 }
 
 void app_main(void)
@@ -82,18 +82,18 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     /* Module lifecycle and desired Wi-Fi state use the same hooks in either partition. */
-    espmod_host_hooks_t hooks = {
+    xip_host_hooks_t hooks = {
         .call_service = on_service,
-        .modules_info = espmod_loader_modules_info, .module_start = espmod_loader_start_named,
-        .module_stop = espmod_loader_stop_named, .module_manifest = espmod_loader_manifest_named,
+        .modules_info = xip_loader_modules_info, .module_start = xip_loader_start_named,
+        .module_stop = xip_loader_stop_named, .module_manifest = xip_loader_manifest_named,
     };
-    espmod_wifi_install_hooks(&hooks);
-    ESP_ERROR_CHECK(espmod_host_init(&hooks));
-    const espmod_loader_config_t cfg = {.slots = main_slots, .slot_count = sizeof(main_slots) / sizeof(main_slots[0]),
+    xip_wifi_install_hooks(&hooks);
+    ESP_ERROR_CHECK(xip_host_init(&hooks));
+    const xip_loader_config_t cfg = {.slots = main_slots, .slot_count = sizeof(main_slots) / sizeof(main_slots[0]),
                                         .partition = "data", .default_stack_bytes = 8192};
-    ESP_ERROR_CHECK(espmod_loader_init(&cfg));
+    ESP_ERROR_CHECK(xip_loader_init(&cfg));
     /* What runs at boot is what is installed and asks for it in its manifest (the console module, if it is installed). */
     boot_network(&hooks);
-    espmod_loader_autostart();
+    xip_loader_autostart();
     ESP_LOGW(TAG, "ready");
 }

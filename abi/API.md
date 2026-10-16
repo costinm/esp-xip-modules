@@ -1,22 +1,22 @@
-# `espmod` module ABI
+# `xip` module ABI
 
 This file is the one definition of the interface between a **host** (an application, "main") and a **module**
-(a small program that runs on it). `tools/gen_abi.py` reads it and writes `include/espmod.h` (C) and
-`crates/espmod-abi/src/generated.rs` (Rust); `abi/espmod.lock` records the released slots. The layout follows
+(a small program that runs on it). `tools/gen_abi.py` reads it and writes `include/xip.h` (C) and
+`crates/xip-abi/src/generated.rs` (Rust); `abi/xip.lock` records the released slots. The layout follows
 the `API.md` files of ssh-mesh and DMesh (numbered methods, tables for fields, prose and examples), without
 depending on them. How to write a module: [docs/writing-modules.md](../docs/writing-modules.md).
 
-<!-- espmod-abi: version=2 prefix=espmod released=false -->
+<!-- xip-abi: version=2 prefix=xip released=false -->
 
 ## Model
 
 A module is a set of **handlers**. It never waits, sleeps or loops: the host calls
-`espmod_handle(host, state, call)` when something happens, the handler does its bounded work and returns, and the
+`xip_handle(host, state, call)` when something happens, the handler does its bounded work and returns, and the
 host sleeps until the next alarm, interrupt or request. One host task runs every module's handlers, one at a
 time, so a module costs memory for its image and its state block only.
 
 ```c
-int espmod_handle(const espmod_host *host, void *state, const espmod_call *call);
+int xip_handle(const xip_runtime *host, void *state, const xip_call *call);
 ```
 
 * `state` is a zeroed block of `state_bytes` (image header) that the host keeps for the module. An image has no
@@ -27,7 +27,7 @@ int espmod_handle(const espmod_host *host, void *state, const espmod_call *call)
   module dispatches on them; component 0 is the host's own ([`HOST`](#host-component-0)).
 * `call->data` / `call->len` is the payload (a request, usually one CBOR map keyed by field tags) and is valid
   during the call only. A handler answers a request with [`respond`](#4-respond--answer-the-current-request).
-* Time budget: a handler returns within `CONFIG_ESPMOD_HANDLER_MS` (default 20 ms). `spi_transfer`,
+* Time budget: a handler returns within `CONFIG_XIP_HANDLER_MS` (default 20 ms). `spi_transfer`,
   `i2c_transfer` and `adc_read` are bounded and synchronous. Anything longer (a radio transmission, a settle
   time) is started, and its end is an [alarm](#21-alarm_set--call-me-later-once-or-periodically) or an
   [interrupt](#12-irq_register--report-the-edges-of-a-pin).
@@ -35,7 +35,7 @@ int espmod_handle(const espmod_host *host, void *state, const espmod_call *call)
   the call); a negative [result](#results) is logged and also destroys the instance.
 
 Every call to the host takes `host->user` first; the table lists the other arguments. Check
-`ESPMOD_HOST_HAS(host, call)` before using a call newer than the version a module was built against.
+`XIP_HOST_HAS(host, call)` before using a call newer than the version a module was built against.
 
 # Results
 
@@ -149,7 +149,7 @@ Where a packet is sent. A module is addressed by its component (the slot tag), w
 
 ## `FEAT`
 
-Bits of `espmod_host.features`: what the host really implements.
+Bits of `xip_host.features`: what the host really implements.
 
 | Name | Value | Description |
 |---|---:|---|
@@ -210,7 +210,7 @@ reported by their implementing owner; a C host need only reconcile UART and STA.
 
 | Field | Type | Description |
 |---|---|---|
-| `size` | `uint32_t` | Size of this struct; caller sets it to sizeof(espmod_bearer_profile). |
+| `size` | `uint32_t` | Size of this struct; caller sets it to sizeof(xip_bearer_profile). |
 | `version` | `uint32_t` | Profile layout version. Default=1. |
 | `ssid` | `uint8_t[33]` | Desired ssid. Default=0. |
 | `ssid_len` | `uint32_t` | Desired ssid_len. Default=0. |
@@ -256,7 +256,7 @@ Pins are GPIO numbers, -1 = unused.
 
 | Field | Type | Description |
 |---|---|---|
-| `size` | `uint32_t` | `sizeof(espmod_spi_config)`, set by the caller; lets the struct grow. |
+| `size` | `uint32_t` | `sizeof(xip_spi_config)`, set by the caller; lets the struct grow. |
 | `bus` | `int32_t` | SPI controller: 2 or 3 (3 does not exist on ESP32-C6, 2 is used). |
 | `sck` | `int32_t` | |
 | `miso` | `int32_t` | |
@@ -272,7 +272,7 @@ Pins are GPIO numbers, -1 = unused.
 
 | Field | Type | Description |
 |---|---|---|
-| `size` | `uint32_t` | `sizeof(espmod_call)`. |
+| `size` | `uint32_t` | `sizeof(xip_call)`. |
 | `component` | `int32_t` | Chosen by the creator of the event (0 = the host, see `HOST`). |
 | `method` | `int32_t` | Chosen by the creator of the event. |
 | `value` | `int32_t` | IRQ: the pin level. Alarm: how late it fired, in ms (saturated). `HOST_NETWORK`: 1 or 0. Request: 0. |
@@ -293,7 +293,7 @@ Packed. The code follows directly.
 | `magic` | `uint32_t` | `DMOD_MAGIC`. |
 | `abi_version` | `uint16_t` | `ABI_VERSION` the module was built for. |
 | `header_size` | `uint16_t` | `DMOD_HEADER_SIZE`. |
-| `entry_offset` | `uint32_t` | Offset of `espmod_handle` from the start of the image (includes the header). |
+| `entry_offset` | `uint32_t` | Offset of `xip_handle` from the start of the image (includes the header). |
 | `image_size` | `uint32_t` | Header plus code and read-only data. |
 | `tag` | `uint16_t` | Module tag; must match the slot the image is installed in. |
 | `reserved0` | `uint16_t` | Zero. |
@@ -309,7 +309,7 @@ Packed. The code follows directly.
 
 # Host calls
 
-The host table, `espmod_host`. The method number is the slot: append only after a release. In the C and Rust
+The host table, `xip_runtime`. The method number is the slot: append only after a release. In the C and Rust
 declarations the leading `void *user` argument is implied.
 
 ## 1. `log` — write one line to the host's log
@@ -500,7 +500,7 @@ pins. A controller that main initialised is shared as is.
 
 | Name | Type | Description |
 |---|---|---|
-| `config` | `const espmod_spi_config *` | See `spi_config`. |
+| `config` | `const xip_spi_config *` | See `spi_config`. |
 
 ## 15. `spi_transfer` — one chip-select cycle
 
@@ -541,7 +541,7 @@ instance are cancelled when it is destroyed.
 ### Example: poll a battery every minute, whenever convenient
 
 ```c
-host->alarm_set(host->user, 60000, 30000, 60000, ESPMOD_ALARM_FLEXIBLE, MY_BATTERY, POLL);
+host->alarm_set(host->user, 60000, 30000, 60000, XIP_ALARM_FLEXIBLE, MY_BATTERY, POLL);
 ```
 
 ## 21. `alarm_cancel` — cancel an alarm
@@ -768,7 +768,7 @@ value as text (a text value as it is, any other as hex). The host keeps the last
 
 **Returns:** `int` — `OK` and the handle in `*pkt`; `ERR_NOMEM` when the pool is down to the network's reserve; `ERR_BUSY` when the module already holds its quota.
 
-The packet is **held** by this module: it counts against a small fixed quota (`CONFIG_ESPMOD_PKT_HELD`, default 4) and is
+The packet is **held** by this module: it counts against a small fixed quota (`CONFIG_XIP_PKT_HELD`, default 4) and is
 returned to the pool when the module sends or frees it, or ends. The handle is an opaque number that is never 0 and
 stops being valid when the packet leaves the module (a stale handle gets `ERR_ARG`, not someone else's packet).
 
@@ -851,12 +851,12 @@ payload window offers.
 
 ## 41. `mem_alloc` — memory that outlives a call
 
-**Returns:** `void *` — NULL on exhaustion, when an allocation would leave less than 32 KiB of host heap free, or when the optional per-module quota is exceeded. `CONFIG_ESPMOD_MEM_QUOTA=0` (default) uses the available heap; a nonzero value caps outstanding allocations per module. The free-heap margin is checked at allocation time; unrelated firmware allocations can consume it later.
+**Returns:** `void *` — NULL on exhaustion, when an allocation would leave less than 32 KiB of host heap free, or when the optional per-module quota is exceeded. `CONFIG_XIP_MEM_QUOTA=0` (default) uses the available heap; a nonzero value caps outstanding allocations per module. The free-heap margin is checked at allocation time; unrelated firmware allocations can consume it later.
 
 The heap is managed by balance: the host adds up the bytes a module takes and gives back. A message belongs in a packet
 (`pkt_alloc`); this is for what a module keeps between calls and does not fit in its state block (a reassembly buffer, a
 queue of frames). **A module frees everything it allocated before it stops.** If the balance is not zero when it ends, the
-stop is reported as failed (`ERR_LEAK`, bytes in `espmod_stats_t.mem_leaked`) and the module **cannot be replaced live**:
+stop is reported as failed (`ERR_LEAK`, bytes in `xip_stats_t.mem_leaked`) and the module **cannot be replaced live**:
 the host does not know which blocks are left, so the slot is marked `needs_reboot` and an install into it is refused until the
 device restarts. A leak therefore shows up in the first test rather than as a slow loss of memory in the field. The block is
 aligned for any type.
@@ -1167,7 +1167,7 @@ then again on HOST_TRANSPORT. This is desired state; each owner reports its actu
 
 | Name | Type | Description |
 |---|---|---|
-| `profile` | `espmod_bearer_profile *` | Caller-owned struct. |
+| `profile` | `xip_bearer_profile *` | Caller-owned struct. |
 | `generation` | `uint32_t *` | Receives its generation. |
 
 ## 60. `device_info` — structured device and component status
@@ -1221,7 +1221,7 @@ buffers are freed. Component and method are nonnegative integers.
 The leading `user` argument is the requesting module's existing runtime context,
 used for bookkeeping; it is not added to functions in the returned table.
 `name` is a NUL-terminated string. Initially `"psa"` returns the host's native PSA
-crypto table, defined by the ordinary C header `include/espmod_psa.h` and a
+crypto table, defined by the ordinary C header `include/xip_psa.h` and a
 hand-written Rust wrapper. Component headers need not be generated from this file.
 The PSA table is read-only and valid for the firmware lifetime. Its signatures,
 context types and error codes are native SDK ones. Lookup does not initialize
@@ -1236,13 +1236,13 @@ are separate future work.
 
 # Helpers
 
-Not host calls: header-only code in `include/espmod_cbor.h` (C) and `espmod-abi`'s `cbor` module (Rust), for
+Not host calls: header-only code in `include/xip_cbor.h` (C) and `xip-abi`'s `cbor` module (Rust), for
 modules and hosts alike.
 
-* Encoder: `em_cbor_uint`, `em_cbor_int`, `em_cbor_bytes`, `em_cbor_text`, `em_cbor_map`, `em_cbor_array`,
-  `em_cbor_bool` write to a bounded buffer and report overflow once, at the end.
-* Decoder: `em_cbor_next` reads one item (type, integer, or a pointer and length for bytes and text) and
-  `em_cbor_skip` steps over a whole item; `em_cbor_field` finds the value of an unsigned-integer key in a map.
+* Encoder: `xip_cbor_uint`, `xip_cbor_int`, `xip_cbor_bytes`, `xip_cbor_text`, `xip_cbor_map`, `xip_cbor_array`,
+  `xip_cbor_bool` write to a bounded buffer and report overflow once, at the end.
+* Decoder: `xip_cbor_next` reads one item (type, integer, or a pointer and length for bytes and text) and
+  `xip_cbor_skip` steps over a whole item; `xip_cbor_field` finds the value of an unsigned-integer key in a map.
 * Only definite lengths, integers up to 64 bits, byte and text strings, arrays, maps and booleans; floats and
   tags are skipped but not decoded.
 

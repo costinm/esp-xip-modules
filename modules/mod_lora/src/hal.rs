@@ -3,7 +3,7 @@
 //! calls the module back, and the interrupt line of the radio. There is no delay and no wait: the machine returns
 //! and the host calls it again.
 //!
-//! No crate dependency: [`crate::espmod::EspmodHal`] implements it over the esp-xip-modules host table, the unit
+//! No crate dependency: [`crate::xip::XipHal`] implements it over the esp-xip-modules host table, the unit
 //! tests over a scripted fake. Results keep the integer codes the module has always reported (0 = ok).
 
 /// SPI device wiring handed to [`Hal::spi_open`].

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build one C or Rust module directory with the XIP-owned tools.
 set -euo pipefail
-ROOT="${ESPMOD_TOOL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ROOT="${XIP_TOOL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 if [[ ${1:-} == --help || $# == 0 ]]; then
     echo 'Usage: build-mod.sh DIRECTORY [--chip esp32c6|esp32|esp32s3] [--slots HOST_SOURCE] [--slot NAME] [--out DIRECTORY]'
     exit 0

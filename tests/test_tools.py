@@ -44,12 +44,12 @@ class Abi(unittest.TestCase):
 
     def test_header_matches_the_host_table_size(self):
         n = len(gen_abi.load()["entry"])
-        self.assertIn(f"== {16 + 4 * n}, \"espmod_host layout\"", read("include", "espmod.h"))
+        self.assertIn(f"== {16 + 4 * n}, \"xip_host layout\"", read("include", "xip.h"))
 
     def test_python_and_c_agree_on_the_image_header(self):
-        header = read("include", "espmod.h")
-        self.assertIn(f"#define ESPMOD_DMOD_MAGIC 0x{dmod.MAGIC:x}u", header)
-        self.assertIn(f"#define ESPMOD_ABI_VERSION {dmod.ABI_VERSION}u", header)
+        header = read("include", "xip.h")
+        self.assertIn(f"#define XIP_DMOD_MAGIC 0x{dmod.MAGIC:x}u", header)
+        self.assertIn(f"#define XIP_ABI_VERSION {dmod.ABI_VERSION}u", header)
         self.assertEqual(dmod._FMT.size, 64)
 
 
@@ -82,12 +82,12 @@ class Slots(unittest.TestCase):
             self.assertEqual((o % 0x10000, z % 0x10000), (0, 0))
 
     def test_chip_windows_match_the_loader(self):
-        loader = read("components", "espmod_loader", "src", "loader.c")
-        for chip, ifdef in (("esp32s3", "#if CONFIG_IDF_TARGET_ESP32S3\n#define EM_FIXED"),
-                            ("esp32", "#elif CONFIG_IDF_TARGET_ESP32\n#define EM_FIXED")):
+        loader = read("components", "xip_loader", "src", "loader.c")
+        for chip, ifdef in (("esp32s3", "#if CONFIG_IDF_TARGET_ESP32S3\n#define XIP_FIXED"),
+                            ("esp32", "#elif CONFIG_IDF_TARGET_ESP32\n#define XIP_FIXED")):
             block = loader[loader.index(ifdef):]
-            code = int(re.search(r"EM_CODE_BASE (0x[0-9a-fA-F]+)u", block).group(1), 16)
-            data = int(re.search(r"EM_DATA_BASE (0x[0-9a-fA-F]+)u", block).group(1), 16)
+            code = int(re.search(r"XIP_CODE_BASE (0x[0-9a-fA-F]+)u", block).group(1), 16)
+            data = int(re.search(r"XIP_DATA_BASE (0x[0-9a-fA-F]+)u", block).group(1), 16)
             self.assertEqual((code, data), (mkmod.CHIPS[chip]["code_base"], mkmod.CHIPS[chip]["data_base"]), chip)
 
 
@@ -242,9 +242,9 @@ class Build(unittest.TestCase):
 
     def test_the_package_passes_the_device_checks(self):
         exe = os.path.join(tempfile.mkdtemp(), "test_check")
-        subprocess.run(["gcc", "-Wall", "-Wextra", "-fsanitize=address,undefined", "-I", "include", "-I", "components/espmod_loader/include",
+        subprocess.run(["gcc", "-Wall", "-Wextra", "-fsanitize=address,undefined", "-I", "include", "-I", "components/xip_loader/include",
                         "-I", "tests/host", "-o", exe, "tests/host/test_check.c",
-                        "components/espmod_loader/src/espmod_check.c"], cwd=ROOT, check=True)
+                        "components/xip_loader/src/xip_check.c"], cwd=ROOT, check=True)
         key = os.path.join(tempfile.mkdtemp(), "k.pem")
         sign.keygen(key)
         for chip, cpu in (("esp32c6", 13), ("esp32s3", 9), ("esp32", 0)):
@@ -258,8 +258,8 @@ class Build(unittest.TestCase):
 
     def test_a_module_with_state_is_rejected(self):
         src = os.path.join(tempfile.mkdtemp(), "bad.c")
-        open(src, "w").write('#include "espmod_module.h"\nstatic volatile int counter;\n'
-                             'ESPMOD_HANDLER(bad)(const espmod_host *h, void *s, const espmod_call *c) { (void)h; (void)s; (void)c; return ++counter; }\n')
+        open(src, "w").write('#include "xip_module.h"\nstatic volatile int counter;\n'
+                             'XIP_HANDLER(bad)(const xip_host *h, void *s, const xip_call *c) { (void)h; (void)s; (void)c; return ++counter; }\n')
         chip = "esp32c6" if shutil.which("riscv32-esp-elf-gcc") else "esp32"
         with self.assertRaises(SystemExit) as cm:
             mkmod.build(chip, "lora", [src], os.path.join(tempfile.mkdtemp(), "x.dmod"))
@@ -267,8 +267,8 @@ class Build(unittest.TestCase):
 
     def test_a_module_needing_libc_is_rejected(self):
         src = os.path.join(tempfile.mkdtemp(), "bad.c")
-        open(src, "w").write('#include "espmod_module.h"\nextern int puts(const char *);\n'
-                             'ESPMOD_HANDLER(bad)(const espmod_host *h, void *s, const espmod_call *c) { (void)h; (void)s; (void)c; return puts("x"); }\n')
+        open(src, "w").write('#include "xip_module.h"\nextern int puts(const char *);\n'
+                             'XIP_HANDLER(bad)(const xip_host *h, void *s, const xip_call *c) { (void)h; (void)s; (void)c; return puts("x"); }\n')
         chip = "esp32c6" if shutil.which("riscv32-esp-elf-gcc") else "esp32"
         with self.assertRaises(SystemExit) as cm:
             mkmod.build(chip, "lora", [src], os.path.join(tempfile.mkdtemp(), "x.dmod"))
@@ -425,7 +425,7 @@ class ConsoleAnswer(unittest.TestCase):
             def read(self, n): return self.chunks.pop(0) if self.chunks else b""
 
         c = console.Console("unused")
-        c.ser = Ser([b"W (1234) espmod: test: log line\r\n", b"name=test tag=2 installed=true\r\n",
+        c.ser = Ser([b"W (1234) xip: test: log line\r\n", b"name=test tag=2 installed=true\r\n",
                      b"W (1240) main: test event 0x7eff: pass=1\r\n"])
         self.assertEqual(c.command("status", timeout=3, idle=0.01), "name=test tag=2 installed=true\n")
         self.assertEqual(c.ser.sent, b"status\n")

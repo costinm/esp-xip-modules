@@ -1,0 +1,16 @@
+[package]
+name = "xip-runtime-esp"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rust side of an esp-xip-modules application: run, stop and call the modules of a slot table; the pieces DMesh and the example main share"
+publish = false
+
+# Built by the application that uses it (ESP-IDF, or a PC for the tests); not part of a Cargo workspace.
+[workspace]
+
+[dependencies]
+xip-abi = { path = "../xip-abi" }
+
+[target.'cfg(target_os = "espidf")'.dependencies]
+esp-idf-sys = { version = "0.37", default-features = false, features = ["alloc_handler"] }

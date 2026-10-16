@@ -8,7 +8,7 @@
 //! Any config field in a request replaces the module's current value for the rest of the session.
 
 use crate::config::{field_id, LoraConfig};
-use espmod_abi::cbor::{Item, Reader};
+use xip_abi::cbor::{Item, Reader};
 
 pub const MAX_PAYLOAD: usize = 255;
 

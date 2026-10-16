@@ -9,8 +9,8 @@
 #[cfg(test)]
 extern crate std;
 
-use espmod_abi::cbor::{self, Item, Writer};
-use espmod_abi::{CallView, Hw, Module, ALARM_EXACT, GPIO_INPUT, GPIO_OUTPUT, GPIO_PULL_NONE, GPIO_PULL_UP, IRQ_BOTH,
+use xip_abi::cbor::{self, Item, Writer};
+use xip_abi::{CallView, Hw, Module, ALARM_EXACT, GPIO_INPUT, GPIO_OUTPUT, GPIO_PULL_NONE, GPIO_PULL_UP, IRQ_BOTH,
                  VALUE_CBOR};
 
 /// The component number of the module: its slot tag, as in DMesh.
@@ -323,12 +323,12 @@ impl HwModule {
 
 impl Module for HwModule {
     fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
-        if call.is_host(espmod_abi::HOST_STOP) {
+        if call.is_host(xip_abi::HOST_STOP) {
             self.probe_stop(hw);
             if self.button_on { let _ = hw.irq_unregister(self.button_pin); }
             return 0;
         }
-        if call.component != COMPONENT { return espmod_abi::RET_CONTINUE as i32; }
+        if call.component != COMPONENT { return xip_abi::RET_CONTINUE as i32; }
         let rc = match call.method {
             M_BATTERY => self.battery(hw, call.data),
             M_PROBE => self.probe(hw, call.data),
@@ -345,18 +345,18 @@ impl Module for HwModule {
             if let Some(encoded) = w.finish() { let _ = hw.respond(encoded); }
         }
         // a failed request does not end the module; only the host does
-        espmod_abi::RET_CONTINUE as i32
+        xip_abi::RET_CONTINUE as i32
     }
 }
 
 /// Bytes of state the image asks for (`mkmod` in Cargo.toml).
 pub const STATE_BYTES: usize = 128;
 
-/// Export `espmod_handle` for the flash image.
+/// Export `xip_handle` for the flash image.
 #[macro_export]
 macro_rules! export {
     () => {
-        espmod_abi::export_module!($crate::HwModule, state = $crate::STATE_BYTES);
+        xip_abi::export_module!($crate::HwModule, state = $crate::STATE_BYTES);
     };
 }
 
