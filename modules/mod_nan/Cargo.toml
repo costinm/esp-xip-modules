@@ -1,0 +1,35 @@
+[package]
+name = "esp-mod-nan"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "NAN discovery-window bench module: sleep, a short promiscuous window, the Wi-Fi comeback (the first shape of mod_nan)"
+publish = false
+
+# Standalone: built by tools/mkmod.py --cargo (scripts/build.sh), not as part of a cargo workspace.
+[workspace]
+
+[dependencies]
+xip-abi = { path = "../../crates/xip-abi" }
+
+[package.metadata]
+# Options for tools/mkmod.py (scripts/build.sh). The slot is mod_hello's for now: install one or the other (`start hello`).
+mkmod = "--slot hello --stack 4096 --state 512 --features WIFI,PACKETS"
+
+[features]
+flat-image = ["xip-abi/global-alloc"]
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "mod_nan"
+required-features = ["flat-image"]
+
+[profile.release]
+codegen-units = 1
+debug = false
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = "symbols"
