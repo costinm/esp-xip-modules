@@ -4,10 +4,14 @@ The text interface of a device, and the only place text is made or read. It take
 (`serial_open`): each line typed arrives as a request (method 3, the line as bytes) and the text it answers is printed.
 A line is one of the commands below or `component.method key=value ...` (the spelling of the ssh-mesh `mesh` CLI), which
 becomes the tagged-CBOR request of the module `component` (names and tags from the `API.md` files of the modules,
-`tools/gen_catalog.py`), and is sent as a packet with an id. Nothing waits for an answer: whatever packets modules send to the
+`mesh-api-gen`, `scripts/gen.sh`), and is sent as a packet with an id. Nothing waits for an answer: whatever packets modules send to the
 console, one or many, answers or not, are printed as they arrive. Before sending, the console asks the host for the module's
 **manifest** (`module_manifest`: the methods the installed image says it has) and refuses a method that is not in it. `parse` (1) and `render`
 (2) below are the two halves of that, for a caller that has its own transport.
+
+Native calls: a method of a host component that has a native function (`wifi.get`, `wifi.set`, `wifi.tuning`, `wifi.set_tuning`; the `**C function:**` lines of `api/wifi.API.md`) is not sent to a module. The console looks the component up with `get_component`,
+fills the request struct of the function from the fields of the line, calls the function in its table, and prints the output struct as the answer. The layout of the structs and the position of the function come from `native.h`
+(`mesh-api-gen --out-console-native`, generated from the API.md and the Rust declaration), so adding a function to such an API adds no console code. A field the line does not name is zero, so `wifi.set` replaces the whole intent.
 
 Commands: `status` (the host device_info map, including Wi-Fi, heap, slots and cached component status), `start NAME [TEXT]`, `stop NAME`, `events` (the last events modules emitted), `reset`,
 `wifi [ssid=NAME] [psk=SECRET] [start|stop]` (the network is a setting of this module, never in an image; an empty ssid is
@@ -53,9 +57,9 @@ value looks like (`name=123` stays text when `name` is a `string`).
 |---:|---|---|---|
 | 1 | `text` | `string` | `key=value` words on one line; a record list one record per line; `ok` for an empty answer. |
 
-# Types
+The answers the console prints as lists, one record per line (`device_info` modules; the host's `modules_info` and `events_info`):
 
-## `slot` — one module slot (device_info modules; the host's `modules_info`)
+`Slot` fields:
 
 | Tag | Field | Type | Description |
 |---:|---|---|---|
@@ -71,7 +75,7 @@ value looks like (`name=123` stays text when `name` is a `string`).
 | 10 | `check` | `int` | Result of the last start attempt's image check. |
 | 11 | `reboot` | `bool` | The module stopped with memory it had not freed: it cannot be replaced until the device restarts. |
 
-## `event` — one event of a module (`events`; the host's `events_info`)
+`Event` fields:
 
 | Tag | Field | Type | Description |
 |---:|---|---|---|
