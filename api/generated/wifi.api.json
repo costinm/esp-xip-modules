@@ -1,0 +1,737 @@
+{
+  "components": [
+    {
+      "doc": "The radio of the device, as the network-facing (CBOR, JSON, text) view of the `wifi` and `wifi-tuning` components. The C\nstructs modules use are in `crates/xip-abi/src/wifi.rs` (`xip_wifi_intent`, `xip_wifi_state`, `xip_wifi_tuning`); this file\nnames and numbers the same fields for consoles, gateways and tools. The mapping is one to one: `get` and `set` carry a\n`WifiIntent`, `state` a `WifiState` and `tuning` / `set_tuning` a `WifiTuning`, with names and passphrases as text instead\nof byte arrays with lengths.\n\nThe model is an **intended state**: a caller says what the radio should do and the device makes it true (joins, retries,\nfollows a channel change). There is no start or stop. ESP-NOW is on whenever the radio is on, so the combinations are: off,\nESP-NOW only, station, soft AP, and both.",
+      "index": 10,
+      "name": "wifi"
+    }
+  ],
+  "format": "mesh-api/1",
+  "methods": [
+    {
+      "access": "authenticated",
+      "component": "wifi",
+      "index": 1,
+      "method": "get",
+      "name": "wifi.get",
+      "request": {
+        "fields": []
+      },
+      "response": {
+        "type": "Intent"
+      },
+      "summary": "The intended state",
+      "visibility": "public",
+      "x-c": {
+        "c_table": "xip_wifi",
+        "component": "wifi",
+        "member": "get",
+        "offset": 12,
+        "params": [
+          {
+            "name": "ctx",
+            "role": "ctx",
+            "type": "c_void"
+          },
+          {
+            "kind": "WifiIntent",
+            "name": "intent",
+            "role": "out",
+            "type": "WifiIntent"
+          },
+          {
+            "kind": "u32",
+            "mapped": false,
+            "name": "generation",
+            "role": "out",
+            "type": "u32"
+          }
+        ],
+        "table": "Wifi"
+      }
+    },
+    {
+      "access": "any of `system`, `mesh.owner`, `mesh.admin`",
+      "component": "wifi",
+      "doc": "Replaces the whole intended state: a field that is absent takes its default (`radio` 0, `sta` 0, `ap` 0, `channel` 0, no\nnames). To change only the channel, `get`, edit and `set`. Returns once the state is accepted, not when it is true; read\n`state` for that. An identical state changes nothing.",
+      "errors": [
+        {
+          "description": "A name or passphrase of the wrong length, a channel above 14, or `sta` with neither `sta_ssid` nor `bssid`.",
+          "name": "invalid_argument"
+        }
+      ],
+      "index": 2,
+      "method": "set",
+      "name": "wifi.set",
+      "request": {
+        "type": "Intent"
+      },
+      "response": {
+        "fields": [
+          {
+            "description": "Increases when the intended state or the tuning changes.",
+            "name": "generation",
+            "tag": 1,
+            "type": "u32"
+          }
+        ]
+      },
+      "summary": "State what the radio should do",
+      "visibility": "public",
+      "x-c": {
+        "c_table": "xip_wifi",
+        "component": "wifi",
+        "member": "set",
+        "offset": 8,
+        "params": [
+          {
+            "name": "ctx",
+            "role": "ctx",
+            "type": "c_void"
+          },
+          {
+            "kind": "WifiIntent",
+            "name": "intent",
+            "role": "in",
+            "type": "WifiIntent"
+          },
+          {
+            "kind": "u32",
+            "name": "generation",
+            "role": "out",
+            "type": "u32"
+          }
+        ],
+        "table": "Wifi"
+      }
+    },
+    {
+      "access": "authenticated",
+      "component": "wifi",
+      "doc": "Everything is absent while the radio is off. This is the CBOR form of the `wifi_info` host call.",
+      "index": 3,
+      "method": "state",
+      "name": "wifi.state",
+      "request": {
+        "fields": []
+      },
+      "response": {
+        "fields": [
+          {
+            "description": "The station.",
+            "name": "sta",
+            "tag": 1,
+            "type": "StaState"
+          },
+          {
+            "description": "The joined network; present when `sta` is `up`.",
+            "name": "ssid",
+            "tag": 2,
+            "type": "string"
+          },
+          {
+            "description": "IPv4 address of the station as text; present when `sta` is `up`.",
+            "name": "ip",
+            "tag": 3,
+            "type": "string"
+          },
+          {
+            "description": "Signal of the joined network in dBm; present when `sta` is `up`.",
+            "name": "rssi",
+            "tag": 4,
+            "type": "i8"
+          },
+          {
+            "description": "The soft AP is running.",
+            "name": "ap_up",
+            "tag": 5,
+            "type": "bool"
+          },
+          {
+            "description": "The channel in use; present when the radio is on.",
+            "name": "channel",
+            "tag": 6,
+            "type": "u8"
+          }
+        ]
+      },
+      "summary": "What is true now",
+      "visibility": "public"
+    },
+    {
+      "access": "authenticated",
+      "component": "wifi",
+      "doc": "Never blocks: a scan takes seconds and a handler has a budget of milliseconds. The first call starts the scan and returns\n`unavailable` with `retry`; poll about once a second and the call that finds it done returns the answer, once. It works in\nevery radio mode (station, ESP-NOW only, soft AP, joined); with the radio off it is switched on for the scan and off again.\nA scan leaves the channel for about two seconds, so ESP-NOW and a soft AP do not hear their channel meanwhile; the radio is put\nback on its channel afterwards. While the driver is busy joining the call returns `unavailable`. A network in range that is\nnot listed was missed (a scan can); scan again. A module gets the same list from the `scan` function of the `wifi` component.",
+      "execution": "non-blocking",
+      "index": 4,
+      "method": "scan",
+      "name": "wifi.scan",
+      "request": {
+        "fields": []
+      },
+      "response": {
+        "fields": [
+          {
+            "description": "Strongest first.",
+            "name": "networks",
+            "tag": 1,
+            "type": "Network[]"
+          }
+        ]
+      },
+      "summary": "The networks in range",
+      "visibility": "public"
+    },
+    {
+      "access": "any of `system`, `mesh.owner`, `mesh.admin`",
+      "component": "wifi",
+      "doc": "Switches promiscuous (raw) receive on or off. NAN discovery-window frames are not delivered any other way (see\n`components/xip_runtime/ESPNOW.md`). The radio keeps receiving as before; the frames the driver then hands up also arrive as\npackets on the link `promisc` of the `link` component: the 802.11 frame from its MAC header (radio FCS removed), the transmitter\naddress as the source token, the RSSI as the signal. The runtime applies an early receive filter (frames not for this device, or not of our networks or NAN, are dropped before they are copied) and does not change power save: the module\ndecides when to switch it off again (tens of milliseconds in a discovery window) and what to do about power save. The radio\nmust be on (`unavailable` otherwise); a radio restart clears it.",
+      "errors": [
+        {
+          "description": "A channel above 13.",
+          "name": "invalid_argument"
+        },
+        {
+          "description": "The radio is off, or this host has no promiscuous receive.",
+          "name": "unavailable"
+        }
+      ],
+      "index": 7,
+      "method": "monitor",
+      "name": "wifi.monitor",
+      "request": {
+        "type": "Monitor"
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "Promiscuous receive, for NAN",
+      "visibility": "public",
+      "x-c": {
+        "c_table": "xip_wifi",
+        "component": "wifi",
+        "member": "monitor",
+        "offset": 24,
+        "params": [
+          {
+            "name": "ctx",
+            "role": "ctx",
+            "type": "c_void"
+          },
+          {
+            "kind": "WifiMonitor",
+            "name": "monitor",
+            "role": "in",
+            "type": "WifiMonitor"
+          }
+        ],
+        "table": "Wifi"
+      }
+    },
+    {
+      "access": "authenticated",
+      "component": "wifi",
+      "doc": "Rarely needed settings for measurements and unusual links. The defaults of the device are the supported baseline.",
+      "index": 5,
+      "method": "tuning",
+      "name": "wifi.tuning",
+      "request": {
+        "fields": []
+      },
+      "response": {
+        "type": "Tuning"
+      },
+      "summary": "The advanced driver settings",
+      "visibility": "public",
+      "x-c": {
+        "c_table": "xip_wifi_tuner",
+        "component": "wifi-tuning",
+        "member": "get",
+        "offset": 12,
+        "params": [
+          {
+            "name": "ctx",
+            "role": "ctx",
+            "type": "c_void"
+          },
+          {
+            "kind": "WifiTuning",
+            "name": "tuning",
+            "role": "out",
+            "type": "WifiTuning"
+          }
+        ],
+        "table": "WifiTuner"
+      }
+    },
+    {
+      "access": "any of `system`, `mesh.owner`, `mesh.admin`",
+      "component": "wifi",
+      "doc": "Replaces all of them; an absent field is the default. `ampdu` and the four buffer sizes are read when the driver starts, so\na change restarts the radio (the station rejoins); the other fields apply to the next association.",
+      "errors": [
+        {
+          "description": "A value is out of range.",
+          "name": "invalid_argument"
+        },
+        {
+          "description": "A setting this device does not have and that is not left at the default.",
+          "name": "unavailable"
+        }
+      ],
+      "index": 6,
+      "method": "set_tuning",
+      "name": "wifi.set_tuning",
+      "request": {
+        "type": "Tuning"
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "Change the advanced driver settings",
+      "visibility": "public",
+      "x-c": {
+        "c_table": "xip_wifi_tuner",
+        "component": "wifi-tuning",
+        "member": "set",
+        "offset": 8,
+        "params": [
+          {
+            "name": "ctx",
+            "role": "ctx",
+            "type": "c_void"
+          },
+          {
+            "kind": "WifiTuning",
+            "name": "tuning",
+            "role": "in",
+            "type": "WifiTuning"
+          }
+        ],
+        "table": "WifiTuner"
+      }
+    }
+  ],
+  "types": [
+    {
+      "doc": "What the radio should do.",
+      "fields": [
+        {
+          "description": "The radio is on (ESP-NOW included).",
+          "name": "radio",
+          "tag": 1,
+          "type": "bool",
+          "x-c": {
+            "kind": "u8",
+            "offset": 4,
+            "size": 1
+          }
+        },
+        {
+          "description": "Join `sta_ssid`, or the access point `bssid`, while the radio is on.",
+          "name": "sta",
+          "tag": 2,
+          "type": "bool",
+          "x-c": {
+            "kind": "u8",
+            "offset": 5,
+            "size": 1
+          }
+        },
+        {
+          "description": "Run the soft AP while the radio is on.",
+          "name": "ap",
+          "tag": 3,
+          "type": "bool",
+          "x-c": {
+            "kind": "u8",
+            "offset": 6,
+            "size": 1
+          }
+        },
+        {
+          "description": "0 any, else 1..14. Applies to the AP and speeds up a join.",
+          "name": "channel",
+          "tag": 4,
+          "type": "u8",
+          "x-c": {
+            "kind": "u8",
+            "offset": 7,
+            "size": 1
+          }
+        },
+        {
+          "description": "Join this access point only (6 bytes). Together with `channel` it avoids a scan.",
+          "name": "bssid",
+          "tag": 5,
+          "type": "bytes",
+          "x-c": {
+            "kind": "bytes",
+            "offset": 8,
+            "size": 6
+          }
+        },
+        {
+          "description": "Network name, 1..32 bytes.",
+          "name": "sta_ssid",
+          "tag": 6,
+          "type": "string",
+          "x-c": {
+            "kind": "bytes",
+            "len_field": {
+              "name": "sta_ssid_len",
+              "offset": 14,
+              "size": 1
+            },
+            "offset": 20,
+            "size": 32
+          }
+        },
+        {
+          "description": "Passphrase, 8..63 bytes; absent for an open network.",
+          "name": "sta_psk",
+          "tag": 7,
+          "type": "string",
+          "x-c": {
+            "kind": "bytes",
+            "len_field": {
+              "name": "sta_psk_len",
+              "offset": 15,
+              "size": 1
+            },
+            "offset": 52,
+            "size": 64
+          }
+        },
+        {
+          "description": "Name of the soft AP, 1..32 bytes; absent: the device's default.",
+          "name": "ap_ssid",
+          "tag": 8,
+          "type": "string",
+          "x-c": {
+            "kind": "bytes",
+            "len_field": {
+              "name": "ap_ssid_len",
+              "offset": 16,
+              "size": 1
+            },
+            "offset": 116,
+            "size": 32
+          }
+        },
+        {
+          "description": "Passphrase of the soft AP, 8..63 bytes; absent for an open AP.",
+          "name": "ap_psk",
+          "tag": 9,
+          "type": "string",
+          "x-c": {
+            "kind": "bytes",
+            "len_field": {
+              "name": "ap_psk_len",
+              "offset": 17,
+              "size": 1
+            },
+            "offset": 148,
+            "size": 64
+          }
+        }
+      ],
+      "kind": "record",
+      "name": "Intent",
+      "x-c": {
+        "align": 4,
+        "c": "xip_wifi_intent",
+        "rust": "WifiIntent",
+        "size": 212,
+        "size_field": {
+          "offset": 0,
+          "size": 4
+        }
+      }
+    },
+    {
+      "doc": "Promiscuous receive.",
+      "fields": [
+        {
+          "description": "On (true) or off.",
+          "name": "enable",
+          "tag": 1,
+          "type": "bool",
+          "x-c": {
+            "kind": "u8",
+            "offset": 4,
+            "size": 1
+          }
+        },
+        {
+          "description": "0 leave the channel, 1..13 pin the unassociated radio to it (HT20) first.",
+          "name": "channel",
+          "tag": 2,
+          "type": "u8",
+          "x-c": {
+            "kind": "u8",
+            "offset": 5,
+            "size": 1
+          }
+        }
+      ],
+      "kind": "record",
+      "name": "Monitor",
+      "x-c": {
+        "align": 4,
+        "c": "xip_wifi_monitor",
+        "rust": "WifiMonitor",
+        "size": 8,
+        "size_field": {
+          "offset": 0,
+          "size": 4
+        }
+      }
+    },
+    {
+      "doc": "Switches are `default`, `on` or `off`; numbers are 0 for the default. Settings marked \"Rust runtime\" are not available in the\nC runtime, and `raw_rx`, `driver_tx` and `raw_tx_rate` need the `udp6` link, which is not ported yet.",
+      "fields": [
+        {
+          "description": "A-MPDU aggregation in both directions. Default: on.",
+          "name": "ampdu",
+          "tag": 1,
+          "type": "Switch",
+          "x-c": {
+            "kind": "u8",
+            "offset": 4,
+            "size": 1
+          }
+        },
+        {
+          "description": "802.11b rates; applied before the radio starts. Default: off (DMesh's tested baseline).",
+          "name": "rates_11b",
+          "tag": 2,
+          "type": "Switch",
+          "x-c": {
+            "kind": "u8",
+            "offset": 5,
+            "size": 1
+          }
+        },
+        {
+          "description": "Rust runtime: the firmware takes the received frames of the station before the network stack.",
+          "name": "raw_rx",
+          "tag": 3,
+          "type": "Switch",
+          "x-c": {
+            "kind": "u8",
+            "offset": 6,
+            "size": 1
+          }
+        },
+        {
+          "description": "Rust runtime: station egress through the driver's data path; `off` is raw 802.11 injection.",
+          "name": "driver_tx",
+          "tag": 4,
+          "type": "Switch",
+          "x-c": {
+            "kind": "u8",
+            "offset": 7,
+            "size": 1
+          }
+        },
+        {
+          "description": "Standard BSSID filtering of the station's receive lane. Default: off, so frames of other BSSIDs reach unassociated ESP-NOW receive.",
+          "name": "bssid_check",
+          "tag": 5,
+          "type": "Switch",
+          "x-c": {
+            "kind": "u8",
+            "offset": 8,
+            "size": 1
+          }
+        },
+        {
+          "description": "Rust runtime: raw transmit rate (driver rate code); 0 the driver default.",
+          "name": "raw_tx_rate",
+          "tag": 6,
+          "type": "u8",
+          "x-c": {
+            "kind": "u8",
+            "offset": 9,
+            "size": 1
+          }
+        },
+        {
+          "description": "Static receive buffers, 2..64.",
+          "name": "rx_static",
+          "tag": 7,
+          "type": "u16",
+          "x-c": {
+            "kind": "u16",
+            "offset": 12,
+            "size": 2
+          }
+        },
+        {
+          "description": "Dynamic receive buffers, 2..128.",
+          "name": "rx_dynamic",
+          "tag": 8,
+          "type": "u16",
+          "x-c": {
+            "kind": "u16",
+            "offset": 14,
+            "size": 2
+          }
+        },
+        {
+          "description": "Dynamic transmit buffers, 4..128.",
+          "name": "tx_dynamic",
+          "tag": 9,
+          "type": "u16",
+          "x-c": {
+            "kind": "u16",
+            "offset": 16,
+            "size": 2
+          }
+        },
+        {
+          "description": "Receive block-ack window, 2..64; the driver limits it by the receive buffers.",
+          "name": "rx_ba",
+          "tag": 10,
+          "type": "u16",
+          "x-c": {
+            "kind": "u16",
+            "offset": 18,
+            "size": 2
+          }
+        }
+      ],
+      "kind": "record",
+      "name": "Tuning",
+      "x-c": {
+        "align": 4,
+        "c": "xip_wifi_tuning",
+        "rust": "WifiTuning",
+        "size": 20,
+        "size_field": {
+          "offset": 0,
+          "size": 4
+        }
+      }
+    },
+    {
+      "fields": [
+        {
+          "description": "The name; not always text.",
+          "name": "ssid",
+          "tag": 1,
+          "type": "bytes"
+        },
+        {
+          "description": "The access point, 6 bytes.",
+          "name": "bssid",
+          "tag": 2,
+          "type": "bytes"
+        },
+        {
+          "description": "Signal in dBm.",
+          "name": "rssi",
+          "tag": 3,
+          "type": "i8"
+        },
+        {
+          "description": "Primary channel.",
+          "name": "channel",
+          "tag": 4,
+          "type": "u8"
+        },
+        {
+          "description": "Security.",
+          "name": "auth",
+          "tag": 5,
+          "type": "Auth"
+        }
+      ],
+      "kind": "row",
+      "name": "Network"
+    },
+    {
+      "kind": "enum",
+      "name": "StaState",
+      "values": [
+        {
+          "description": "Not running.",
+          "name": "off",
+          "value": 0
+        },
+        {
+          "description": "Joining or rejoining.",
+          "name": "joining",
+          "value": 1
+        },
+        {
+          "description": "Joined, with an address.",
+          "name": "up",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "kind": "enum",
+      "name": "Auth",
+      "values": [
+        {
+          "description": "No security.",
+          "name": "open",
+          "value": 0
+        },
+        {
+          "description": "WEP.",
+          "name": "wep",
+          "value": 1
+        },
+        {
+          "description": "WPA.",
+          "name": "wpa",
+          "value": 2
+        },
+        {
+          "description": "WPA2.",
+          "name": "wpa2",
+          "value": 3
+        },
+        {
+          "description": "WPA/WPA2.",
+          "name": "wpa_wpa2",
+          "value": 4
+        },
+        {
+          "description": "Enterprise.",
+          "name": "enterprise",
+          "value": 5
+        },
+        {
+          "description": "WPA3.",
+          "name": "wpa3",
+          "value": 6
+        }
+      ]
+    },
+    {
+      "kind": "enum",
+      "name": "Switch",
+      "values": [
+        {
+          "description": "The device's own default.",
+          "name": "default",
+          "value": 0
+        },
+        {
+          "description": "Enabled.",
+          "name": "on",
+          "value": 1
+        },
+        {
+          "description": "Disabled.",
+          "name": "off",
+          "value": 2
+        }
+      ]
+    }
+  ]
+}

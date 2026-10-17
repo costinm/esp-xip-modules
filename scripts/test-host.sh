@@ -11,14 +11,11 @@ mkdir -p target
 export ESP_WIFI_LOADER_DIR="${ESP_WIFI_LOADER_DIR:-$ROOT/../esp-wifi-loader}"
 if [[ $what == abi || $what == all ]]; then
     python3 tests/test_dependencies.py
-    python3 tools/gen_abi.py --check
-    python3 tools/gen_catalog.py --check
+    scripts/gen.sh --check
 fi
 if [[ $what == c || $what == all ]]; then
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_info_cache tests/host/test_info_cache.c -lpthread
     target/test_info_cache
-    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_profile tests/host/test_profile.c
-    target/test_profile
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include \
         -o target/test_flash_hal tests/host/test_flash_hal.c components/xip_runtime/src/xip_pool.c
     target/test_flash_hal
@@ -33,6 +30,9 @@ if [[ $what == c || $what == all ]]; then
     gcc -Wall -Wextra -fsanitize=address,undefined -g -I components/xip_runtime/include -o target/test_pool tests/host/test_pool.c \
         components/xip_runtime/src/xip_pool.c -lpthread
     target/test_pool
+    # the ESP-NOW action frame: the C codec against the vectors generated from DMesh's code (the Rust twin checks the same file)
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -o target/test_espnow_frame tests/host/test_espnow_frame.c
+    target/test_espnow_frame tests/data/espnow-frames.txt
 fi
 if [[ $what == rust || $what == all ]]; then
     # the crates and the Rust modules: logic on a PC (the images are built by scripts/build.sh with the esp toolchain)
@@ -42,6 +42,8 @@ if [[ $what == rust || $what == all ]]; then
     # the host-runtime runs the modules (C and Rust, built for this machine) against the host table: virtual time, fixtures
     scripts/build-host-modules.sh >/dev/null
     cargo test --quiet --manifest-path crates/xip-runtime-host/Cargo.toml
+    # the same console cases against the Rust console (mod_con)
+    XIP_CONSOLE=mod_con cargo test --quiet --manifest-path crates/xip-runtime-host/Cargo.toml --test console
 fi
 if [[ $what == python || $what == all ]]; then
     python3 tests/test_tools.py      # tools, ABI generator, module build (needs the toolchains for that part)

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #pragma once
-/* Hand-maintained native PSA table for ESP-IDF 6.0.2. Independent of ABI.md.
+/* Hand-maintained native PSA table for ESP-IDF 6.0.2. Not part of the generated xip.h.
  * Include psa/crypto.h first in SDK code; standalone modules use the copied
  * declarations below. The host checks their layout against its real SDK.
  * No SDK function has an added host/user argument. */

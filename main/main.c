@@ -11,7 +11,6 @@
 #include "xip_runtime.h"
 #include "xip_loader.h"
 #include "xip_wifi.h"
-#include "xip_transport.h"
 
 static const char *TAG = "main";
 
@@ -48,9 +47,9 @@ static int on_service(void *ctx, const char *module, uint16_t tag, const uint8_t
  * This is a volatile request; it never creates a separate profile setting. */
 static void boot_network(const xip_host_hooks_t *hooks)
 {
-    xip_bearer_profile profile = {.size = sizeof(profile)};
+    xip_wifi_intent now = {.size = sizeof(now)};
     uint32_t generation;
-    if (!xip_transport_get(&profile, &generation) && profile.ssid_len) return;
+    if (!xip_wifi_get_intent(&now, &generation) && now.sta_ssid_len) return;
     char ssid[33] = {0}, secret[64] = {0};
     nvs_handle_t nvs;
     if (nvs_open("wl", NVS_READONLY, &nvs) != ESP_OK) return;
@@ -60,16 +59,14 @@ static void boot_network(const xip_host_hooks_t *hooks)
     nvs_close(nvs);
     if (rc != ESP_OK || n <= 1 || n > sizeof(ssid) || m > sizeof(secret)) return;
     /* Add the shared boot keys, preserving the loader's original keys. */
-    if (!hooks->wifi_config || hooks->wifi_config((const uint8_t *)ssid, n-1,
-                                                (const uint8_t *)secret, m-1)) return;
-    uint8_t request[128]; xip_cbor_w w; xip_cbor_init(&w, request, sizeof(request));
-    xip_cbor_map(&w, 4);
-    xip_cbor_uint(&w, 1); xip_cbor_uint(&w, 1);
-    xip_cbor_uint(&w, 2); xip_cbor_text(&w, ssid, n-1);
-    xip_cbor_uint(&w, 17); xip_cbor_text(&w, secret, m-1);
-    xip_cbor_uint(&w, 16); xip_cbor_uint(&w, 0);
-    int len = xip_cbor_done(&w);
-    if (len > 0) (void)xip_transport_set(request, (size_t)len, &generation);
+    if (hooks->nv) {
+        (void)hooks->nv("sta_ssid", 8, (const uint8_t *)ssid, n-1, NULL, 0);
+        (void)hooks->nv("sec:sta", 7, (const uint8_t *)secret, m-1, NULL, 0);
+    }
+    xip_wifi_intent want = {.size = sizeof(want), .radio = 1, .sta = 1};
+    memcpy(want.sta_ssid, ssid, n-1); want.sta_ssid_len = n-1;
+    memcpy(want.sta_psk, secret, m-1); want.sta_psk_len = m-1;
+    (void)xip_wifi_set_intent(&want, &generation);
 }
 
 void app_main(void)

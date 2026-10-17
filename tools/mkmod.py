@@ -82,53 +82,40 @@ def cbor(obj):
     raise TypeError(obj)
 
 
-def manifest_of_api(api_text, autostart=None, flash_slots=()):
-    """The manifest of a module (abi/API.md, module_manifest): the catalog of its API.md in compact CBOR, what the console
-    needs instead of IDs compiled into it. b"" when the file describes no module.
+def manifest_with(base, autostart=None, flash_slots=()):
+    """The manifest of a module (include/xip.h, module_manifest): the catalog of its API.md in compact CBOR, which the
+    console needs instead of IDs compiled into it, as `mesh-api-gen --out-manifest` writes it (`scripts/gen.sh`), plus
+    what only this build knows:
 
-      {1: name, 2: component,
-       3: [{1: method id, 2: method name, 3: request fields (index), 4: response fields (index)}, ...],
-       4: [[type name, [fields]], ...],                      (record types the fields refer to; absent if none)
-       5: [[fields], ...],                                   (the field lists the methods point at, each stored once)
-       6: start request,                                     (only if the module starts at boot: text, may be empty)
-       7: flash slot indices}                                (only if flash writes are declared)
-      field = [tag, name, kind]  or  [tag, name, kind, type name]
-      kind  = 0 any, 1 text, 2 bool, 3 uint, 4 int, 5 bytes, 6 map, 7 array   (the kinds of the console's text syntax)
+      6: start request     (the module starts at boot: text, may be empty)
+      7: flash slot indices (flash writes are declared)
+
+    `base` is the generated map (keys 1..5); b"" (no API.md) stays b"" unless one of the two is asked for.
     """
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from apimd import module_api, module_types
-    from gen_catalog import kind_of
-    comps = module_api(api_text)
-    if not comps:
+    if not base:
+        if autostart is not None or flash_slots:
+            sys.exit("--autostart and --flash-slots require an API.md next to the sources")
         return b""
-    types = module_types(api_text)
-    records = {name: i for i, name in enumerate(sorted(types))}
-
-    def fields(rows):
-        out = []
-        for tag, fname, ftype in rows:
-            kind, rec = kind_of(ftype, records)
-            out.append([tag, fname, kind] + ([sorted(types)[rec - 1]] if rec else []))
-        return out
-
-    name, cid, methods = comps[0]
-    lists = []
-
-    def index(rows):                       # shared request/response tables are stored once
-        f = fields(rows)
-        if f not in lists:
-            lists.append(f)
-        return lists.index(f)
-
-    doc = {1: name, 2: cid, 3: [{1: mid, 2: mname, 3: index(req), 4: index(resp)} for mname, mid, _s, req, resp in methods]}
-    if types:
-        doc[4] = [[tname, fields(types[tname])] for tname in sorted(types)]
-    doc[5] = lists
+    count = base[0] - 0xa0
+    if base[0] & 0xe0 != 0xa0 or count > 21:
+        raise ValueError("a manifest is a small definite-length map")
+    extra = b""
     if autostart is not None:
-        doc[6] = autostart
+        extra += cbor(6) + cbor(autostart)
+        count += 1
     if flash_slots:
-        doc[7] = sorted(set(flash_slots))
-    return cbor(doc)
+        extra += cbor(7) + cbor(sorted(set(flash_slots)))
+        count += 1
+    return bytes([0xa0 + count]) + base[1:] + extra
+
+
+def manifest_beside(api_path, autostart=None, flash_slots=()):
+    """The manifest of the module whose API.md is `api_path`: the checked-in file beside it, `API.manifest`."""
+    path = os.path.splitext(api_path)[0] + ".manifest"
+    if not os.path.exists(path):
+        sys.exit(f"{path} is missing: run scripts/gen.sh (it needs mesh-api-gen from ssh-mesh)")
+    with open(path, "rb") as f:
+        return manifest_with(f.read(), autostart, flash_slots)
 
 
 def api_beside(sources, cargo):
@@ -169,7 +156,8 @@ def cargo_link(cfg, cargo, window, link_script, tmp):
     def link(data_vma):
         extra = ["-C", "relocation-model=static", "-C", "llvm-args=--jump-table-density=1000000",
                  "-C", "llvm-args=--min-jump-table-entries=1000000"] if cfg["fixed"] else ["-C", "relocation-model=pic"]
-        rustflags = ["-C", "opt-level=s", "-C", "lto=fat", "-C", "codegen-units=1", *extra,
+        # -Zlocation-detail=none: a panic location is a static with a pointer to the file name, which a module image (no relocations) cannot hold
+        rustflags = ["-C", "opt-level=s", "-C", "lto=fat", "-C", "codegen-units=1", "-Zlocation-detail=none", *extra,
                      "-C", f"link-arg=-Wl,--defsym=MODULE_VMA={window + dmod.HEADER_SIZE}",
                      "-C", "link-arg=-Wl,-e,xip_handle", "-C", "link-arg=-Wl,-u,xip_handle",
                      "-C", f"link-arg=-T{link_script}", "-C", "link-arg=-nostdlib", "-C", "link-arg=-Wl,--gc-sections"]
@@ -257,7 +245,7 @@ def build(chip, slot, sources, out, stack=8192, features=0, state=0, defines=(),
                 entry = int(line.split()[-1], 16)
         code = open(raw, "rb").read()
         api = api_beside(sources, cargo)
-        manifest = manifest_of_api(open(api).read(), autostart, flash_slots) if api else b""
+        manifest = manifest_beside(api, autostart, flash_slots) if api else manifest_with(b"", autostart, flash_slots)
         if (autostart is not None or flash_slots) and not api:
             sys.exit("--autostart and --flash-slots require an API.md next to the sources")
         image = dmod.pack(code, entry - window, tag, code_vma=window, data_vma=data_window, stack_bytes=stack,

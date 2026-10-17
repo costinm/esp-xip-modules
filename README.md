@@ -51,7 +51,7 @@ scripts/build.sh esp32c6
 
 Start with [mod_hello](modules/mod_hello) for C or [mod_hw](modules/mod_hw) for Rust.
 [build-mod.sh](scripts/build-mod.sh) builds a module from its directory.
-The public module interface is documented in [abi/API.md](abi/API.md).
+The public module interface is `include/xip.h` (generated from the Rust declarations in `crates/xip-abi`, documented there: `cargo doc -p xip-abi`); the CBOR, JSON and text view of the APIs is in [api/](api/).
 
 The runtime starts installed modules that request auto-start. The optional console
 provides device inspection and module control; the optional installer comes from

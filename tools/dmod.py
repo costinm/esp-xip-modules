@@ -1,20 +1,17 @@
-"""The module image header (DMOD). Layout and constants come from abi/API.md, the same source as
-include/xip.h, so the packer, the tests and the device cannot disagree."""
+"""The module image header (DMOD). Constants are read from include/xip.h (generated from
+crates/xip-abi/src/host.rs), so the packer, the tests and the device cannot disagree."""
 import os
+import re
 import struct
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import gen_abi  # noqa: E402
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "include", "xip.h")) as _f:
+    _CONST = {m.group(1): int(m.group(2), 0) for m in re.finditer(r"^#define XIP_(\w+) (0x[0-9a-fA-F]+|\d+)u?\b", _f.read(), re.M)}
 
-_ABI = gen_abi.load()
-
-ABI_VERSION = _ABI["abi"]["version"]
-_DMOD = {n: v for g in _ABI["constants"] if g["group"] == "DMOD" for n, v, _ in g["items"]}
-MAGIC = _DMOD["MAGIC"]
-HEADER_SIZE = _DMOD["HEADER_SIZE"]
-FLAG_FIXED_VMA = _DMOD["FLAG_FIXED_VMA"]
-FEATURES = {n: v for g in _ABI["constants"] if g["group"] == "FEAT" for n, v, _ in g["items"]}
+ABI_VERSION = _CONST["ABI_VERSION"]
+MAGIC = _CONST["DMOD_MAGIC"]
+HEADER_SIZE = _CONST["DMOD_HEADER_SIZE"]
+FLAG_FIXED_VMA = _CONST["DMOD_FLAG_FIXED_VMA"]
+FEATURES = {n[5:]: v for n, v in _CONST.items() if n.startswith("FEAT_")}
 
 # magic u32, abi u16, header_size u16, entry u32, image_size u32, tag u16, reserved u16,
 # code_vma u32, data_vma u32, stack_bytes u32, required_features u32, flags u32, state_bytes u32,

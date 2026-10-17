@@ -12,7 +12,6 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dmod  # noqa: E402
-import gen_abi  # noqa: E402
 import mkmod  # noqa: E402
 import loader_tools  # noqa: E402,F401  (esp-wifi-loader's tools)
 import sign  # noqa: E402
@@ -25,31 +24,10 @@ def read(*path):
 
 
 class Abi(unittest.TestCase):
-    def test_generated_files_are_current(self):
-        r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "gen_abi.py"), "--check"], capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-
-    def test_lock_detects_a_changed_slot(self):
-        d = gen_abi.load()
-        lock = gen_abi.lock_data(d)
-        self.assertEqual(gen_abi.lock_problems(d, lock), [])
-        lock["entries"][3] = "int sleep_ms(int ms)"
-        self.assertTrue(any("slot 3 changed" in p for p in gen_abi.lock_problems(d, lock)))
-        lock = gen_abi.lock_data(d)
-        lock["entries"].append("int removed(void)")
-        self.assertTrue(any("removed" in p for p in gen_abi.lock_problems(d, lock)))
-        lock = gen_abi.lock_data(d)
-        lock["entries"] = lock["entries"][:-2]          # an older release: appended slots are fine
-        self.assertEqual(gen_abi.lock_problems(d, lock), [])
-
-    def test_header_matches_the_host_table_size(self):
-        n = len(gen_abi.load()["entry"])
-        self.assertIn(f"== {16 + 4 * n}, \"xip_host layout\"", read("include", "xip.h"))
-
     def test_python_and_c_agree_on_the_image_header(self):
         header = read("include", "xip.h")
-        self.assertIn(f"#define XIP_DMOD_MAGIC 0x{dmod.MAGIC:x}u", header)
-        self.assertIn(f"#define XIP_ABI_VERSION {dmod.ABI_VERSION}u", header)
+        self.assertIn(f"#define XIP_DMOD_MAGIC {dmod.MAGIC}", header)
+        self.assertIn(f"#define XIP_ABI_VERSION {dmod.ABI_VERSION}", header)
         self.assertEqual(dmod._FMT.size, 64)
 
 
@@ -304,68 +282,28 @@ def cbor_decode(data, pos=0):
 
 
 class Manifest(unittest.TestCase):
-    API = """# `demo` API (7)
-
-## 1. `ping` — x
-
-### Request
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `value` | `string` | |
-| 2 | `wait` | `uint` | |
-
-### Response
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `value` | `string` | |
-
-## 20. `pong` — y
-
-### Request
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `value` | `string` | |
-| 2 | `wait` | `uint` | |
-
-### Response
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `value` | `string` | |
-"""
-
-    def test_the_manifest_is_the_catalog_of_the_api_md(self):
-        m, end = cbor_decode(mkmod.manifest_of_api(self.API))
-        self.assertEqual(m[1], "demo")
-        self.assertEqual(m[2], 7)
-        self.assertEqual([(x[1], x[2]) for x in m[3]], [(1, "ping"), (20, "pong")])
-        requests = m[5][m[3][0][3]]
-        self.assertEqual(requests, [[1, "value", 1], [2, "wait", 3]])        # tag, name, kind (text, uint)
-        self.assertEqual(m[3][0][3], m[3][1][3], "an identical field list is stored once")
-        self.assertEqual(len(m[5]), 2)
-        self.assertEqual(mkmod.manifest_of_api("no module here"), b"")
+    DEMO = open(os.path.join(ROOT, "tests", "data", "manifest-demo.hex")).read().strip()
 
     def test_the_manifest_is_the_one_ssh_mesh_writes(self):
-        """The same API.md and the same bytes as ssh-mesh's mesh-api-gen (crates/mesh-api-gen/tests/data, a test there)."""
+        """mkmod adds what only the build knows to the manifest mesh-api-gen wrote (crates/mesh-api-gen/tests/data there)."""
         data = os.path.join(ROOT, "tests", "data")
-        api = open(os.path.join(data, "manifest-demo-API.md")).read()
-        self.assertEqual(mkmod.manifest_of_api(api).hex(), open(os.path.join(data, "manifest-demo.hex")).read().strip())
-        self.assertEqual(mkmod.manifest_of_api(api, autostart="").hex(),
+        base = bytes.fromhex(self.DEMO)
+        self.assertEqual(mkmod.manifest_with(base), base)
+        self.assertEqual(mkmod.manifest_with(base, autostart="").hex(),
                          open(os.path.join(data, "manifest-demo-autostart.hex")).read().strip())
-        m, _ = cbor_decode(mkmod.manifest_of_api(api, autostart="serve"))
+        m, _ = cbor_decode(mkmod.manifest_with(base, autostart="serve"))
         self.assertEqual(m[6], "serve")
         self.assertEqual(m[4][0][0], "Row")
+        self.assertEqual(mkmod.manifest_with(b""), b"")
 
     def test_flash_slot_declaration_is_in_manifest(self):
-        m, _ = cbor_decode(mkmod.manifest_of_api(self.API, flash_slots=(3, 1, 3)))
+        base = bytes.fromhex(self.DEMO)
+        m, _ = cbor_decode(mkmod.manifest_with(base, flash_slots=(3, 1, 3)))
         self.assertEqual(m[7], [1, 3])
-        self.assertNotIn(7, cbor_decode(mkmod.manifest_of_api(self.API))[0])
+        self.assertNotIn(7, cbor_decode(mkmod.manifest_with(base))[0])
 
     def test_the_manifest_sits_after_the_code_inside_the_image(self):
-        m = mkmod.manifest_of_api(self.API)
+        m = mkmod.manifest_with(bytes.fromhex(self.DEMO))
         image = dmod.pack(b"\x01\x02\x03\x04" * 5, 0x44, 7, manifest=m)
         h = dmod.unpack(image)
         self.assertEqual(h["manifest_offset"], 64 + 20)
@@ -375,6 +313,11 @@ class Manifest(unittest.TestCase):
         self.assertEqual(len(image) % 4, 0)
         plain = dmod.unpack(dmod.pack(b"\x01\x02\x03\x04" * 2, 0x44, 7))
         self.assertEqual((plain["manifest_offset"], plain["manifest_size"]), (0, 0))
+
+    def test_every_module_api_has_its_checked_in_manifest(self):
+        import glob
+        for api in glob.glob(os.path.join(ROOT, "modules", "*", "API.md")):
+            self.assertTrue(os.path.exists(os.path.splitext(api)[0] + ".manifest"), api)
 
     def test_a_built_module_carries_its_manifest(self):
         image_path = os.path.join(ROOT, "target", "out", "esp32c6", "modules", "mod_test.dmod")

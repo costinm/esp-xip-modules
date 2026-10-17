@@ -1,0 +1,312 @@
+{
+  "components": [
+    {
+      "doc": "The host's own status, as the CBOR, JSON and text view of its calls. The calls themselves, with their arguments and C\nsignatures, are the members of the host table (`xip_host` in `include/xip.h`, documented in `crates/xip-abi/src/host.rs`);\nhere are the maps they return. Method numbers are the slots of the host table. Wi-Fi is in `wifi.API.md`.",
+      "index": 0,
+      "name": "host"
+    }
+  ],
+  "format": "mesh-api/1",
+  "methods": [
+    {
+      "access": "authenticated",
+      "component": "host",
+      "doc": "RAM is the scarce resource on these chips, so the host reports it to any module that asks. \"Largest block\" is the biggest\nsingle allocation that would succeed now; a heap can have plenty free and still refuse a request (fragmentation). Free\nmemory is tracked, not only reported: `lowest_free` shows the worst moment since boot, which is the number to size things by.",
+      "index": 45,
+      "method": "heap_info",
+      "name": "host.heap_info",
+      "request": {
+        "fields": []
+      },
+      "response": {
+        "fields": [
+          {
+            "description": "Free bytes.",
+            "name": "free",
+            "tag": 1,
+            "type": "u32"
+          },
+          {
+            "description": "The largest block an allocation can get now.",
+            "name": "largest",
+            "tag": 2,
+            "type": "u32"
+          },
+          {
+            "description": "The lowest free count since boot.",
+            "name": "lowest_free",
+            "tag": 3,
+            "type": "u32"
+          },
+          {
+            "description": "Total bytes of the heap.",
+            "name": "total",
+            "tag": 4,
+            "type": "u32"
+          },
+          {
+            "description": "Free internal RAM.",
+            "name": "free_internal",
+            "tag": 5,
+            "type": "u32"
+          },
+          {
+            "description": "The largest internal block.",
+            "name": "largest_internal",
+            "tag": 6,
+            "type": "u32"
+          }
+        ]
+      },
+      "summary": "Free memory of the device",
+      "visibility": "public"
+    },
+    {
+      "access": "authenticated",
+      "component": "host",
+      "doc": "Built-in records are read during the call; contributed records (a component's `info_publish`) are cached and may be stale.\nThis call never invokes another module. No console module is needed. No partial record is returned on buffer overflow.",
+      "index": 60,
+      "method": "device_info",
+      "name": "host.device_info",
+      "request": {
+        "fields": []
+      },
+      "response": {
+        "fields": [
+          {
+            "description": "The device.",
+            "name": "device",
+            "tag": 1,
+            "type": "Device"
+          },
+          {
+            "description": "The Wi-Fi status; an empty map when the host has none.",
+            "name": "wifi",
+            "tag": 2,
+            "type": "WifiStatus"
+          },
+          {
+            "description": "As `heap_info`.",
+            "name": "heap",
+            "tag": 3,
+            "type": "Heap"
+          },
+          {
+            "description": "Every module slot; an empty array when the host cannot enumerate them.",
+            "name": "modules",
+            "tag": 4,
+            "type": "Slot[]"
+          },
+          {
+            "description": "`{component: {method: {1: updated_ms, 2: status_map}}}`, milliseconds since boot.",
+            "name": "components",
+            "tag": 5,
+            "type": "map"
+          }
+        ]
+      },
+      "summary": "Structured device and component status",
+      "visibility": "public"
+    }
+  ],
+  "types": [
+    {
+      "fields": [
+        {
+          "description": "Milliseconds since boot.",
+          "name": "uptime_ms",
+          "tag": 1,
+          "type": "u64"
+        },
+        {
+          "description": "An ESP chip model number.",
+          "name": "chip",
+          "tag": 2,
+          "type": "u32"
+        },
+        {
+          "description": "Bytes.",
+          "name": "flash_size",
+          "tag": 3,
+          "type": "u32"
+        },
+        {
+          "description": "The running partition; omitted when the platform cannot identify it.",
+          "name": "partition_label",
+          "tag": 4,
+          "type": "string"
+        },
+        {
+          "description": "Its address.",
+          "name": "partition_address",
+          "tag": 5,
+          "type": "u32"
+        },
+        {
+          "description": "Its size.",
+          "name": "partition_size",
+          "tag": 6,
+          "type": "u32"
+        }
+      ],
+      "kind": "row",
+      "name": "Device"
+    },
+    {
+      "fields": [
+        {
+          "description": "0 off, 1 joining, 2 up (as `wifi.state`).",
+          "name": "sta",
+          "tag": 1,
+          "type": "u8"
+        },
+        {
+          "description": "The joined network, when up.",
+          "name": "ssid",
+          "tag": 2,
+          "type": "string"
+        },
+        {
+          "description": "IPv4 address as text, when up.",
+          "name": "ip",
+          "tag": 3,
+          "type": "string"
+        },
+        {
+          "description": "Signal in dBm, when up.",
+          "name": "rssi",
+          "tag": 4,
+          "type": "i8"
+        },
+        {
+          "description": "The soft AP is running.",
+          "name": "ap_up",
+          "tag": 5,
+          "type": "bool"
+        },
+        {
+          "description": "The channel in use.",
+          "name": "channel",
+          "tag": 6,
+          "type": "u8"
+        }
+      ],
+      "kind": "row",
+      "name": "WifiStatus"
+    },
+    {
+      "fields": [
+        {
+          "description": "Free bytes.",
+          "name": "free",
+          "tag": 1,
+          "type": "u32"
+        },
+        {
+          "description": "The largest block an allocation can get now.",
+          "name": "largest",
+          "tag": 2,
+          "type": "u32"
+        },
+        {
+          "description": "The lowest free count since boot.",
+          "name": "lowest_free",
+          "tag": 3,
+          "type": "u32"
+        },
+        {
+          "description": "Total bytes of the heap.",
+          "name": "total",
+          "tag": 4,
+          "type": "u32"
+        },
+        {
+          "description": "Free internal RAM.",
+          "name": "free_internal",
+          "tag": 5,
+          "type": "u32"
+        },
+        {
+          "description": "The largest internal block.",
+          "name": "largest_internal",
+          "tag": 6,
+          "type": "u32"
+        }
+      ],
+      "kind": "row",
+      "name": "Heap"
+    },
+    {
+      "fields": [
+        {
+          "description": "The slot name.",
+          "name": "name",
+          "tag": 1,
+          "type": "string"
+        },
+        {
+          "description": "The component number of the module.",
+          "name": "tag",
+          "tag": 2,
+          "type": "u16"
+        },
+        {
+          "description": "A module is installed.",
+          "name": "installed",
+          "tag": 3,
+          "type": "bool"
+        },
+        {
+          "description": "The module is running.",
+          "name": "running",
+          "tag": 4,
+          "type": "bool"
+        },
+        {
+          "description": "Of the installed package.",
+          "name": "version",
+          "tag": 5,
+          "type": "u32"
+        },
+        {
+          "description": "What the module returned the last time.",
+          "name": "last",
+          "tag": 6,
+          "type": "i32"
+        },
+        {
+          "description": "Handler calls so far.",
+          "name": "runs",
+          "tag": 7,
+          "type": "u32"
+        },
+        {
+          "description": "Duration of the last run.",
+          "name": "ms",
+          "tag": 8,
+          "type": "u32"
+        },
+        {
+          "description": "Worker stack high-water mark.",
+          "name": "stack_free",
+          "tag": 9,
+          "type": "u32"
+        },
+        {
+          "description": "Result of the last start attempt's image check.",
+          "name": "check",
+          "tag": 10,
+          "type": "i32"
+        },
+        {
+          "description": "The module stopped with memory it had not freed: it cannot be replaced until the device restarts.",
+          "name": "reboot",
+          "tag": 11,
+          "type": "bool"
+        }
+      ],
+      "kind": "row",
+      "name": "Slot"
+    }
+  ]
+}

@@ -1,0 +1,496 @@
+{
+  "components": [
+    {
+      "doc": "Sleep and what the power code is doing, as the network-facing view of the `power` component (`xip_power` in `include/xip.h`, documented in\n`crates/xip-abi/src/power.rs`). The runtime owns the sequence that makes light sleep work with the radio (DMesh's tested one); a module or the\nconsole decides when. Each sleep stops the radio the way an epoch ends, arms the timer wake, light-sleeps, re-arms the UART receive, brings the\nradio back with the same settings and delivers `HOST_WAKE` (an alarm with the window flag) to the modules.",
+      "index": 11,
+      "name": "power"
+    }
+  ],
+  "format": "mesh-api/1",
+  "methods": [
+    {
+      "access": "any of `system`, `mesh.owner`, `mesh.admin`",
+      "component": "power",
+      "doc": "Returns at once; the sleeps run on the host worker with `awake_ms` awake between them so modules run. A rejected sleep (a power-management lock)\nrestores the radio once and drops the rest of the request. On USB-Serial/JTAG the port drops across a sleep.",
+      "errors": [
+        {
+          "description": "A duration under 10 ms.",
+          "name": "invalid_argument"
+        },
+        {
+          "description": "A request is already running.",
+          "name": "unavailable"
+        }
+      ],
+      "execution": "non-blocking",
+      "index": 1,
+      "method": "sleep",
+      "name": "power.sleep",
+      "request": {
+        "type": "Sleep"
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "Timer light sleep, a number of cycles",
+      "visibility": "public",
+      "x-c": {
+        "c_table": "xip_power",
+        "component": "power",
+        "member": "sleep",
+        "offset": 8,
+        "params": [
+          {
+            "name": "ctx",
+            "role": "ctx",
+            "type": "c_void"
+          },
+          {
+            "kind": "PowerSleep",
+            "name": "request",
+            "role": "in",
+            "type": "PowerSleep"
+          }
+        ],
+        "table": "Power"
+      }
+    },
+    {
+      "access": "authenticated",
+      "component": "power",
+      "index": 2,
+      "method": "info",
+      "name": "power.info",
+      "request": {
+        "fields": []
+      },
+      "response": {
+        "type": "Info"
+      },
+      "summary": "The power state and the FreeRTOS numbers",
+      "visibility": "public",
+      "x-c": {
+        "c_table": "xip_power",
+        "component": "power",
+        "member": "info",
+        "offset": 12,
+        "params": [
+          {
+            "name": "ctx",
+            "role": "ctx",
+            "type": "c_void"
+          },
+          {
+            "kind": "PowerInfo",
+            "name": "info",
+            "role": "out",
+            "type": "PowerInfo"
+          }
+        ],
+        "table": "Power"
+      }
+    },
+    {
+      "access": "any of `system`, `mesh.owner`, `mesh.admin`",
+      "component": "power",
+      "doc": "Who keeps the CPU frequency up or light sleep out (`esp_pm_dump_locks`).",
+      "index": 3,
+      "method": "dump_locks",
+      "name": "power.dump_locks",
+      "request": {
+        "fields": []
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "Print the power-management locks to the device log",
+      "visibility": "public",
+      "x-c": {
+        "c_table": "xip_power",
+        "component": "power",
+        "member": "dump_locks",
+        "offset": 16,
+        "params": [
+          {
+            "name": "ctx",
+            "role": "ctx",
+            "type": "c_void"
+          }
+        ],
+        "table": "Power"
+      }
+    },
+    {
+      "access": "any of `system`, `mesh.owner`, `mesh.admin`",
+      "component": "power",
+      "doc": "Name, priority and stack left of every task.",
+      "index": 4,
+      "method": "dump_tasks",
+      "name": "power.dump_tasks",
+      "request": {
+        "fields": []
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "Print the FreeRTOS tasks to the device log",
+      "visibility": "public",
+      "x-c": {
+        "c_table": "xip_power",
+        "component": "power",
+        "member": "dump_tasks",
+        "offset": 20,
+        "params": [
+          {
+            "name": "ctx",
+            "role": "ctx",
+            "type": "c_void"
+          }
+        ],
+        "table": "Power"
+      }
+    }
+  ],
+  "types": [
+    {
+      "fields": [
+        {
+          "description": "Length of each sleep, milliseconds (at least 10).",
+          "name": "duration_ms",
+          "tag": 1,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 4,
+            "size": 4
+          }
+        },
+        {
+          "description": "How many sleeps; 0 is one.",
+          "name": "cycles",
+          "tag": 2,
+          "type": "u16",
+          "x-c": {
+            "kind": "u16",
+            "offset": 8,
+            "size": 2
+          }
+        },
+        {
+          "description": "Awake time between two sleeps so modules run (0: 50).",
+          "name": "awake_ms",
+          "tag": 3,
+          "type": "u16",
+          "x-c": {
+            "kind": "u16",
+            "offset": 10,
+            "size": 2
+          }
+        }
+      ],
+      "kind": "record",
+      "name": "Sleep",
+      "x-c": {
+        "align": 4,
+        "c": "xip_power_sleep",
+        "rust": "PowerSleep",
+        "size": 12,
+        "size_field": {
+          "offset": 0,
+          "size": 4
+        }
+      }
+    },
+    {
+      "fields": [
+        {
+          "description": "0 idle, 1 sleeping, 2 resuming (the radio is coming back), 3 awake between cycles.",
+          "name": "state",
+          "tag": 1,
+          "type": "u8",
+          "x-c": {
+            "kind": "u8",
+            "offset": 4,
+            "size": 1
+          }
+        },
+        {
+          "description": "ESP-IDF power management is configured (frequency scaling).",
+          "name": "pm_configured",
+          "tag": 2,
+          "type": "u8",
+          "x-c": {
+            "kind": "u8",
+            "offset": 5,
+            "size": 1
+          }
+        },
+        {
+          "description": "Automatic light sleep when idle (otherwise sleep is explicit).",
+          "name": "auto_light_sleep",
+          "tag": 3,
+          "type": "u8",
+          "x-c": {
+            "kind": "u8",
+            "offset": 6,
+            "size": 1
+          }
+        },
+        {
+          "description": "FreeRTOS tickless idle is built in.",
+          "name": "tickless_idle",
+          "tag": 4,
+          "type": "u8",
+          "x-c": {
+            "kind": "u8",
+            "offset": 7,
+            "size": 1
+          }
+        },
+        {
+          "description": "CPU frequency now.",
+          "name": "cpu_mhz",
+          "tag": 5,
+          "type": "u16",
+          "x-c": {
+            "kind": "u16",
+            "offset": 8,
+            "size": 2
+          }
+        },
+        {
+          "description": "Lowest frequency of the power configuration.",
+          "name": "min_mhz",
+          "tag": 6,
+          "type": "u16",
+          "x-c": {
+            "kind": "u16",
+            "offset": 10,
+            "size": 2
+          }
+        },
+        {
+          "description": "Highest frequency of the power configuration.",
+          "name": "max_mhz",
+          "tag": 7,
+          "type": "u16",
+          "x-c": {
+            "kind": "u16",
+            "offset": 12,
+            "size": 2
+          }
+        },
+        {
+          "description": "FreeRTOS tick rate.",
+          "name": "tick_hz",
+          "tag": 8,
+          "type": "u16",
+          "x-c": {
+            "kind": "u16",
+            "offset": 14,
+            "size": 2
+          }
+        },
+        {
+          "description": "Sleeps still to run for the request.",
+          "name": "cycles_left",
+          "tag": 9,
+          "type": "u16",
+          "x-c": {
+            "kind": "u16",
+            "offset": 16,
+            "size": 2
+          }
+        },
+        {
+          "description": "Why the last sleep ended (`esp_sleep_wakeup_cause_t`: 4 timer, 7 GPIO, 8 UART, 0 none).",
+          "name": "wake_cause",
+          "tag": 10,
+          "type": "u8",
+          "x-c": {
+            "kind": "u8",
+            "offset": 18,
+            "size": 1
+          }
+        },
+        {
+          "description": "Promiscuous receive is on.",
+          "name": "promiscuous",
+          "tag": 11,
+          "type": "u8",
+          "x-c": {
+            "kind": "u8",
+            "offset": 19,
+            "size": 1
+          }
+        },
+        {
+          "description": "Sleeps attempted.",
+          "name": "sleep_attempts",
+          "tag": 12,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 20,
+            "size": 4
+          }
+        },
+        {
+          "description": "Sleeps that returned without error.",
+          "name": "sleep_entries",
+          "tag": 13,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 24,
+            "size": 4
+          }
+        },
+        {
+          "description": "Sleeps rejected at once (a power-management lock).",
+          "name": "sleep_skipped",
+          "tag": 14,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 28,
+            "size": 4
+          }
+        },
+        {
+          "description": "The last sleep: microseconds asked.",
+          "name": "last_requested_us",
+          "tag": 15,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 32,
+            "size": 4
+          }
+        },
+        {
+          "description": "The last sleep: microseconds it lasted.",
+          "name": "last_duration_us",
+          "tag": 16,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 36,
+            "size": 4
+          }
+        },
+        {
+          "description": "The last sleep: microseconds from wake until the radio was started again.",
+          "name": "last_resume_us",
+          "tag": 17,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 40,
+            "size": 4
+          }
+        },
+        {
+          "description": "FreeRTOS tasks.",
+          "name": "tasks",
+          "tag": 18,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 44,
+            "size": 4
+          }
+        },
+        {
+          "description": "FreeRTOS tick count since boot.",
+          "name": "ticks",
+          "tag": 19,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 48,
+            "size": 4
+          }
+        },
+        {
+          "description": "Internal heap free.",
+          "name": "heap_free",
+          "tag": 20,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 52,
+            "size": 4
+          }
+        },
+        {
+          "description": "Internal heap, lowest ever.",
+          "name": "heap_min",
+          "tag": 21,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 56,
+            "size": 4
+          }
+        },
+        {
+          "description": "Internal heap, largest block.",
+          "name": "heap_largest",
+          "tag": 22,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 60,
+            "size": 4
+          }
+        },
+        {
+          "description": "Frames the early receive filter dropped.",
+          "name": "filter_dropped",
+          "tag": 23,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 64,
+            "size": 4
+          }
+        },
+        {
+          "description": "Promiscuous frames delivered.",
+          "name": "promisc_frames",
+          "tag": 24,
+          "type": "u32",
+          "x-c": {
+            "kind": "u32",
+            "offset": 68,
+            "size": 4
+          }
+        },
+        {
+          "description": "How the last sleep was done: 1 soft, 0 physical. Soft while the console is on USB-Serial/JTAG with a host attached (light sleep powers that port down and the host does not recover the device): the radio is stopped and restarted around a plain delay and the CPU does not sleep. Physical with a UART console or no host.",
+          "name": "soft_sleep",
+          "tag": 25,
+          "type": "u8",
+          "x-c": {
+            "kind": "u8",
+            "offset": 72,
+            "size": 1
+          }
+        }
+      ],
+      "kind": "record",
+      "name": "Info",
+      "x-c": {
+        "align": 4,
+        "c": "xip_power_info",
+        "rust": "PowerInfo",
+        "size": 76,
+        "size_field": {
+          "offset": 0,
+          "size": 4
+        }
+      }
+    }
+  ]
+}

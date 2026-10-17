@@ -52,6 +52,7 @@
               pkgs.bashInteractive
               pkgs.cmake
               pkgs.coreutils
+              pkgs.rust-cbindgen
               pkgs.curl
               pkgs.findutils
               pkgs.gawk
