@@ -29,7 +29,9 @@ struct Console {
 impl Console {
     fn new() -> Console {
         let rt = Runtime::default();
-        let c = rt.add_module(module("mod_console"), 32).unwrap();
+        // XIP_CONSOLE=mod_con runs the same cases against the Rust console
+        let name = std::env::var("XIP_CONSOLE").unwrap_or_else(|_| "mod_console".into());
+        let c = rt.add_module(module(&name), 32).unwrap();
         c.set_component(20);
         c.start(b"");
         rt.run(0);
@@ -178,10 +180,11 @@ fn the_console() {
     k.pump();
     k.check_line("test.echo value=hello", "value=hello\n");
     k.check_line("test.echo hello there", "value=\"hello there\"\n");
-    k.check_line("wifi", "state=off saved_ssid=\"(flash network)\" psk=unset\n");
-    k.check_line("wifi ssid=lab psk=\"two words\"", "saved_ssid=\"lab\" psk=set");
-    k.check_line("wifi start", "state=up ssid=\"lab\" ip=192.168.49.7 rssi=-40 saved_ssid=\"lab\" psk=set\n");
-    assert!(k.rt.state().ssid == "lab" && k.rt.state().psk == "two words" && k.rt.state().wifi_on);
+    k.check_line("wifi", "state=off wanted_ssid=\"\" psk=unset\n");
+    k.check_line("wifi ssid=lab psk=\"two words\"", "state=up ssid=\"lab\" ip=192.168.49.7 rssi=-40 ch=6 wanted_ssid=\"lab\" psk=set\n");
+    k.check_line("wifi start", "state=up ssid=\"lab\" ip=192.168.49.7 rssi=-40 ch=6 wanted_ssid=\"lab\" psk=set\n");
+    let (wanted, generation) = k.rt.wifi_intent();
+    assert!(&wanted.sta_ssid[..3] == b"lab" && &wanted.sta_psk[..9] == b"two words" && wanted.radio == 1 && wanted.sta == 1 && generation == 1);
     k.check_line("wifi stop", "state=off");
     k.check_line("heap", "free=41000 largest=30000 min_free=28000 total=230000 internal_free=38000 internal_largest=26000\n");
     k.check_line("heap regions", "ok (in the device log)\n");
@@ -192,7 +195,7 @@ fn the_console() {
     k.check_line("nv bogus", "bogus is unknown or not set\n");
     k.check_line("wifi scan", "ssid=\"costin\" ch=6 rssi=-41 auth=3 bssid=10:bd:a3:ac:5a:21\nssid=\"\" ch=11 rssi=-80 auth=0 bssid=01:02:03:04:05:06\n");
     k.check_line("wifi bogus", "error: wifi [ssid=NAME]");
-    k.check_line("wifi ssid=", "saved_ssid=\"(flash network)\"");
+    k.check_line("wifi ssid=", "state=off ch=6 wanted_ssid=\"\" psk=set\n");
 
     // the console waits for nothing: two requests in flight, answers in any order, and messages nobody asked for
     k.rt.state_mut().serial_out.clear();
@@ -235,4 +238,53 @@ fn the_console() {
     assert_eq!(k.rt.state().serial_component, -1);
 
     assert!(k.failures.is_empty(), "{:#?}", k.failures);
+}
+
+/// `component.method` of a host component is called through its table, not sent to a module: the fields of the line fill the C
+/// struct, the output struct comes back as text (native.h, generated from `x-c` of api.json).
+#[test]
+fn sleep_and_promiscuous_receive_are_exercised_from_the_console() {
+    let mut k = Console::new();
+    // promiscuous receive needs the radio on
+    k.check_line("wifi.monitor enable=true channel=6", "error: wifi failed: -2\n");
+    k.check_line("wifi.set radio=true sta=false", "generation=1\n");
+    k.check_line("wifi.monitor enable=true channel=6", "ok\n");
+    assert_eq!(k.rt.wifi_monitor().map(|m| (m.enable, m.channel)), Some((1, 6)));
+    k.check_line("wifi.monitor channel=14", "error: wifi failed: -1\n");
+    k.check_line("wifi.monitor enable=false", "ok\n");
+    // sleep: three cycles of 500 ms, the modules get HOST_WAKE after each
+    k.check_line("power.sleep duration_ms=500 cycles=3 awake_ms=100", "ok\n");
+    let r = k.rt.power_requests();
+    assert_eq!((r.len(), r[0].duration_ms, r[0].cycles, r[0].awake_ms), (1, 500, 3, 100));
+    k.check_line("power.sleep duration_ms=5", "error: power failed: -1\n");
+    k.check_line("power.info", "sleep_attempts=3 sleep_entries=3");
+    k.check_line("power.dump_tasks", "ok\n");
+    assert!(k.failures.is_empty(), "{:?}", k.failures);
+}
+
+#[test]
+fn a_method_of_a_host_component_is_called_through_its_table() {
+    let mut k = Console::new();
+    k.check_line("wifi.get", "radio=false sta=false ap=false channel=0\n");
+    k.check_line("wifi.set radio=true sta=true channel=6 sta_ssid=home sta_psk=password", "generation=1\n");
+    let (wanted, generation) = k.rt.wifi_intent();
+    assert!(wanted.radio == 1 && wanted.sta == 1 && wanted.ap == 0 && wanted.channel == 6 && generation == 1);
+    assert!(&wanted.sta_ssid[..4] == b"home" && wanted.sta_ssid_len == 4 && &wanted.sta_psk[..8] == b"password" && wanted.sta_psk_len == 8);
+    assert_eq!(wanted.size as usize, std::mem::size_of::<WifiIntent>());
+    k.check_line("wifi.get", "radio=true sta=true ap=false channel=6 sta_ssid=home sta_psk=set\n");
+    // the whole intent is replaced: what the line does not say is the default again
+    k.check_line("wifi.set ap=true radio=true ap_ssid=lab bssid=hex:010203040506", "generation=2\n");
+    k.check_line("wifi.get", "radio=true sta=false ap=true channel=0 bssid=hex:010203040506 ap_ssid=lab\n");
+    // the host refuses what it does not accept; the console refuses what does not fit the struct
+    k.check_line("wifi.set channel=15 radio=true", "error: wifi failed: -1\n");
+    k.check_line("wifi.set sta_ssid=0123456789012345678901234567890123456789", "error: sta_ssid is too long\n");
+    k.check_line("wifi.set bssid=hex:0102", "error: bssid has the wrong length\n");
+    k.check_line("wifi.set channel=300", "error: channel is out of range\n");
+    // a second component, with switches and 16-bit numbers
+    k.check_line("wifi.set_tuning ampdu=2 rx_static=12", "ok\n");
+    assert_eq!((k.rt.wifi_tuning().ampdu, k.rt.wifi_tuning().rx_static), (TUNE_OFF, 12));
+    k.check_line("wifi.tuning", "ampdu=2 rates_11b=0 raw_rx=0 driver_tx=0 bssid_check=0 raw_tx_rate=0 rx_static=12 rx_dynamic=0 tx_dynamic=0 rx_ba=0\n");
+    k.check_line("wifi.set_tuning rx_static=1", "error: wifi-tuning failed: -1\n");
+    k.check_line("wifi.state", "error: not a call the console can make");
+    assert!(k.failures.is_empty(), "{:?}", k.failures);
 }

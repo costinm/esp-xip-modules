@@ -59,10 +59,6 @@ pub fn nv(key: &[u8], value: Option<&[u8]>, out: &mut [u8]) -> i32 {
     let string_key = match key {
         b"sta_ssid" => Some((c"dmesh", c"sta_ssid", false)),
         b"sec:sta" => Some((c"sec", c"sta", true)),
-        b"uart.baud" => Some((c"dmesh", c"uart.baud", false)),
-        b"uart.mode" => Some((c"dmesh", c"uart.mode", false)),
-        b"nan_dw_interval" => Some((c"dmesh", c"nan_dw_interval", false)),
-        b"mode" => Some((c"dmesh", c"mode", false)),
         _ => None,
     };
     if let Some((namespace, name, secret)) = string_key {
@@ -74,12 +70,8 @@ pub fn nv(key: &[u8], value: Option<&[u8]>, out: &mut [u8]) -> i32 {
                 if value.is_empty() { ns.erase(name)?; }
                 else {
                     let valid = match key {
-                        b"sta_ssid" => crate::profile::valid_ssid(value).is_some(),
+                        b"sta_ssid" => value.len() <= 32,
                         b"sec:sta" => (8..=63).contains(&value.len()),
-                        b"uart.baud" => crate::profile::parse_uart_baud(value).is_some(),
-                        b"uart.mode" => matches!(value, b"ppp" | b"line" | b"off"),
-                        b"nan_dw_interval" => matches!(value, b"1" | b"8" | b"16"),
-                        b"mode" => matches!(value, b"active" | b"sleepy" | b"sleepy-soft"),
                         _ => false,
                     };
                     if !valid { return Err(-1); }
@@ -128,24 +120,16 @@ pub(crate) unsafe extern "C" fn nv_hook(key: *const c_char, key_len: usize, valu
     nv(name, value, out)
 }
 
-/// Existing DMesh boot credentials; transport requests never write these.
-pub fn load_sta(profile: &mut crate::profile::TransportProfile) -> Result<(), i32> {
+/// The boot credentials (`dmesh/sta_ssid`, `sec/sta`, the keys the console and `nv` write) as a station intent.
+pub fn load_sta(intent: &mut xip_abi::WifiIntent) -> Result<(), i32> {
     let settings = Namespace::open(c"dmesh", false)?;
     let secrets = Namespace::open(c"sec", false)?;
     let mut ssid = [0; 33]; let mut secret = [0; 64];
     let n = settings.get_text(c"sta_ssid", &mut ssid)?;
     let m = secrets.get_text(c"sta", &mut secret)?;
-    crate::profile::apply_config(crate::profile::TransportConfig { ssid: Some(&ssid[..n]), passphrase: Some(&secret[..m]), ..Default::default() }, profile).ok_or(-1)
-}
-/// Compatibility wifi_config writes the same individual settings as nv.
-/// It does not publish or save a transport profile.
-pub(crate) fn configure_sta(ssid: &[u8], secret: &[u8]) -> Result<(), i32> {
-    if ssid.len() > 32 || secret.len() > 63 || ssid.contains(&0) || secret.contains(&0) { return Err(-1); }
-    if !secret.is_empty() && secret.len() < 8 { return Err(-1); }
-    let settings = Namespace::open(c"dmesh", true)?; let secrets = Namespace::open(c"sec", true)?;
-    let mut name = [0;33]; name[..ssid.len()].copy_from_slice(ssid);
-    let mut password = [0;64]; password[..secret.len()].copy_from_slice(secret);
-    if ssid.is_empty() { settings.erase(c"sta_ssid")?; } else { settings.set_text(c"sta_ssid", CStr::from_bytes_with_nul(&name[..ssid.len()+1]).map_err(|_| -1)?)?; }
-    if secret.is_empty() { secrets.erase(c"sta")?; } else { secrets.set_text(c"sta", CStr::from_bytes_with_nul(&password[..secret.len()+1]).map_err(|_| -1)?)?; }
-    secrets.commit()?; settings.commit()
+    if !(1..=32).contains(&n) || !(8..=63).contains(&m) { return Err(-1); }
+    intent.sta_ssid = [0; 32]; intent.sta_ssid[..n].copy_from_slice(&ssid[..n]); intent.sta_ssid_len = n as u8;
+    intent.sta_psk = [0; 64]; intent.sta_psk[..m].copy_from_slice(&secret[..m]); intent.sta_psk_len = m as u8;
+    intent.radio = 1; intent.sta = 1;
+    intent.validate()
 }

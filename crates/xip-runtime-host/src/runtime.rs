@@ -105,11 +105,6 @@ pub struct RtState {
     pub modules_cbor: Vec<u8>,
     pub events_cbor: Vec<u8>,
     pub manifest: Vec<u8>,
-    pub wifi_on: bool,
-    pub ssid: String,
-    pub psk: String,
-    pub(crate) saved_ssid: String,
-    pub(crate) saved_psk: String,
     pub(crate) nv_value: String,
     pub(crate) pins: Vec<Pin>,
     pub(crate) spi: HashMap<i32, Box<dyn SpiDevice>>,
@@ -143,6 +138,9 @@ pub(crate) struct QItem {
     pub plen: u16,
     pub from: u32,
     pub id: u64,
+    /// `CALL_LINK*` flags and kind (frames and events of a link), and the time stamp of the call.
+    pub lflags: u32,
+    pub time_us: u32,
     pub data: Vec<u8>,
 }
 
@@ -189,6 +187,7 @@ pub(crate) struct Shared {
     pub pool: Pool,
     pub st: RefCell<RtState>,
     pub insts: RefCell<Vec<Rc<Inst>>>,
+    pub links: RefCell<crate::link::Links>,
 }
 
 /// The runtime. Single threaded and deterministic: the application calls [`Runtime::run`] and the modules' handlers run
@@ -229,11 +228,6 @@ impl Runtime {
             modules_cbor: Vec::new(),
             events_cbor: Vec::new(),
             manifest: Vec::new(),
-            wifi_on: false,
-            ssid: String::new(),
-            psk: String::new(),
-            saved_ssid: String::new(),
-            saved_psk: String::new(),
             nv_value: String::new(),
             pins: vec![Pin::default(); PINS],
             spi: HashMap::new(),
@@ -241,7 +235,10 @@ impl Runtime {
             trace_on: false,
             trace: Vec::new(),
         };
-        let sh = Rc::new(Shared { pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()) });
+        crate::wifi::FIX.with(|f| *f.borrow_mut() = crate::wifi::Fixture::new());
+        crate::wifi::TUNING.with(|t| *t.borrow_mut() = xip_abi::WifiTuning::default());
+        crate::power::FIX.with(|f| f.borrow_mut().requests.clear());
+        let sh = Rc::new(Shared { pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()) });
         Runtime { sh }
     }
 
@@ -363,6 +360,28 @@ impl Runtime {
                 }
             }
         }
+    }
+
+    /// The wanted Wi-Fi state modules last set through the `wifi` component, and its generation.
+    pub fn wifi_intent(&self) -> (xip_abi::WifiIntent, u32) {
+        crate::wifi::FIX.with(|f| { let f = f.borrow(); (f.intent, f.generation) })
+    }
+
+    /// The settings modules last set through the `wifi-tuning` component.
+    /// The sleep requests the `power` fixture recorded, and the last `wifi.monitor` request.
+    pub fn power_requests(&self) -> Vec<xip_abi::PowerSleep> {
+        crate::power::FIX.with(|f| f.borrow().requests.clone())
+    }
+    pub fn wifi_monitor(&self) -> Option<xip_abi::WifiMonitor> {
+        crate::wifi::FIX.with(|f| f.borrow().monitor)
+    }
+    pub fn wifi_tuning(&self) -> xip_abi::WifiTuning {
+        crate::wifi::TUNING.with(|t| *t.borrow())
+    }
+
+    /// Script what `wifi.state` and `wifi_info` report, instead of the default (a station intent joins at once).
+    pub fn set_wifi_state(&self, state: xip_abi::WifiState) {
+        crate::wifi::FIX.with(|f| { let mut f = f.borrow_mut(); f.state = state; f.scripted = true; });
     }
 
     /// An output on `from_pin` drives `to_pin`.
@@ -496,7 +515,7 @@ fn dispatch(sh: &Shared, me: &Rc<Inst>, component: i32, method: i32, value: i32,
         len: data.len(),
         pkt: 0,
         from: 0,
-        reserved: 0,
+        time_us: 0,
         id: 0,
     };
     me.st.borrow_mut().calls += 1;
@@ -521,6 +540,9 @@ fn finish_call(sh: &Shared, me: &Rc<Inst>, component: i32, method: i32, rc: i32)
 
 /// A module that ended gives back what it still holds.
 fn release_all(sh: &Shared, me: &Rc<Inst>) {
+    if let Some(component) = me.st.borrow().component {
+        crate::link::release(sh, component);
+    }
     let mut st = me.st.borrow_mut();
     st.mem_leaked = st.mem.used;
     for i in 0..st.held.e.len() {
@@ -548,7 +570,7 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
             sh.pool.release(c.pslot);
             return;
         }
-        let wants = c.id != 0;
+        let wants = c.id != 0 && c.lflags & CALL_LINK == 0;
         {
             let mut st = me.st.borrow_mut();
             st.in_request = wants;
@@ -560,13 +582,13 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
             size: std::mem::size_of::<Call>() as u32,
             component: c.component,
             method: c.method,
-            value: 0,
-            flags: wants as u32,
+            value: c.value,
+            flags: wants as u32 | c.lflags,
             data: unsafe { sh.pool.slot(c.pslot).add(c.pstart as usize) },
             len: c.plen as usize,
             pkt: handle,
             from: c.from,
-            reserved: 0,
+            time_us: c.time_us,
             id: c.id,
         };
         let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
@@ -584,7 +606,32 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
         if matches!(st.held.get(handle), Some(e) if e.state as u32 == HELD_BORROWED) {
             st.held.take(handle);
             sh.pool.release(c.pslot);
+            drop(st);
+            // a frame handed to a provider that did not keep it is sent, as far as the sender is concerned
+            if c.lflags & CALL_LINK != 0 && c.lflags & CALL_LINK_EVENT == 0 && c.from < ADDR_LINK {
+                crate::link::tx_returned(sh, c.pslot);
+            }
         }
+        return;
+    }
+    if c.request == 4 {
+        // an event of a link: no packet
+        let call = Call {
+            size: std::mem::size_of::<Call>() as u32,
+            component: c.component,
+            method: c.method,
+            value: c.value,
+            flags: c.lflags,
+            data: std::ptr::null(),
+            len: 0,
+            pkt: 0,
+            from: c.from,
+            time_us: 0,
+            id: c.id,
+        };
+        me.st.borrow_mut().calls += 1;
+        let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
+        finish_call(sh, me, c.component, c.method, rc);
         return;
     }
     if c.request != 0 {
@@ -625,9 +672,23 @@ fn drain(sh: &Shared, me: &Rc<Inst>) -> bool {
     any
 }
 
+/// A new wanted Wi-Fi state: `HOST_WIFI` (its generation) to every instance, as the device runtime does after reconciling.
+fn announce_wifi(sh: &Shared) {
+    let (pending, generation) = crate::wifi::FIX.with(|f| {
+        let mut f = f.borrow_mut();
+        (std::mem::replace(&mut f.pending, false), f.generation)
+    });
+    if pending {
+        for me in sh.insts.borrow().iter() {
+            enqueue(me, HOST_COMPONENT as i32, HOST_WIFI as i32, generation as i32);
+        }
+    }
+}
+
 /// Round robin over the instances until nobody has a queued call.
 fn drain_all(sh: &Shared) {
     loop {
+        announce_wifi(sh);
         let insts: Vec<Rc<Inst>> = sh.insts.borrow().clone();
         let mut any = false;
         for me in &insts {
@@ -677,7 +738,7 @@ fn send_answer(sh: &Shared, me: &Inst, to: u32, component: i32, method: i32, id:
     let Some(t) = route(sh, to as i32) else { return };
     let Some(slot) = sh.pool.acquire(0) else { return };
     unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), sh.pool.slot(slot).add(PKT_HEADROOM as usize), data.len()) };
-    if deliver(sh, &t, slot, PKT_HEADROOM as u16, data.len() as u16, component, method, from as u32, id) != 0 {
+    if deliver(sh, &t, slot, PKT_HEADROOM as u16, data.len() as u16, component, method, from as u32, id, 0, 0, 0) != 0 {
         sh.pool.release(slot);
     }
 }
@@ -690,7 +751,7 @@ pub(crate) fn route(sh: &Shared, component: i32) -> Option<Rc<Inst>> {
 }
 
 /// Queue a pool packet for `t`. The caller keeps the slot reference when this fails.
-pub(crate) fn deliver(sh: &Shared, t: &Rc<Inst>, slot: i32, start: u16, len: u16, component: i32, method: i32, from: u32, id: u64) -> i32 {
+pub(crate) fn deliver(sh: &Shared, t: &Rc<Inst>, slot: i32, start: u16, len: u16, component: i32, method: i32, from: u32, id: u64, value: i32, lflags: u32, time_us: u32) -> i32 {
     let mut st = t.st.borrow_mut();
     if st.ended {
         return ERR_NOTFOUND;
@@ -699,7 +760,7 @@ pub(crate) fn deliver(sh: &Shared, t: &Rc<Inst>, slot: i32, start: u16, len: u16
     if waiting >= sh.cfg.inbox || st.queue.len() >= QUEUE {
         return ERR_BUSY;
     }
-    st.queue.push_back(QItem { component, method, request: 3, pslot: slot, pstart: start, plen: len, from, id, ..Default::default() });
+    st.queue.push_back(QItem { component, method, request: 3, pslot: slot, pstart: start, plen: len, from, id, value, lflags, time_us, ..Default::default() });
     0
 }
 
@@ -774,7 +835,7 @@ impl Instance {
         }
         let Some(slot) = sh.pool.acquire(0) else { return ERR_NOMEM };
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), sh.pool.slot(slot).add(PKT_HEADROOM as usize), data.len()) };
-        let rc = deliver(sh, &self.me, slot, PKT_HEADROOM as u16, data.len() as u16, component, method, from, id);
+        let rc = deliver(sh, &self.me, slot, PKT_HEADROOM as u16, data.len() as u16, component, method, from, id, 0, 0, 0);
         if rc != 0 {
             sh.pool.release(slot);
         }

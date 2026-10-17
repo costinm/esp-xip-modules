@@ -1,4 +1,4 @@
-//! The host table: every call of `abi/API.md` the host-runtime implements. `user` is the `Ctx` of the calling instance.
+//! The host table: every call of the host table (`include/xip.h`) the host-runtime implements. `user` is the `Ctx` of the calling instance.
 use crate::fixtures::Loopback;
 use crate::pool::{HELD_BORROWED, HELD_OWNED};
 use crate::runtime::*;
@@ -7,7 +7,7 @@ use std::rc::Rc;
 use xip_abi::cbor::Writer;
 use xip_abi::*;
 
-unsafe fn ctx<'a>(user: *mut c_void) -> (&'a Shared, Rc<Inst>) {
+pub(crate) unsafe fn ctx<'a>(user: *mut c_void) -> (&'a Shared, Rc<Inst>) {
     let c = &*(user as *const Ctx);
     let sh = &*c.sh;
     let me = sh.insts.borrow()[c.id].clone();
@@ -362,41 +362,10 @@ unsafe extern "C" fn h_led(user: *mut c_void, pin: i32, _r: u8, _g: u8, _b: u8) 
     claim(sh, &me, pin)
 }
 
-unsafe extern "C" fn h_wifi_config(user: *mut c_void, ssid: *const u8, sn: usize, psk: *const u8, pn: usize) -> i32 {
-    let (sh, _me) = cx!(user, "wifi_config");
-    if sn > 32 || pn > 63 {
-        return ERR_ARG;
-    }
-    let mut s = sh.st.borrow_mut();
-    s.saved_ssid = String::from_utf8_lossy(sl(ssid, sn)).into_owned();
-    s.saved_psk = String::from_utf8_lossy(sl(psk, pn)).into_owned();
-    0
-}
-
-unsafe extern "C" fn h_wifi_start(user: *mut c_void, ssid: *const u8, sn: usize, psk: *const u8, pn: usize) -> i32 {
-    let (sh, _me) = cx!(user, "wifi_start");
-    let mut s = sh.st.borrow_mut();
-    if sn == 0 {
-        s.ssid = s.saved_ssid.clone();
-        s.psk = s.saved_psk.clone();
-    } else {
-        s.ssid = String::from_utf8_lossy(sl(ssid, sn)).into_owned();
-        s.psk = String::from_utf8_lossy(sl(psk, pn)).into_owned();
-    }
-    s.wifi_on = true;
-    0
-}
-
-unsafe extern "C" fn h_wifi_stop(user: *mut c_void) -> i32 {
-    let (sh, _me) = cx!(user, "wifi_stop");
-    sh.st.borrow_mut().wifi_on = false;
-    0
-}
-
 unsafe extern "C" fn h_wifi_scan(user: *mut c_void, out: *mut u8, cap: usize) -> i32 {
     let _ = cx!(user, "wifi_scan");
     let v = cbor(|w| {
-        w.array(2);
+        w.map(1).uint(1).array(2);
         w.map(5).uint(1).bytes(b"costin").uint(2).bytes(&[0x10, 0xbd, 0xa3, 0xac, 0x5a, 0x21]).uint(3).int(-41).uint(4).uint(6).uint(5).uint(3);
         w.map(5).uint(1).bytes(b"").uint(2).bytes(&[1, 2, 3, 4, 5, 6]).uint(3).int(-80).uint(4).uint(11).uint(5).uint(0);
     });
@@ -404,17 +373,18 @@ unsafe extern "C" fn h_wifi_scan(user: *mut c_void, out: *mut u8, cap: usize) ->
 }
 
 unsafe extern "C" fn h_wifi_info(user: *mut c_void, out: *mut u8, cap: usize) -> i32 {
-    let (sh, _me) = cx!(user, "wifi_info");
-    let s = sh.st.borrow();
+    let _ = cx!(user, "wifi_info");
+    let st = crate::wifi::FIX.with(|f| f.borrow().state);
     let v = cbor(|w| {
-        w.map(if s.wifi_on { 4 } else { 1 } + if s.saved_ssid.is_empty() { 0 } else { 2 });
-        w.uint(1).uint(if s.wifi_on { 2 } else { 0 });
-        if s.wifi_on {
-            w.uint(2).text("lab").uint(3).text("192.168.49.7").uint(4).int(-40);
+        w.map(if st.sta == 2 { 4 } else { 1 } + usize::from(st.ap != 0) + usize::from(st.channel != 0));
+        w.uint(1).uint(u64::from(st.sta));
+        if st.sta == 2 {
+            let ip = format!("{}.{}.{}.{}", st.ip4[0], st.ip4[1], st.ip4[2], st.ip4[3]);
+            w.uint(2).text(&String::from_utf8_lossy(&st.ssid[..st.ssid_len as usize]));
+            w.uint(3).text(&ip).uint(4).int(i64::from(st.rssi));
         }
-        if !s.saved_ssid.is_empty() {
-            w.uint(5).text(&s.saved_ssid).uint(6).boolean(!s.saved_psk.is_empty());
-        }
+        if st.ap != 0 { w.uint(5).boolean(true); }
+        if st.channel != 0 { w.uint(6).uint(u64::from(st.channel)); }
     });
     put(out, cap, &v)
 }
@@ -596,6 +566,9 @@ unsafe extern "C" fn h_pkt_info(user: *mut c_void, headroom: *mut u32, max: *mut
 
 unsafe extern "C" fn h_send(user: *mut c_void, pkt: u32, len: usize, dst: u32, component: i32, method: i32, id: u64) -> i32 {
     let (sh, me) = cx!(user, "send");
+    if dst >= ADDR_LINK {
+        return crate::link::send(sh, &me, pkt, len, dst, component, method, id);     // ERR_BUSY keeps the packet
+    }
     let Some(e) = me.st.borrow_mut().held.take(pkt) else { return ERR_ARG };
     let slot = e.slot as i32;
     let from = me.st.borrow().component.unwrap_or(0);
@@ -608,7 +581,7 @@ unsafe extern "C" fn h_send(user: *mut c_void, pkt: u32, len: usize, dst: u32, c
         return 0;
     } else {
         match route(sh, dst as i32) {
-            Some(t) => deliver(sh, &t, slot, e.start, len as u16, component, method, from as u32, id),
+            Some(t) => deliver(sh, &t, slot, e.start, len as u16, component, method, from as u32, id, 0, 0, 0),
             None => ERR_NOTFOUND,
         }
     };
@@ -619,24 +592,36 @@ unsafe extern "C" fn h_send(user: *mut c_void, pkt: u32, len: usize, dst: u32, c
     rc
 }
 
-unsafe extern "C" fn h_mem_alloc(user: *mut c_void, size: usize) -> *mut u8 {
+unsafe extern "C" fn h_mem_alloc(user: *mut c_void, size: usize) -> *mut c_void {
     let (_sh, me) = cx!(user, "mem_alloc");
     let mut st = me.st.borrow_mut();
     st.mem.alloc(size).cast()
 }
-unsafe extern "C" fn h_mem_free(user: *mut c_void, ptr: *mut u8) -> i32 {
+unsafe extern "C" fn h_mem_free(user: *mut c_void, ptr: *mut c_void) -> i32 {
     let (_sh, me) = cx!(user, "mem_free");
     let mut st = me.st.borrow_mut();
     if st.mem.free(ptr.cast()) { 0 } else { ERR_ARG }
 }
 
-unsafe extern "C" fn h_get_component(user: *mut c_void, name: *const c_char) -> *const u8 {
+unsafe extern "C" fn h_get_component(user: *mut c_void, name: *const c_char) -> *const c_void {
     let (sh, _me) = cx!(user, "get_component");
     if name.is_null() {
         return std::ptr::null();
     }
     let name = CStr::from_ptr(name).to_string_lossy().into_owned();
-    sh.st.borrow().components.get(&name).map_or(std::ptr::null(), |p| *p as *const u8)
+    if name == "wifi" {
+        return crate::wifi::component().cast();
+    }
+    if name == "power" {
+        return crate::power::component().cast();
+    }
+    if name == "link" {
+        return crate::link::component().cast();
+    }
+    if name == "wifi-tuning" {
+        return crate::wifi::tuner().cast();
+    }
+    sh.st.borrow().components.get(&name).map_or(std::ptr::null(), |p| *p as *const c_void)
 }
 
 pub(crate) fn fill(t: &mut Host, user: *mut c_void) {
@@ -667,10 +652,7 @@ pub(crate) fn fill(t: &mut Host, user: *mut c_void) {
     t.alarm_set = Some(h_alarm_set);
     t.alarm_cancel = Some(h_alarm_cancel);
     t.connected = Some(h_connected);
-    t.wifi_start = Some(h_wifi_start);
-    t.wifi_stop = Some(h_wifi_stop);
     t.wifi_info = Some(h_wifi_info);
-    t.wifi_config = Some(h_wifi_config);
     t.wifi_scan = Some(h_wifi_scan);
     t.serial_open = Some(h_serial_open);
     t.serial_write = Some(h_serial_write);

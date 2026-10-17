@@ -57,6 +57,19 @@ impl<'a> Writer<'a> {
         self
     }
 
+    /// Text from bytes that are not checked to be UTF-8 (a console value, a name from the wire).
+    pub fn text_raw(&mut self, v: &[u8]) -> &mut Self {
+        self.head(3, v.len() as u64);
+        self.put(v);
+        self
+    }
+
+    /// An already encoded item, copied as it is.
+    pub fn raw(&mut self, encoded: &[u8]) -> &mut Self {
+        self.put(encoded);
+        self
+    }
+
     pub fn text(&mut self, v: &str) -> &mut Self {
         self.head(3, v.len() as u64);
         self.put(v.as_bytes());

@@ -2,10 +2,9 @@
 //! and the loader over a slot table, start, stop and call modules, receive their events.
 //!
 //! Generic host facilities include module lifecycle, packet-backed socket
-//! readiness, settings, desired bearer profiles and ESP Wi-Fi initialization.
-//! Products keep protocol parsing and radio scheduling policy in their own
-//! owners. `profile` is a Rust API for those owners; the module interface is
-//! generated separately as a C-compatible function table.
+//! readiness, settings, the `wifi` components with a simple station owner, and ESP Wi-Fi initialization.
+//! Products keep protocol parsing and radio scheduling policy in their own owners: an application that drives the
+//! radio itself passes a [`WifiOwner`] in [`Features`]. The module interface is a C-compatible function table.
 //!
 //! The ABI itself, for module code, is the `xip-abi` crate.
 #![no_std]
@@ -15,7 +14,12 @@ extern crate alloc;
 extern crate std;
 
 mod loader;
-pub mod profile;
+pub mod espnow_frame;
+#[cfg(target_os = "espidf")]
+pub mod espnow_esp;
+#[cfg(target_os = "espidf")]
+pub mod promisc_esp;
+pub mod wifi;
 #[cfg(target_os = "espidf")]
 pub mod settings;
 
@@ -25,9 +29,8 @@ pub mod lwip_io_esp;
 mod module_poll_esp;
 #[cfg(target_os = "espidf")]
 pub mod wifi_esp;
-#[cfg(target_os = "espidf")]
-mod wifi_hooks;
 
+pub use wifi::WifiOwner;
 pub use loader::{call, find, init, manifest, request_raw, slot_count, start, status, stop, stop_all, EventHandler, Features, PoolOps, Slot, SlotStatus, MODULE_SLOTS};
 
 /// Read host status without depending on a console module.

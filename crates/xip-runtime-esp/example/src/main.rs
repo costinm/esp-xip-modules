@@ -35,7 +35,7 @@ pub extern "C" fn app_main() {
     }
     mark(b"xip-main: nvs ok\n\0");
     // the host keeps the last events modules emit; this application needs no handler
-    assert_eq!(init(&MODULE_SLOTS, "data\0", Features { modules: true, no_autostart: false, nv: None, pool: None, wifi: true }, None), 0, "host and loader");
+    assert_eq!(init(&MODULE_SLOTS, "data\0", Features { modules: true, no_autostart: false, nv: None, pool: None, wifi: None }, None), 0, "host and loader");
     mark(b"xip-main: running\n\0");
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));

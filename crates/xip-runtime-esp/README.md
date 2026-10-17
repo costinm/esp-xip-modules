@@ -20,15 +20,17 @@ The C it needs is in `components/` (`xip_runtime` and `xip_loader`): give the bu
 
 The Rust host owns the shared lwIP poller and the `MODULE_SLOTS` layout preset. Socket and flash ABI calls are declared but their event bridge is still pending; signed upload policy belongs in an optional no-std `mod_flash` module.
 
-## Desired bearers
+## Wi-Fi
 
-`profile` owns the shared ephemeral bearer store and atomic partial requests.
-Its types and CBOR codecs come from `xip-abi::profile`, generated from
-[`abi/API.md`](../../abi/API.md). Products use this Rust API directly; modules
-use CBOR `transport_set` and `transport_get` in the host ABI. See
-[`xip-abi::profile`](PROFILE.md) for publication and owner rules.
+Modules see Wi-Fi through the `wifi` and `wifi-tuning` components (`get_component`; `crates/xip-abi/src/wifi.rs`). `wifi.rs`
+keeps the wanted state (`WifiIntent`, `WifiTuning`, a generation), tells the modules when it changes (`HOST_WIFI`), and
+`wifi_esp` is a simple station owner that makes it true on the host worker, starting from the boot credentials in NVS
+(`dmesh/sta_ssid`, `sec/sta`, the keys `nv` writes). Every combination of the intent runs (ESP-NOW only, station, soft AP, both); the raw UDP6 tuning switches (`raw_rx`, `driver_tx`, `raw_tx_rate`) are
+`ERR_UNSUPPORTED` until the `udp6` link is ported.
 
-`settings` owns the ESP NVS access used by the Rust Wi-Fi initializer.
-The Rust driver calls ESP-IDF directly and does not depend on `xip_wifi`'s
-C helper implementation. The optional C Wi-Fi component uses the same `wl`
-memory settings and can reconcile the STA subset of the desired profile.
+An application that drives the radio itself (DMesh) passes a `WifiOwner` in `Features { wifi: Some(&OWNER), .. }`: its
+functions answer the components, and it calls `wifi::changed(generation)` after a change. The host then runs no owner and
+reads no credentials. The application keeps its own policy and profile types; this crate has none.
+
+`wifi_esp::init_config` / `init_config_with` build the driver's init config (the `wl` NVS buffer sizes, A-MPDU), the same
+policy as the C host; `settings` is the NVS access.

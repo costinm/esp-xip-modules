@@ -2,19 +2,23 @@
 //!
 //! It loads modules as shared objects (or takes a handler function), gives each an instance with the same event model as
 //! the device runtimes (one call at a time, alarms, interrupts, requests, packets), and implements the host table of
-//! `abi/API.md` in Rust. Time is virtual by default: nothing sleeps, [`Runtime::run`] advances the clock. Peripherals are
+//! the host table (`include/xip.h`) in Rust. Time is virtual by default: nothing sleeps, [`Runtime::run`] advances the clock. Peripherals are
 //! fixtures: pins can be wired together, an SPI chip select can be a loopback, a scripted device, or a recording replayed
 //! later ([`fixtures`]). What a module did is observable: events, log lines, packets sent to the application, the serial
 //! output, and an optional trace of every host call ([`Trace`]).
 //!
 //! Pure Rust. The packet pool, the table of held packets and the memory balance ([`pool`]) follow the semantics of the C
-//! runtime's `xip_pool.c`; the contract both implement is `abi/API.md`. There is room for hooks and checks that a device
+//! runtime's `xip_pool.c`; the contract both implement is `include/xip.h`. There is room for hooks and checks that a device
 //! has no space for.
 pub mod fixtures;
 pub mod pool;
 mod hostcalls;
 mod runtime;
+mod link;
+mod wifi;
+mod power;
 
+pub use link::NativeTx;
 pub use runtime::{Config, Event, Instance, MainMsg, Runtime, Trace, TraceKind};
 pub use xip_abi;
 

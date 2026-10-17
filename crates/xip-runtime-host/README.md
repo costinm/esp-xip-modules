@@ -2,7 +2,7 @@
 
 The xip runtime for a development host (Linux). It is a real runtime, like the ESP ones: it loads modules, gives each an
 instance, delivers start/stop, requests, packets, alarms and interrupts one call at a time, and implements the host table of
-`abi/API.md`. What differs from a device is what the host can afford: virtual time, fixtures for the hardware, traces and
+`include/xip.h`. What differs from a device is what the host can afford: virtual time, fixtures for the hardware, traces and
 checks. It replaces the C simulator that used to live in `tests/host`.
 
 ```sh
@@ -33,5 +33,5 @@ assert!(m.ended() && m.find_event(0x7eff, "fail=0").is_some());
   `set_trace(true)` / `take_trace()` for every handler call and host call.
 * `register_component(name, table)` is what `get_component(name)` returns (the `psa` table of a software provider goes here).
 
-Not here yet: sockets, flash and the transport profile calls (they answer `ERR_UNSUPPORTED`), real-time operation with
+Not here yet: sockets and flash (they answer `ERR_UNSUPPORTED`), real-time operation with
 a worker thread, loading a `.dmod` image (the host cannot run RISC-V or Xtensa code; the same sources are built natively).

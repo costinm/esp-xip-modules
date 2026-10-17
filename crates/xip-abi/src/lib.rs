@@ -1,11 +1,57 @@
-//! The esp-xip-modules ABI for Rust modules and applications (abi/API.md; the model is event driven: a module is a
-//! [`Module`] whose `handle` runs to completion for every call and never waits).
+//! The esp-xip-modules ABI for Rust modules and applications: the host table and the C ABI of `include/xip.h` (generated
+//! from [`Host`] by `scripts/gen.sh`), the components a host offers ([`Wifi`], [`WifiTuner`], [`psa`]), and the safe
+//! [`Hw`] wrapper a module uses. The model is event driven: a module is a [`Module`] whose `handle` runs to completion
+//! for every call and never waits. [`Hw`] keeps the raw table pointer, checks the table `size` before each call (an older
+//! host has fewer slots) and returns [`ERR_UNSUPPORTED`] for a call the host does not have. Nothing here allocates unless a
+//! module asks for `alloc` (features `allocator-api`, `global-alloc`: [`heap`]); the crate is `no_std`.
 //!
-//! `generated` mirrors `include/xip.h` (written by `tools/gen_abi.py`, never edited by hand).
-//! [`Hw`] is the safe, small wrapper a module uses: it keeps the raw table pointer, checks the table `size`
-//! before each call (an older host has fewer slots) and returns [`ERR_UNSUPPORTED`] for a call the host
-//! does not have. Nothing here allocates unless a module asks for `alloc` (features `allocator-api`, `global-alloc`: [`heap`]);
-//! the crate is `no_std`.
+//! How to write a module: `docs/writing-modules.md`. The CBOR, JSON and text view of the APIs (field tags, names) is in
+//! `api/*.API.md`; this crate and `include/xip.h` are the reference for the C ABI.
+//!
+//! # Model
+//!
+//! A module is a set of **handlers**. It never waits, sleeps or loops: the host calls
+//! `xip_handle(host, state, call)` when something happens, the handler does its bounded work and returns, and the
+//! host sleeps until the next alarm, interrupt or request. One host task runs every module's handlers, one at a
+//! time, so a module costs memory for its image and its state block only.
+//!
+//! ```c
+//! int xip_handle(const xip_host *host, void *state, const xip_call *call);
+//! ```
+//!
+//! * `state` is a zeroed block of `state_bytes` (image header) that the host keeps for the module. An image has no
+//!   writable data, so everything the module remembers between calls lives there.
+//! * `call->component` and `call->method` say what happened. They are a pair of integers chosen by **whoever
+//!   created the event** and returned unchanged, as in the ssh-mesh envelope (keys `component`, `method`): the
+//!   module picks them when it registers an alarm or an interrupt, main picks them when it posts a request. A
+//!   module dispatches on them; component 0 is the host's own (`HOST`).
+//! * `call->data` / `call->len` is the payload (a request, usually one CBOR map keyed by field tags) and is valid
+//!   during the call only. A handler answers a request with `respond`.
+//! * Time budget: a handler returns within `CONFIG_XIP_HANDLER_MS` (default 20 ms). `spi_transfer`,
+//!   `i2c_transfer` and `adc_read` are bounded and synchronous. Anything longer (a radio transmission, a settle
+//!   time) is started, and its end is an `alarm` or an
+//!   `interrupt`.
+//! * Return value: `0` keep running; `RET_DONE` the module is finished (the host destroys the instance after
+//!   the call); a negative `result` is logged and also destroys the instance.
+//!
+//! Every call to the host takes `host->user` first; the table lists the other arguments. Check
+//! `XIP_HOST_HAS(host, call)` before using a call newer than the version a module was built against.
+//!
+//! # Results
+//!
+//! Success is 0 or positive, errors are negative: `OK`, `ERR_ARG`, `ERR_UNSUPPORTED`, ... (see the constants).
+//!
+//! # Helpers
+//!
+//! Not host calls: header-only code in `include/xip_cbor.h` (C) and `xip-abi`'s `cbor` module (Rust), for
+//! modules and hosts alike.
+//!
+//! * Encoder: `xip_cbor_uint`, `xip_cbor_int`, `xip_cbor_bytes`, `xip_cbor_text`, `xip_cbor_map`, `xip_cbor_array`,
+//!   `xip_cbor_bool` write to a bounded buffer and report overflow once, at the end.
+//! * Decoder: `xip_cbor_next` reads one item (type, integer, or a pointer and length for bytes and text) and
+//!   `xip_cbor_skip` steps over a whole item; `xip_cbor_field` finds the value of an unsigned-integer key in a map.
+//! * Only definite lengths, integers up to 64 bits, byte and text strings, arrays, maps and booleans; floats and
+//!   tags are skipped but not decoded.
 #![no_std]
 #![cfg_attr(feature = "allocator-api", feature(allocator_api))]
 #![cfg_attr(target_arch = "xtensa", feature(asm_experimental_arch))]
@@ -14,11 +60,15 @@
 extern crate std;
 
 pub mod cbor;
-/// Desired bearer declaration and tagged-CBOR codec generated from abi/API.md.
-pub mod profile;
 pub mod heap;
-mod generated;
-pub use generated::*;
+mod host;
+pub use host::*;
+mod wifi;
+pub use wifi::*;
+mod link;
+pub use link::*;
+mod power;
+pub use power::*;
 
 pub mod psa;
 
@@ -103,7 +153,7 @@ impl Hw {
     pub fn mem_alloc(&self, size: usize) -> *mut u8 {
         let h = self.table();
         if (h.size as usize) < slot::MEM_ALLOC + 4 { return core::ptr::null_mut(); }
-        match h.mem_alloc { Some(f) => unsafe { f(h.user, size) }, None => core::ptr::null_mut() }
+        match h.mem_alloc { Some(f) => unsafe { f(h.user, size).cast() }, None => core::ptr::null_mut() }
     }
 
     /// A host-owned table identified by its ordinary component header. NULL if
@@ -120,7 +170,7 @@ impl Hw {
     }
 
     pub fn mem_free(&self, ptr: *mut u8) -> i32 {
-        call!(self, MEM_FREE, mem_free(ptr))
+        call!(self, MEM_FREE, mem_free(ptr.cast()))
     }
 
     /// A new empty packet held by this module (`ERR_BUSY` at its quota, `ERR_NOMEM` when the pool is low).
@@ -184,11 +234,77 @@ impl Hw {
     }
     pub fn reset(&self) -> i32 { call!(self, RESET, reset()) }
 
-    /// Atomically apply a tagged-CBOR partial desired transport request.
-    pub fn transport_set(&self, request: &[u8]) -> Result<u32, i32> {
-        let mut generation = 0;
-        let rc = call!(self, TRANSPORT_SET, transport_set(request.as_ptr(), request.len(), &mut generation));
-        if rc == 0 { Ok(generation) } else { Err(rc) }
+    /// Take the serial port: every line typed arrives as a call `(component, method)` with the line as the packet payload.
+    pub fn serial_open(&self, component: i32, method: i32) -> i32 {
+        call!(self, SERIAL_OPEN, serial_open(component, method))
+    }
+    pub fn serial_write(&self, data: &[u8]) -> i32 {
+        call!(self, SERIAL_WRITE, serial_write(data.as_ptr(), data.len()))
+    }
+    pub fn serial_close(&self) -> i32 {
+        call!(self, SERIAL_CLOSE, serial_close())
+    }
+    /// Start the installed module `name` with `request`.
+    pub fn module_start(&self, name: &[u8], request: &[u8]) -> i32 {
+        call!(self, MODULE_START, module_start(name.as_ptr(), name.len(), request.as_ptr(), request.len()))
+    }
+    /// The manifest of the installed module `name` (CBOR), or a negative error.
+    pub fn module_manifest(&self, name: &[u8], out: &mut [u8]) -> i32 {
+        call!(self, MODULE_MANIFEST, module_manifest(name.as_ptr(), name.len(), out.as_mut_ptr(), out.len()))
+    }
+    /// The last events modules emitted (CBOR array of records).
+    pub fn events_info(&self, out: &mut [u8]) -> i32 {
+        call!(self, EVENTS_INFO, events_info(out.as_mut_ptr(), out.len()))
+    }
+    /// The scan of the networks in range, as CBOR (`ERR_BUSY` while it runs).
+    pub fn wifi_scan(&self, out: &mut [u8]) -> i32 {
+        call!(self, WIFI_SCAN, wifi_scan(out.as_mut_ptr(), out.len()))
+    }
+    /// Free memory of the device, as CBOR.
+    pub fn heap_info(&self, out: &mut [u8]) -> i32 {
+        call!(self, HEAP_INFO, heap_info(out.as_mut_ptr(), out.len()))
+    }
+    /// Print a heap report to the device log (kinds in `include/xip.h`).
+    pub fn heap_dump(&self, kind: i32) -> i32 {
+        call!(self, HEAP_DUMP, heap_dump(kind))
+    }
+    /// A device setting: `value` None reads it into `out` (the length, or a negative error); Some sets it (empty: the default).
+    pub fn nv(&self, key: &[u8], value: Option<&[u8]>, out: &mut [u8]) -> i32 {
+        let (vp, vl) = match value { Some(v) => (v.as_ptr(), v.len()), None => (core::ptr::null(), 0) };
+        call!(self, NV, nv(key.as_ptr(), key.len(), vp, vl, out.as_mut_ptr(), out.len()))
+    }
+
+    /// The `wifi` component (the wanted state of the radio), or None when this host has none.
+    pub fn wifi(&self) -> Option<&'static Wifi> {
+        let p = self.get_component(c"wifi") as *const Wifi;
+        if p.is_null() { return None; }
+        let t = unsafe { &*p };
+        (t.version == WIFI_VERSION && t.size as usize >= core::mem::size_of::<Wifi>()).then_some(t)
+    }
+    /// The `link` component (frames between the runtime, modules and transports), or None when this host has none.
+    pub fn link(&self) -> Option<&'static Link> {
+        let p = self.get_component(c"link") as *const Link;
+        if p.is_null() { return None; }
+        let t = unsafe { &*p };
+        (t.version == LINK_VERSION && t.size as usize >= core::mem::size_of::<Link>()).then_some(t)
+    }
+    /// The `power` component (sleep, power and FreeRTOS state), or None when this host has none.
+    pub fn power(&self) -> Option<&'static Power> {
+        let p = self.get_component(c"power") as *const Power;
+        if p.is_null() { return None; }
+        let t = unsafe { &*p };
+        (t.version == POWER_VERSION && t.size as usize >= core::mem::size_of::<Power>()).then_some(t)
+    }
+    /// The `ctx` that the functions of the component tables take first (the `user` of the host table).
+    pub fn ctx(&self) -> *mut core::ffi::c_void {
+        self.table().user
+    }
+    /// The `wifi-tuning` component (advanced driver settings), or None when this host has none.
+    pub fn wifi_tuner(&self) -> Option<&'static WifiTuner> {
+        let p = self.get_component(c"wifi-tuning") as *const WifiTuner;
+        if p.is_null() { return None; }
+        let t = unsafe { &*p };
+        (t.version == WIFI_TUNING_VERSION && t.size as usize >= core::mem::size_of::<WifiTuner>()).then_some(t)
     }
     pub fn flash_erase(&self, address: u32, offset: u32, len: u32, component: i32, method: i32, id: u64) -> i32 {
         call!(self, FLASH_ERASE, flash_erase(address, offset, len, component, method, id))
@@ -312,7 +428,7 @@ impl SpiConfig {
     }
 }
 
-/// What a handler is called with (the safe view of [`Call`](generated::Call)).
+/// What a handler is called with (the safe view of [`Call`](host::Call)).
 pub struct CallView<'a> {
     pub component: i32,
     pub method: i32,

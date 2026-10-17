@@ -129,16 +129,16 @@ mod tests {
 
     static LIVE: core::sync::atomic::AtomicIsize = core::sync::atomic::AtomicIsize::new(0);
 
-    unsafe extern "C" fn fake_alloc(_: *mut c_void, size: usize) -> *mut u8 {
+    unsafe extern "C" fn fake_alloc(_: *mut c_void, size: usize) -> *mut c_void {
         LIVE.fetch_add(size as isize, core::sync::atomic::Ordering::SeqCst);
         // keep the size in front, like the C side's header
         let p = std::alloc::alloc(Layout::from_size_align(size + 16, 16).unwrap());
         *(p as *mut usize) = size;
-        p.add(16)
+        p.add(16).cast()
     }
 
-    unsafe extern "C" fn fake_free(_: *mut c_void, ptr: *mut u8) -> i32 {
-        let p = ptr.sub(16);
+    unsafe extern "C" fn fake_free(_: *mut c_void, ptr: *mut c_void) -> core::ffi::c_int {
+        let p = (ptr as *mut u8).sub(16);
         let size = *(p as *mut usize);
         LIVE.fetch_sub(size as isize, core::sync::atomic::Ordering::SeqCst);
         std::alloc::dealloc(p, Layout::from_size_align(size + 16, 16).unwrap());
