@@ -3,7 +3,7 @@
  * that is written (the image is read-only flash; tools/mkmod.py rejects .data and .bss). Everything it remembers
  * lives in the state block the host passes to every call (`--state BYTES` when packing); every service comes from
  * the host table. A module never waits: it reacts to calls and registers alarms or interrupts for what comes next
- * (abi/API.md, Model).
+ * (xip-abi crate docs, Model).
  *
  *   #include "xip_module.h"
  *   XIP_HANDLER(hello)(const xip_host *host, void *state, const xip_call *call)

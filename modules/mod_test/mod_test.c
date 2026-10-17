@@ -18,7 +18,7 @@
 #define EV_ECHO 0x7e10
 #define EV_PKT 0x7e11
 
-/* This module's own component and methods (the pair main or the module itself chose; see abi/API.md). */
+/* This module's own component and methods (the pair main or the module itself chose; see include/xip.h). */
 #define C_TEST 2
 #define M_ECHO 1      /* request {1: text}: echo as an event, answer {1: text} */
 #define M_INFO 2      /* request: answer {1: calls, 2: mode} */
