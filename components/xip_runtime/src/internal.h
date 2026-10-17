@@ -45,15 +45,17 @@ int xip_wifi_scan(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap);
 
 /* xip_serial.c: the pins of the serial port, reserved from modules whether or not the port is started. */
 uint64_t xip_serial_pins(void);
+bool xip_serial_usb_selected(void);
 
 /* A worker event. Interrupts, alarm timers and other tasks only ever queue these; module code runs on the worker. */
-enum { XIP_EV_CALL = 1, XIP_EV_REQUEST, XIP_EV_START, XIP_EV_ALARM, XIP_EV_NETWORK, XIP_EV_WAKE, XIP_EV_PACKET, XIP_EV_TRANSPORT, XIP_EV_IO };
+enum { XIP_EV_CALL = 1, XIP_EV_REQUEST, XIP_EV_START, XIP_EV_ALARM, XIP_EV_NETWORK, XIP_EV_WAKE, XIP_EV_PACKET, XIP_EV_WIFI, XIP_EV_IO, XIP_EV_LINK, XIP_EV_SLEEP };
 typedef struct {
     uint8_t kind;
     uint32_t inst;                /* instance id (not a pointer: the instance may be gone by the time it is read) */
     int32_t component, method, value;
     uint32_t seq;                 /* ALARM: which arming of the alarm */
     uint64_t id;
+    uint32_t from, flags;         /* LINK: the link's address; call flags */
     uint8_t alarm;                /* ALARM: index */
 } xip_event_t;
 
@@ -97,7 +99,7 @@ struct xip_instance {
     xip_stats_t stats;
     xip_mem mem;               /* the managed heap of this module */
     xip_held held;             /* packets this module owns, and the one the current call lent it */
-    struct { int16_t slot; uint16_t start, len; int32_t component, method; uint32_t from; uint64_t id; } pkt_in[CONFIG_XIP_PKT_INBOX];
+    struct { int16_t slot; uint16_t start, len; int32_t component, method; uint32_t from; uint64_t id; int32_t value; uint32_t lflags, time_us; } pkt_in[CONFIG_XIP_PKT_INBOX];
     uint8_t pkt_head, pkt_count;  /* the ring of packets waiting for this module (under the registry lock) */
 };
 
@@ -115,3 +117,15 @@ int xip_info_init(void);
 int xip_rt_info_publish(uint32_t owner, int32_t component, int32_t method, const uint8_t *data, size_t len);
 void xip_info_release(uint32_t owner);
 int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap);
+
+/* the sleep owner (xip_power.c) */
+#define XIP_POWER_IDLE 0
+#define XIP_POWER_SLEEPING 1
+#define XIP_POWER_RESUMING 2
+#define XIP_POWER_AWAKE 3
+void xip_power_cycle(void);
+void xip_power_post(void);
+int xip_power_request(const xip_power_sleep *req);
+int xip_power_get_info(xip_power_info *info);
+int xip_power_dump(int kind);
+int xip_heap_dump(int kind);

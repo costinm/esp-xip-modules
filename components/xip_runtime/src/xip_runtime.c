@@ -1,6 +1,6 @@
 #include <stdatomic.h>
 /* SPDX-License-Identifier: Apache-2.0 */
-/* The event-driven host (abi/API.md, Model): one worker task calls the handler of every module for each event
+/* The event-driven host (xip-abi crate docs, Model): one worker task calls the handler of every module for each event
  * (start, stop, request, interrupt, alarm). Instance lifecycle, alarms, and the core calls of the host table: log,
  * alloc, time, respond, emit, services, settings. Peripherals are in xip_periph.c. */
 #include <stdio.h>
@@ -21,6 +21,7 @@
 #include "lwip/sockets.h"
 #include <errno.h>
 #include "internal.h"
+#include "xip_wifi.h"
 
 static const char *TAG = "xip";
 static xip_host_hooks_t hooks;
@@ -39,7 +40,11 @@ static xip_alarm_ctx_t alarm_ctx[XIP_MAX_INSTANCES * XIP_ALARMS];
 static struct xip_instance *I(void *user) { return user; }
 static int dispatch(struct xip_instance *in, int component, int method, int value, uint32_t flags, const uint8_t *data, size_t len);
 static int dispatch_packet(struct xip_instance *in, int component, int method, const uint8_t *data, size_t len, uint32_t pkt,
-                           uint32_t from, uint64_t id, uint32_t flags);
+                           uint32_t from, uint64_t id, uint32_t flags, int32_t value, uint32_t time_us);
+static const xip_link *link_table(void);
+static void links_release(struct xip_instance *in);
+static int link_send(struct xip_instance *in, uint32_t pkt, size_t len, uint32_t dst, int component, int method, uint64_t token);
+static void link_tx_returned(uint32_t from, int slot);
 static void serial_release(struct xip_instance *in);
 static struct xip_instance *by_component(int component, const struct xip_instance *except);
 static bool known_locked(const struct xip_instance *in);
@@ -83,49 +88,83 @@ static int h_emit(void *user, uint16_t event_id, uint8_t value_type, const uint8
     return hooks.emit(hooks.emit_ctx, in->name, event_id, value_type, value, len);
 }
 
-int xip_transport_set(const uint8_t *p, size_t len, uint32_t *gen) { return hooks.transport_set ? hooks.transport_set(p, len, gen) : XIP_ERR_UNSUPPORTED; }
-int xip_transport_get(xip_bearer_profile *p, uint32_t *gen) { return hooks.transport_get ? hooks.transport_get(p, gen) : XIP_ERR_UNSUPPORTED; }
+int xip_wifi_set_intent(const xip_wifi_intent *i, uint32_t *gen) { return hooks.wifi_set ? hooks.wifi_set(i, gen) : XIP_ERR_UNSUPPORTED; }
+int xip_wifi_get_intent(xip_wifi_intent *i, uint32_t *gen) { return hooks.wifi_get ? hooks.wifi_get(i, gen) : XIP_ERR_UNSUPPORTED; }
+int xip_wifi_get_tuning(xip_wifi_tuning *t) { return hooks.wifi_tuning_get ? hooks.wifi_tuning_get(t) : XIP_ERR_UNSUPPORTED; }
 
-static atomic_bool transport_pending;
-static atomic_uint transport_generation;
+static atomic_bool wifi_pending;
+static atomic_uint wifi_generation;
 
-static int h_transport_set(void *user, const uint8_t *p, size_t len, uint32_t *generation) {
-    (void)user;
-    return hooks.transport_set ? hooks.transport_set(p, len, generation) : XIP_ERR_UNSUPPORTED;
-}
-static int h_transport_get(void *user, xip_bearer_profile *p, uint32_t *generation) {
-    (void)user;
-    return hooks.transport_get ? hooks.transport_get(p, generation) : XIP_ERR_UNSUPPORTED;
-}
-static int h_wifi_start(void *user, const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len)
+/* get_component("wifi"): no context argument; usable from any task. */
+static int c_wifi_set(void *ctx, const xip_wifi_intent *i, uint32_t *gen)
 {
-    (void)user;
-    if (!hooks.wifi_start) return XIP_ERR_UNSUPPORTED;
-    if ((ssid_len && !ssid) || (psk_len && !psk) || ssid_len > 32 || psk_len > 63) return XIP_ERR_ARG;
-    return hooks.wifi_start(ssid, ssid_len, psk, psk_len);
+    (void)ctx;
+    uint32_t ignored;
+    if (!i || i->size < sizeof(*i)) return XIP_ERR_ARG;
+    return xip_wifi_set_intent(i, gen ? gen : &ignored);
 }
-
-static int h_wifi_config(void *user, const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len)
+static int c_wifi_get(void *ctx, xip_wifi_intent *i, uint32_t *gen)
 {
-    (void)user;
-    if (!hooks.wifi_config) return XIP_ERR_UNSUPPORTED;
-    if ((ssid_len && !ssid) || (psk_len && !psk) || ssid_len > 32 || psk_len > 63) return XIP_ERR_ARG;
-    int rc = hooks.wifi_config(ssid, ssid_len, psk, psk_len);
-    return rc == 0 ? 0 : rc == -1 ? XIP_ERR_ARG : XIP_ERR_IO;
+    (void)ctx;
+    uint32_t ignored;
+    if (!i || i->size < sizeof(*i)) return XIP_ERR_ARG;
+    return xip_wifi_get_intent(i, gen ? gen : &ignored);
 }
-
-static int h_wifi_stop(void *user)
+static int c_wifi_state(void *ctx, xip_wifi_state *st)
 {
-    (void)user;
-    if (!hooks.wifi_stop) return XIP_ERR_UNSUPPORTED;
-    hooks.wifi_stop();
-    return 0;
+    (void)ctx;
+    if (!st || st->size < sizeof(*st)) return XIP_ERR_ARG;
+    return hooks.wifi_state ? hooks.wifi_state(st) : XIP_ERR_UNSUPPORTED;
 }
+_Static_assert(sizeof(xip_ap_t) == sizeof(xip_wifi_ap), "the scan record of the host and of the component");
+static int c_wifi_scan(void *ctx, xip_wifi_ap *out, size_t max)
+{
+    (void)ctx;
+    if (!out || !max) return XIP_ERR_ARG;
+    return hooks.wifi_scan ? hooks.wifi_scan((xip_ap_t *)out, max) : XIP_ERR_UNSUPPORTED;
+}
+static int c_wifi_monitor(void *ctx, const xip_wifi_monitor *m)
+{
+    (void)ctx;
+    if (!m || m->size < sizeof(*m)) return XIP_ERR_ARG;
+    return hooks.wifi_monitor ? hooks.wifi_monitor(m) : XIP_ERR_UNSUPPORTED;
+}
+static const xip_wifi wifi_component = {
+    .version = 1, .size = sizeof(xip_wifi), .set = c_wifi_set, .get = c_wifi_get, .state = c_wifi_state,
+    .scan = c_wifi_scan, .monitor = c_wifi_monitor,
+};
+
+/* get_component("power") */
+static int c_power_sleep(void *ctx, const xip_power_sleep *r) { (void)ctx; return xip_power_request(r); }
+static int c_power_info(void *ctx, xip_power_info *i) { (void)ctx; return xip_power_get_info(i); }
+static int c_power_dump_locks(void *ctx) { (void)ctx; return xip_power_dump(0); }
+static int c_power_dump_tasks(void *ctx) { (void)ctx; return xip_power_dump(1); }
+static const xip_power power_component = {
+    .version = 1, .size = sizeof(xip_power), .sleep = c_power_sleep, .info = c_power_info,
+    .dump_locks = c_power_dump_locks, .dump_tasks = c_power_dump_tasks,
+};
+
+/* get_component("wifi-tuning") */
+static int c_tuning_set(void *ctx, const xip_wifi_tuning *t)
+{
+    (void)ctx;
+    if (!t || t->size < sizeof(*t)) return XIP_ERR_ARG;
+    return hooks.wifi_tuning_set ? hooks.wifi_tuning_set(t) : XIP_ERR_UNSUPPORTED;
+}
+static int c_tuning_get(void *ctx, xip_wifi_tuning *t)
+{
+    (void)ctx;
+    if (!t || t->size < sizeof(*t)) return XIP_ERR_ARG;
+    return xip_wifi_get_tuning(t);
+}
+static const xip_wifi_tuner tuner_component = {
+    .version = 1, .size = sizeof(xip_wifi_tuner), .set = c_tuning_set, .get = c_tuning_get,
+};
 
 static int h_wifi_info(void *user, uint8_t *out, size_t capacity)
 {
     (void)user;
-    if (!hooks.wifi_status) return XIP_ERR_UNSUPPORTED;
+    if (!hooks.wifi_state) return XIP_ERR_UNSUPPORTED;
     if (!out || !capacity) return XIP_ERR_ARG;
     return xip_wifi_info(&hooks, out, capacity);
 }
@@ -363,7 +402,13 @@ static const void *h_get_component(void *user, const char *name)
 {
     (void)user; /* Requester context; native component functions take no extra argument. */
     extern const xip_psa *xip_psa_component(void);
-    return name && strcmp(name, "psa") == 0 ? xip_psa_component() : NULL;
+    if (!name) return NULL;
+    if (strcmp(name, "psa") == 0) return xip_psa_component();
+    if (strcmp(name, "link") == 0) return link_table();
+    if (strcmp(name, "power") == 0) return &power_component;
+    if (strcmp(name, "wifi") == 0) return hooks.wifi_set ? &wifi_component : NULL;
+    if (strcmp(name, "wifi-tuning") == 0) return hooks.wifi_tuning_set ? &tuner_component : NULL;
+    return NULL;
 }
 
 static int h_modules_info(void *user, uint8_t *out, size_t capacity)
@@ -433,7 +478,7 @@ static void *h_mem_alloc(void *user, size_t size)
 }
 static int h_mem_free(void *user, void *ptr) { return xip_mem_free(&I(user)->mem, ptr) == 0 ? XIP_OK : XIP_ERR_ARG; }
 
-/* ---- packets (abi/API.md, PKT): the C pool, and what each module holds ---- */
+/* ---- packets (include/xip.h, PKT): the C pool, and what each module holds ---- */
 static xip_pool *pool;
 static SemaphoreHandle_t pool_lock;
 
@@ -535,7 +580,7 @@ static int h_pkt_info(void *user, uint32_t *headroom, uint32_t *max)
 
 /* The packet goes to the target's inbox ring and a worker event; on success the target owns the reference. */
 static int deliver(struct xip_instance *t, int slot, uint16_t start, uint16_t len, int component, int method,
-                   uint32_t from, uint64_t id)
+                   uint32_t from, uint64_t id, int32_t value, uint32_t lflags, uint32_t time_us)
 {
     uint32_t tid = 0;
     int rc = XIP_ERR_NOTFOUND;
@@ -547,6 +592,7 @@ static int deliver(struct xip_instance *t, int slot, uint16_t start, uint16_t le
             t->pkt_in[at].slot = (int16_t)slot; t->pkt_in[at].start = start; t->pkt_in[at].len = len;
             t->pkt_in[at].component = component; t->pkt_in[at].method = method;
             t->pkt_in[at].from = from; t->pkt_in[at].id = id;
+            t->pkt_in[at].value = value; t->pkt_in[at].lflags = lflags; t->pkt_in[at].time_us = time_us;
             tid = t->id;
             rc = 0;
         }
@@ -573,6 +619,7 @@ static int deliver(struct xip_instance *t, int slot, uint16_t start, uint16_t le
 static int h_send(void *user, uint32_t pkt, size_t len, uint32_t dst, int component, int method, uint64_t id)
 {
     struct xip_instance *in = I(user);
+    if (dst >= XIP_ADDR_LINK) return link_send(in, pkt, len, dst, component, method, id);   /* ERR_BUSY keeps the packet */
     xip_held_entry e = xip_held_take(&in->held, pkt);       /* consumed on success and on failure */
     if (e.slot < 0) return XIP_ERR_ARG;
     int rc;
@@ -586,7 +633,7 @@ static int h_send(void *user, uint32_t pkt, size_t len, uint32_t dst, int compon
         return rc;
     } else {
         struct xip_instance *t = by_component((int)dst, NULL);
-        rc = t ? deliver(t, e.slot, e.start, (uint16_t)len, component, method, in->component, id) : XIP_ERR_NOTFOUND;
+        rc = t ? deliver(t, e.slot, e.start, (uint16_t)len, component, method, in->component, id, 0, 0, 0) : XIP_ERR_NOTFOUND;
         if (rc == 0) { in->stats.pkt_sent++; return 0; }
     }
     in->stats.pkt_dropped++;
@@ -602,7 +649,7 @@ int xip_instance_send(xip_instance_t *in, int component, int method, uint64_t id
     int slot = xip_pool_acquire(p, 0);                         /* the application may use every packet */
     if (slot < 0) return XIP_ERR_NOMEM;
     if (len) memcpy(xip_pool_slot(p, slot) + XIP_PKT_HEADROOM, data, len);
-    int rc = deliver(in, slot, XIP_PKT_HEADROOM, (uint16_t)len, component, method, XIP_ADDR_MAIN, id);
+    int rc = deliver(in, slot, XIP_PKT_HEADROOM, (uint16_t)len, component, method, XIP_ADDR_MAIN, id, 0, 0, 0);
     if (rc) { drop_slot(slot); in->stats.pkt_dropped++; }
     return rc;
 }
@@ -620,8 +667,582 @@ static void answer(struct xip_instance *in, uint32_t to, int component, int meth
     int slot = xip_pool_acquire(p, 0);
     if (slot < 0) { in->stats.pkt_dropped++; return; }
     if (len) memcpy(xip_pool_slot(p, slot) + XIP_PKT_HEADROOM, data, len);
-    if (deliver(t, slot, XIP_PKT_HEADROOM, (uint16_t)len, component, method, in->component, id)) { drop_slot(slot); in->stats.pkt_dropped++; }
+    if (deliver(t, slot, XIP_PKT_HEADROOM, (uint16_t)len, component, method, in->component, id, 0, 0, 0)) { drop_slot(slot); in->stats.pkt_dropped++; }
     else in->stats.pkt_sent++;
+}
+
+/* ---- links: frames between transports and modules (the `link` component, include/xip.h) ----
+ * A link is a name and an address (XIP_ADDR_LINK | index). Its provider is the runtime (xip_link_native_register: a driver) or a
+ * module (link.provide); its subscribers are modules (link.open). Frames go from the provider to every subscriber as packets with
+ * XIP_CALL_LINK, unless a route (link.route) forwards them first, from the driver's context; `send` to the address goes to the
+ * provider and, when the sender asked, the packet comes back as a TX_DONE event. Tables under the registry lock; delivery outside it. */
+#define XIP_LINKS_MAX 6
+#define XIP_LINK_SUBS 6
+#define XIP_LINK_ROUTES 16
+#define XIP_TX_PENDING 16
+typedef struct {
+    bool used;
+    char name[16];
+    uint8_t provider;                       /* XIP_LINK_NONE / NATIVE / MODULE */
+    int owner;                              /* component of the providing module */
+    int tx_component, tx_method;            /* where a module provider receives what is sent to the link */
+    xip_link_tx_fn tx;                      /* a native provider */
+    void *tx_ctx;
+    uint32_t mtu, rate_kbps, flags, state;
+    uint32_t received, sent, forwarded, dropped;
+    uint8_t nsubs;
+    struct { int owner, component, method; } subs[XIP_LINK_SUBS];
+    uint8_t key_len, key_offset;            /* classify: the connection identifier in a frame (key_len 0: none) */
+    uint8_t nroutes;
+    struct { uint8_t key[16]; uint32_t egress; uint64_t token; uint32_t flags; } routes[XIP_LINK_ROUTES];
+} link_t;
+static link_t links[XIP_LINKS_MAX];
+
+/* A frame sent with a completion wanted: the packet reference the runtime keeps until the provider is done. */
+static struct {
+    bool used;
+    uint32_t addr;
+    int slot, sender, component, method;
+    uint16_t start, len;
+    uint64_t token;
+    int64_t t0_us;
+} pending[XIP_TX_PENDING];
+
+static link_t *link_named_locked(const char *name, bool create)
+{
+    size_t n = name ? strnlen(name, sizeof(links[0].name)) : 0;
+    if (!n || n >= sizeof(links[0].name)) return NULL;
+    link_t *free_slot = NULL;
+    for (int i = 0; i < XIP_LINKS_MAX; i++) {
+        if (links[i].used && strcmp(links[i].name, name) == 0) return &links[i];
+        if (!links[i].used && !free_slot) free_slot = &links[i];
+    }
+    if (!create || !free_slot) return NULL;
+    memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->used = true;
+    memcpy(free_slot->name, name, n);
+    return free_slot;
+}
+static link_t *link_at_locked(uint32_t addr)
+{
+    if (addr < XIP_ADDR_LINK || addr - XIP_ADDR_LINK >= XIP_LINKS_MAX) return NULL;
+    link_t *l = &links[addr - XIP_ADDR_LINK];
+    return l->used ? l : NULL;
+}
+static uint32_t link_addr(const link_t *l) { return XIP_ADDR_LINK + (uint32_t)(l - links); }
+static uint32_t now_us32(void) { return (uint32_t)esp_timer_get_time(); }
+
+static int c_link_open(void *ctx, const char *name, int component, int method)
+{
+    struct xip_instance *in = I(ctx);
+    int rc = 0;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_named_locked(name, true);
+    if (!l) rc = name ? XIP_ERR_NOMEM : XIP_ERR_ARG;
+    else {
+        unsigned k = 0;
+        while (k < l->nsubs && !(l->subs[k].owner == in->component && l->subs[k].component == component && l->subs[k].method == method)) k++;
+        if (k == l->nsubs) {
+            if (l->nsubs == XIP_LINK_SUBS) rc = XIP_ERR_NOMEM;
+            else { l->subs[k].owner = in->component; l->subs[k].component = component; l->subs[k].method = method; l->nsubs++; }
+        }
+        if (!rc) rc = (int)link_addr(l);
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    return rc;
+}
+
+static void subs_remove_locked(link_t *l, int owner)
+{
+    for (unsigned k = 0; k < l->nsubs;) {
+        if (l->subs[k].owner != owner) { k++; continue; }
+        l->subs[k] = l->subs[--l->nsubs];
+    }
+}
+
+static int c_link_close(void *ctx, uint32_t addr)
+{
+    struct xip_instance *in = I(ctx);
+    int rc = XIP_ERR_NOTFOUND;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    if (l) { rc = XIP_OK; subs_remove_locked(l, in->component); }
+    portEXIT_CRITICAL(&registry_lock);
+    return rc;
+}
+
+static int c_link_provide(void *ctx, const char *name, int component, int method, uint32_t mtu)
+{
+    struct xip_instance *in = I(ctx);
+    int rc = 0;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_named_locked(name, true);
+    if (!l) rc = name ? XIP_ERR_NOMEM : XIP_ERR_ARG;
+    else if (l->provider == XIP_LINK_NATIVE || (l->provider == XIP_LINK_MODULE && l->owner != in->component)) rc = XIP_ERR_BUSY;
+    else {
+        l->provider = XIP_LINK_MODULE; l->owner = in->component;
+        l->tx_component = component; l->tx_method = method; l->mtu = mtu; l->state = XIP_LINK_DOWN;
+        rc = (int)link_addr(l);
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    return rc;
+}
+
+/* An event for every subscriber of the link (READY, STATE): queued for the worker, never dropped silently by a full inbox. */
+static void link_event(uint32_t addr, uint32_t kind, int32_t value, uint64_t id)
+{
+    struct { int owner, component, method; } subs[XIP_LINK_SUBS];
+    unsigned n = 0;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    if (l) { n = l->nsubs; memcpy(subs, l->subs, n * sizeof(subs[0])); }
+    portEXIT_CRITICAL(&registry_lock);
+    for (unsigned k = 0; k < n; k++) {
+        struct xip_instance *t = by_component(subs[k].owner, NULL);
+        if (!t) continue;
+        xip_event_t ev = {.kind = XIP_EV_LINK, .inst = t->id, .component = subs[k].component, .method = subs[k].method, .value = value,
+                          .id = id, .from = addr, .flags = XIP_CALL_LINK | XIP_CALL_LINK_EVENT | (kind << 8)};
+        (void)xQueueSend(worker_queue, &ev, 0);
+    }
+}
+
+/* ---- transmit: the sending side of a link ---- */
+static bool pending_add(uint32_t addr, int slot, uint16_t start, uint16_t len, int sender, int component, int method, uint64_t token)
+{
+    bool ok = false;
+    portENTER_CRITICAL(&registry_lock);
+    for (int i = 0; i < XIP_TX_PENDING && !ok; i++) {
+        if (pending[i].used) continue;
+        pending[i].used = true; pending[i].addr = addr; pending[i].slot = slot; pending[i].start = start; pending[i].len = len;
+        pending[i].sender = sender; pending[i].component = component; pending[i].method = method; pending[i].token = token;
+        pending[i].t0_us = esp_timer_get_time();
+        ok = true;
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    return ok;
+}
+static bool pending_take(int slot, typeof(pending[0]) *out)
+{
+    bool found = false;
+    portENTER_CRITICAL(&registry_lock);
+    for (int i = 0; i < XIP_TX_PENDING && !found; i++) {
+        if (!pending[i].used || pending[i].slot != slot) continue;
+        *out = pending[i];
+        pending[i].used = false;
+        found = true;
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    return found;
+}
+
+/* The provider is done with the frame in `slot`: the reference the runtime kept goes back to the sender (TX_DONE) or is released. */
+static void link_complete(int slot, int outcome)
+{
+    typeof(pending[0]) p;
+    if (!pending_take(slot, &p)) { drop_slot(slot); return; }
+    struct xip_instance *t = by_component(p.sender, NULL);
+    const uint32_t elapsed = (uint32_t)(esp_timer_get_time() - p.t0_us);
+    if (!t || deliver(t, slot, p.start, p.len, p.component, p.method, p.addr, p.token, outcome,
+                      XIP_CALL_LINK | XIP_CALL_LINK_EVENT | (XIP_LINK_EVENT_TX_DONE << 8), elapsed)) drop_slot(slot);
+}
+static void link_tx_returned(uint32_t from, int slot)
+{
+    (void)from;
+    link_complete(slot, XIP_OK);
+}
+
+/* Send the frame in `slot` (one reference is the caller's) to the link: on 0 the runtime owns the reference; otherwise the caller
+ * keeps it. `sender`, `component`, `method`: where the packet returns when done (component or method 0 and 0: nowhere). */
+static int link_tx(uint32_t dst, int slot, uint16_t start, uint16_t len, uint64_t token, int sender, int component, int method)
+{
+    xip_link_tx_fn tx = NULL;
+    void *tx_ctx = NULL;
+    int provider = XIP_LINK_NONE, owner = 0, tx_component = 0, tx_method = 0;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(dst);
+    if (l) { provider = l->provider; owner = l->owner; tx_component = l->tx_component; tx_method = l->tx_method; tx = l->tx; tx_ctx = l->tx_ctx; }
+    portEXIT_CRITICAL(&registry_lock);
+    if (provider == XIP_LINK_NONE) return XIP_ERR_NOTFOUND;
+    const bool completion = component || method;
+    int rc;
+    if (completion && !pending_add(dst, slot, start, len, sender, component, method, token)) return XIP_ERR_BUSY;
+    if (provider == XIP_LINK_NATIVE && tx) {
+        xip_link_packet pk = {.data = xip_pool_slot(pool, slot) + start, .len = len, .headroom = start, .slot = slot};
+        rc = tx(tx_ctx, token, &pk);
+        if (rc < 0) {
+            if (completion) { typeof(pending[0]) gone; (void)pending_take(slot, &gone); }
+        } else {
+            if (rc == XIP_LINK_TX_DONE) link_complete(slot, XIP_OK);     /* sent already: the runtime's reference ends here */
+            rc = 0;
+        }
+    } else if (provider == XIP_LINK_MODULE) {
+        struct xip_instance *t = by_component(owner, NULL);
+        xip_pool_retain(pool, slot);                                     /* the provider's inbox gets its own reference */
+        rc = t ? deliver(t, slot, start, len, tx_component, tx_method, sender, token, 0, XIP_CALL_LINK, 0) : XIP_ERR_NOTFOUND;
+        if (rc) {
+            drop_slot(slot);
+            if (completion) { typeof(pending[0]) gone; (void)pending_take(slot, &gone); }
+        } else if (!completion) {
+            drop_slot(slot);                                             /* nothing to give back: the provider's reference is the last */
+        }
+    } else {
+        rc = XIP_ERR_UNSUPPORTED;
+        if (completion) { typeof(pending[0]) gone; (void)pending_take(slot, &gone); }
+    }
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l2 = link_at_locked(dst);
+    if (l2) { if (rc == 0) l2->sent++; else if (rc != XIP_ERR_BUSY) l2->dropped++; }
+    portEXIT_CRITICAL(&registry_lock);
+    if (rc == 0 && provider == XIP_LINK_NATIVE && !completion) { /* the driver releases it with tx_done */ }
+    return rc;
+}
+
+/* `send` to a link address. ERR_BUSY is the one failure that leaves the packet with the sender. */
+static int link_send(struct xip_instance *in, uint32_t pkt, size_t len, uint32_t dst, int component, int method, uint64_t token)
+{
+    xip_held_entry *held = xip_held_get(&in->held, pkt);
+    if (!held || held->state != XIP_HELD_OWNED) {
+        (void)xip_held_take(&in->held, pkt);                             /* a borrowed or unknown handle: consumed, as for any send */
+        return XIP_ERR_ARG;
+    }
+    const int slot = held->slot;
+    const uint16_t start = held->start;
+    if (len > XIP_PKT_MAX || start + len > xip_pool_slot_size(pool)) {
+        (void)xip_held_take(&in->held, pkt);
+        drop_slot(slot);
+        in->stats.pkt_dropped++;
+        return XIP_ERR_SIZE;
+    }
+    int rc = link_tx(dst, slot, start, (uint16_t)len, token, in->component, component, method);
+    if (rc == XIP_ERR_BUSY) return rc;                                   /* kept: try another link, or later */
+    (void)xip_held_take(&in->held, pkt);
+    if (rc == 0) { in->stats.pkt_sent++; return 0; }
+    drop_slot(slot);
+    in->stats.pkt_dropped++;
+    return rc;
+}
+
+/* The provider's side of completion, readiness and state. */
+static int c_link_tx_done(void *ctx, uint32_t addr, uint32_t pkt, int outcome)
+{
+    struct xip_instance *in = I(ctx);
+    bool mine;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    mine = l && l->provider == XIP_LINK_MODULE && l->owner == in->component;
+    portEXIT_CRITICAL(&registry_lock);
+    if (!mine) return XIP_ERR_ARG;
+    xip_held_entry e = xip_held_take(&in->held, pkt);
+    if (e.slot < 0) return XIP_ERR_ARG;
+    drop_slot(e.slot);                                                   /* the provider's own reference */
+    link_complete(e.slot, outcome);                                      /* the runtime's: back to the sender, or released */
+    return XIP_OK;
+}
+
+static int c_link_ready(void *ctx, uint32_t addr)
+{
+    struct xip_instance *in = I(ctx);
+    bool mine;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    mine = l && l->provider == XIP_LINK_MODULE && l->owner == in->component;
+    portEXIT_CRITICAL(&registry_lock);
+    if (!mine) return XIP_ERR_ARG;
+    link_event(addr, XIP_LINK_EVENT_READY, 0, 0);
+    return XIP_OK;
+}
+
+static int link_set_state(uint32_t addr, uint32_t state, uint32_t rate_kbps, int owner)
+{
+    bool changed = false;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    if (!l || (owner >= 0 && !(l->provider == XIP_LINK_MODULE && l->owner == owner))) { portEXIT_CRITICAL(&registry_lock); return XIP_ERR_ARG; }
+    changed = l->state != state || l->rate_kbps != rate_kbps;
+    l->state = state; l->rate_kbps = rate_kbps;
+    portEXIT_CRITICAL(&registry_lock);
+    if (changed) link_event(addr, XIP_LINK_EVENT_STATE, (int32_t)state, rate_kbps);
+    return XIP_OK;
+}
+static int c_link_set_state(void *ctx, uint32_t addr, uint32_t state, uint32_t rate_kbps)
+{
+    return link_set_state(addr, state, rate_kbps, I(ctx)->component);
+}
+
+/* ---- receive: the providing side to the subscribers ---- */
+/* A frame that matches a route is sent on from here, before any module is woken. True when it was consumed. */
+static bool link_route(uint32_t addr, int slot, uint16_t start, uint16_t len)
+{
+    uint32_t egress = 0, flags = 0;
+    uint64_t token = 0;
+    bool hit = false;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    if (l && l->key_len && len >= (unsigned)l->key_offset + l->key_len) {
+        const uint8_t *key = xip_pool_slot(pool, slot) + start + l->key_offset;
+        for (unsigned k = 0; k < l->nroutes && !hit; k++) {
+            if (memcmp(l->routes[k].key, key, l->key_len)) continue;
+            egress = l->routes[k].egress; token = l->routes[k].token; flags = l->routes[k].flags;
+            hit = true;
+        }
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    if (!hit) return false;
+    const bool copy = flags & XIP_ROUTE_COPY;
+    if (copy) xip_pool_retain(pool, slot);                               /* one reference for the forward, one for the subscribers */
+    const int rc = link_tx(egress, slot, start, len, token, 0, 0, 0);
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l2 = link_at_locked(addr);
+    if (l2) { if (rc == 0) l2->forwarded++; else l2->dropped++; }
+    portEXIT_CRITICAL(&registry_lock);
+    if (rc) drop_slot(slot);                                             /* the forward's reference: nobody took it */
+    return !copy;
+}
+
+/* The packet in `slot` (one reference is the caller's) goes to the route or to every subscriber: one reference each. */
+static void link_fanout(uint32_t addr, int slot, uint16_t start, uint16_t len, uint64_t source, int32_t signal, uint32_t time_us)
+{
+    struct { int owner, component, method; } subs[XIP_LINK_SUBS];
+    unsigned n = 0;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    if (l) l->received++;
+    portEXIT_CRITICAL(&registry_lock);
+    if (link_route(addr, slot, start, len)) return;
+    portENTER_CRITICAL(&registry_lock);
+    l = link_at_locked(addr);
+    if (l) { n = l->nsubs; memcpy(subs, l->subs, n * sizeof(subs[0])); }
+    portEXIT_CRITICAL(&registry_lock);
+    unsigned lost = 0;
+    if (!n) { drop_slot(slot); return; }
+    for (unsigned k = 0; k < n; k++) {
+        if (k + 1 < n) xip_pool_retain(pool, slot);          /* the last subscriber takes the caller's reference */
+        struct xip_instance *t = by_component(subs[k].owner, NULL);
+        if (!t || deliver(t, slot, start, len, subs[k].component, subs[k].method, addr, source, signal, XIP_CALL_LINK, time_us)) {
+            drop_slot(slot);
+            lost++;
+        }
+    }
+    if (lost) {
+        portENTER_CRITICAL(&registry_lock);
+        l = link_at_locked(addr);
+        if (l) l->dropped += lost;
+        portEXIT_CRITICAL(&registry_lock);
+    }
+}
+
+static int c_link_rx(void *ctx, uint32_t addr, uint32_t pkt, size_t len, uint64_t source, int32_t signal, uint32_t time_us)
+{
+    struct xip_instance *in = I(ctx);
+    xip_held_entry e = xip_held_take(&in->held, pkt);            /* consumed on success and on failure */
+    if (e.slot < 0) return XIP_ERR_ARG;
+    bool mine;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    mine = l && l->provider == XIP_LINK_MODULE && l->owner == in->component;
+    portEXIT_CRITICAL(&registry_lock);
+    if (!mine) { drop_slot(e.slot); return XIP_ERR_ARG; }
+    if (len > XIP_PKT_MAX || e.start + len > xip_pool_slot_size(pool)) { drop_slot(e.slot); return XIP_ERR_SIZE; }
+    in->stats.pkt_sent++;
+    link_fanout(addr, e.slot, e.start, (uint16_t)len, source, signal, time_us ? time_us : now_us32());
+    return XIP_OK;
+}
+
+static int c_link_info(void *ctx, uint32_t addr, xip_link_info *out)
+{
+    (void)ctx;
+    if (!out || out->size < sizeof(*out)) return XIP_ERR_ARG;
+    int rc = XIP_ERR_NOTFOUND;
+    uint32_t size = out->size;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    if (l) {
+        memset(out, 0, sizeof(*out)); out->size = size;
+        out->provider = l->provider; out->state = l->state; out->mtu = l->mtu; out->rate_kbps = l->rate_kbps; out->flags = l->flags;
+        out->subscribers = l->nsubs; out->received = l->received; out->sent = l->sent; out->forwarded = l->forwarded; out->dropped = l->dropped;
+        memcpy(out->name, l->name, sizeof(out->name));
+        rc = XIP_OK;
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    return rc;
+}
+
+static int c_link_classify(void *ctx, uint32_t addr, uint32_t offset, uint32_t len)
+{
+    (void)ctx;
+    if (!len || len > 16 || offset > 255) return XIP_ERR_ARG;
+    int rc = XIP_OK;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    if (!l) rc = XIP_ERR_NOTFOUND;
+    else if (l->key_len != len || l->key_offset != offset) { l->key_len = (uint8_t)len; l->key_offset = (uint8_t)offset; l->nroutes = 0; }
+    portEXIT_CRITICAL(&registry_lock);
+    return rc;
+}
+
+static int c_link_route(void *ctx, uint32_t addr, const uint8_t *key, size_t key_len, uint32_t egress, uint64_t token, uint32_t flags)
+{
+    (void)ctx;
+    int rc = XIP_OK;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    if (!l) rc = XIP_ERR_NOTFOUND;
+    else if (!key || !l->key_len || key_len != l->key_len || !link_at_locked(egress) || egress == addr) rc = XIP_ERR_ARG;
+    else {
+        unsigned k = 0;
+        while (k < l->nroutes && memcmp(l->routes[k].key, key, key_len)) k++;
+        if (k == l->nroutes && l->nroutes == XIP_LINK_ROUTES) rc = XIP_ERR_NOMEM;
+        else {
+            memcpy(l->routes[k].key, key, key_len);
+            l->routes[k].egress = egress; l->routes[k].token = token; l->routes[k].flags = flags;
+            if (k == l->nroutes) l->nroutes++;
+        }
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    return rc;
+}
+
+static int c_link_unroute(void *ctx, uint32_t addr, const uint8_t *key, size_t key_len)
+{
+    (void)ctx;
+    int rc = XIP_ERR_NOTFOUND;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    if (l && key && key_len == l->key_len) {
+        for (unsigned k = 0; k < l->nroutes; k++) {
+            if (memcmp(l->routes[k].key, key, key_len)) continue;
+            l->routes[k] = l->routes[--l->nroutes];
+            rc = XIP_OK;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    return rc;
+}
+
+static const xip_link link_component = {
+    .version = XIP_LINK_VERSION, .size = sizeof(xip_link), .open = c_link_open, .close = c_link_close, .provide = c_link_provide,
+    .rx = c_link_rx, .tx_done = c_link_tx_done, .ready = c_link_ready, .set_state = c_link_set_state, .info = c_link_info,
+    .classify = c_link_classify, .route = c_link_route, .unroute = c_link_unroute,
+};
+static const xip_link *link_table(void) { return &link_component; }
+
+/* A module ended: its subscriptions go, its links lose their provider (the name stays for the subscribers), and the frames it
+ * was holding for the sender are reported as failed. */
+static void links_release(struct xip_instance *in)
+{
+    uint32_t down[XIP_LINKS_MAX];
+    unsigned ndown = 0;
+    portENTER_CRITICAL(&registry_lock);
+    for (int i = 0; i < XIP_LINKS_MAX; i++) {
+        link_t *l = &links[i];
+        if (!l->used) continue;
+        subs_remove_locked(l, in->component);
+        if (l->provider == XIP_LINK_MODULE && l->owner == in->component) {
+            l->provider = XIP_LINK_NONE; l->owner = 0; l->state = XIP_LINK_DOWN; l->nroutes = 0;
+            down[ndown++] = link_addr(l);
+        }
+        if (l->provider == XIP_LINK_NONE && !l->nsubs) l->used = false;
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    for (unsigned k = 0; k < ndown; k++) {
+        for (;;) {                                                       /* what it was transmitting for senders */
+            int slot = -1;
+            portENTER_CRITICAL(&registry_lock);
+            for (int i = 0; i < XIP_TX_PENDING && slot < 0; i++) if (pending[i].used && pending[i].addr == down[k]) slot = pending[i].slot;
+            portEXIT_CRITICAL(&registry_lock);
+            if (slot < 0) break;
+            link_complete(slot, XIP_ERR_IO);
+        }
+        link_event(down[k], XIP_LINK_EVENT_STATE, XIP_LINK_DOWN, 0);
+    }
+}
+
+/* The runtime's own transports: a driver registers a link and hands over what it receives. */
+int xip_link_native_register(const char *name, uint32_t mtu, uint32_t flags, xip_link_tx_fn tx, void *ctx)
+{
+    int rc;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_named_locked(name, true);
+    if (!l) rc = name ? XIP_ERR_NOMEM : XIP_ERR_ARG;
+    else if (l->provider == XIP_LINK_MODULE || (l->provider == XIP_LINK_NATIVE && l->tx != tx)) rc = XIP_ERR_BUSY;
+    else { l->provider = XIP_LINK_NATIVE; l->tx = tx; l->tx_ctx = ctx; l->mtu = mtu; l->flags = flags; rc = (int)link_addr(l); }
+    portEXIT_CRITICAL(&registry_lock);
+    return rc;
+}
+
+void xip_link_native_unregister(int addr)
+{
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked((uint32_t)addr);
+    if (l && l->provider == XIP_LINK_NATIVE) { l->provider = XIP_LINK_NONE; l->tx = NULL; l->state = XIP_LINK_DOWN; l->nroutes = 0; if (!l->nsubs) l->used = false; }
+    portEXIT_CRITICAL(&registry_lock);
+}
+
+int xip_link_native_set_state(int addr, uint32_t state, uint32_t rate_kbps) { return link_set_state((uint32_t)addr, state, rate_kbps, -1); }
+void xip_link_native_ready(int addr) { link_event((uint32_t)addr, XIP_LINK_EVENT_READY, 0, 0); }
+void xip_link_native_tx_done(int addr, int slot, int outcome) { (void)addr; link_complete(slot, outcome); }
+
+/* Receive without a copy: the driver parses into a pool packet, the way DMesh's receive_now_with does. begin returns 0 and a
+ * packet to fill (capacity XIP_PKT_MAX at the payload window), 1 when nobody listens (skip the frame), or an error (XIP_ERR_NOMEM:
+ * the pool is empty, counted). Then commit (the frame is `len` bytes; stamped now) or abort. */
+int xip_link_native_rx_begin(int addr, xip_link_rx_buf *buf)
+{
+    xip_pool *p = pool_get();
+    unsigned subs = 0;
+    bool routed = false;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked((uint32_t)addr);
+    if (l) { subs = l->nsubs; routed = l->nroutes != 0; }
+    portEXIT_CRITICAL(&registry_lock);
+    if (!l || !buf || !p) return XIP_ERR_ARG;
+    if (!subs && !routed) return 1;
+    int slot = xip_pool_acquire(p, 0);
+    if (slot < 0) {
+        portENTER_CRITICAL(&registry_lock);
+        l = link_at_locked((uint32_t)addr);
+        if (l) l->dropped++;
+        portEXIT_CRITICAL(&registry_lock);
+        return XIP_ERR_NOMEM;
+    }
+    buf->slot = slot;
+    buf->data = xip_pool_slot(p, slot) + XIP_PKT_HEADROOM;
+    buf->capacity = XIP_PKT_MAX;
+    return XIP_OK;
+}
+
+void xip_link_native_rx_commit(int addr, const xip_link_rx_buf *buf, size_t len, uint64_t source, int32_t signal)
+{
+    if (len > XIP_PKT_MAX) { drop_slot(buf->slot); return; }
+    link_fanout((uint32_t)addr, buf->slot, XIP_PKT_HEADROOM, (uint16_t)len, source, signal, now_us32());
+}
+
+void xip_link_native_rx_abort(const xip_link_rx_buf *buf) { drop_slot(buf->slot); }
+
+int xip_link_native_rx(int addr, uint64_t source, int32_t signal, const uint8_t *data, size_t len)
+{
+    const uint32_t time_us = now_us32();                                 /* the driver's callback, not the delivery */
+    xip_pool *p = pool_get();
+    unsigned subs = 0;
+    bool routed = false;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked((uint32_t)addr);
+    if (l) { subs = l->nsubs; routed = l->nroutes != 0; }
+    portEXIT_CRITICAL(&registry_lock);
+    if (!l || (len && !data) || !p) return XIP_ERR_ARG;
+    if (!subs && !routed) return XIP_OK;                                 /* nobody listens: not worth a packet */
+    if (len > XIP_PKT_MAX) return XIP_ERR_SIZE;
+    int slot = xip_pool_acquire(p, 0);
+    if (slot < 0) {
+        portENTER_CRITICAL(&registry_lock);
+        l = link_at_locked((uint32_t)addr);
+        if (l) l->dropped++;
+        portEXIT_CRITICAL(&registry_lock);
+        return XIP_ERR_NOMEM;
+    }
+    if (len) memcpy(xip_pool_slot(p, slot) + XIP_PKT_HEADROOM, data, len);
+    link_fanout((uint32_t)addr, slot, XIP_PKT_HEADROOM, (uint16_t)len, source, signal, time_us);
+    return XIP_OK;
 }
 
 /* Release what a module still holds or has waiting (it ended): on the worker, in finish(). */
@@ -686,6 +1307,7 @@ static void finish(struct xip_instance *in, int result)
     socket_release(in->id);
     flash_release(in->id);
     serial_release(in);
+    links_release(in);
     const unsigned leaked_packets = packets_release(in);
     const uint32_t leaked_bytes = xip_mem_used(&in->mem);        /* cannot be freed: nobody knows where it is */
     in->stats.mem_leaked = leaked_bytes;
@@ -728,10 +1350,10 @@ static int dispatch(struct xip_instance *in, int component, int method, int valu
 }
 
 static int dispatch_packet(struct xip_instance *in, int component, int method, const uint8_t *data, size_t len, uint32_t pkt,
-                           uint32_t from, uint64_t id, uint32_t flags)
+                           uint32_t from, uint64_t id, uint32_t flags, int32_t value, uint32_t time_us)
 {
-    const xip_call call = {.size = sizeof(call), .component = component, .method = method, .data = data, .len = len,
-                              .pkt = pkt, .from = from, .id = id, .flags = flags};
+    const xip_call call = {.size = sizeof(call), .component = component, .method = method, .value = value, .data = data, .len = len,
+                              .pkt = pkt, .from = from, .id = id, .flags = flags, .time_us = time_us};
     return dispatch_x(in, &call);
 }
 
@@ -796,6 +1418,8 @@ static void handle_packets(struct xip_instance *in)
         int32_t component = 0, method = 0;
         uint32_t from = 0;
         uint64_t id = 0;
+        int32_t value = 0;
+        uint32_t lflags = 0, time_us = 0;
         bool was_full = false;
         portENTER_CRITICAL(&registry_lock);
         if (in->pkt_count) {
@@ -804,6 +1428,7 @@ static void handle_packets(struct xip_instance *in)
             slot = in->pkt_in[at].slot; start = in->pkt_in[at].start; len = in->pkt_in[at].len;
             component = in->pkt_in[at].component; method = in->pkt_in[at].method;
             from = in->pkt_in[at].from; id = in->pkt_in[at].id;
+            value = in->pkt_in[at].value; lflags = in->pkt_in[at].lflags; time_us = in->pkt_in[at].time_us;
             in->pkt_head = (uint8_t)((at + 1) % CONFIG_XIP_PKT_INBOX);
             in->pkt_count--;
         }
@@ -813,16 +1438,19 @@ static void handle_packets(struct xip_instance *in)
         uint32_t h = xip_held_add(&in->held, slot, start, len, XIP_HELD_BORROWED);
         if (!h) { drop_slot(slot); in->stats.pkt_dropped++; continue; }
         in->stats.pkt_received++;
-        const bool wants = id != 0;
+        const bool wants = id != 0 && !(lflags & XIP_CALL_LINK);      /* a frame of a link has an address token in `id`, not a request to answer */
         if (wants && !in->response) in->response = malloc(CONFIG_XIP_RESPONSE_MAX);
         in->in_request = wants && in->response; in->responded = false; in->response_len = 0;
-        const int rc = dispatch_packet(in, component, method, xip_pool_slot(pool, slot) + start, len, h, from, id, wants ? 1 : 0);
+        const int rc = dispatch_packet(in, component, method, xip_pool_slot(pool, slot) + start, len, h, from, id,
+                                       (wants ? 1u : 0u) | lflags, value, time_us);
         in->in_request = false;
         if (wants && in->responded) answer(in, from, component, method, id, in->response, in->response_len);
         xip_held_entry *e = xip_held_get(&in->held, h);
         if (e && e->state == XIP_HELD_BORROWED) {         /* not kept, not sent on */
             xip_held_take(&in->held, h);
             drop_slot(slot);
+            /* a frame handed to a provider that did not keep it is sent, as far as the sender is concerned */
+            if ((lflags & XIP_CALL_LINK) && !(lflags & XIP_CALL_LINK_EVENT) && from < XIP_ADDR_LINK) link_tx_returned(from, slot);
         }
         if (settle(in, rc)) return;
     }
@@ -833,27 +1461,28 @@ static void worker(void *arg)
     (void)arg;
     xip_event_t ev;
     for (;;) {
-        if (atomic_exchange(&transport_pending, false)) {
-            ev = (xip_event_t){.kind = XIP_EV_TRANSPORT, .value = (int32_t)atomic_load(&transport_generation)};
+        if (atomic_exchange(&wifi_pending, false)) {
+            ev = (xip_event_t){.kind = XIP_EV_WIFI, .value = (int32_t)atomic_load(&wifi_generation)};
         } else {
             if (xQueueReceive(worker_queue, &ev, portMAX_DELAY) != pdTRUE) continue;
-            if (ev.kind == XIP_EV_TRANSPORT) {
-                if (!atomic_exchange(&transport_pending, false)) continue;
-                ev.value = (int32_t)atomic_load(&transport_generation);
+            if (ev.kind == XIP_EV_WIFI) {
+                if (!atomic_exchange(&wifi_pending, false)) continue;
+                ev.value = (int32_t)atomic_load(&wifi_generation);
             }
         }
-        if (ev.kind == XIP_EV_NETWORK || ev.kind == XIP_EV_WAKE || ev.kind == XIP_EV_TRANSPORT) {
-            if (ev.kind == XIP_EV_TRANSPORT && hooks.transport_reconcile) hooks.transport_reconcile();
+        if (ev.kind == XIP_EV_SLEEP) { xip_power_cycle(); continue; }
+        if (ev.kind == XIP_EV_NETWORK || ev.kind == XIP_EV_WAKE || ev.kind == XIP_EV_WIFI) {
+            if (ev.kind == XIP_EV_WIFI && hooks.wifi_reconcile) hooks.wifi_reconcile();
             for (int i = 0; i < XIP_MAX_INSTANCES; i++) {
                 struct xip_instance *in = registry[i];
                 if (!in) continue;
-                if (ev.kind == XIP_EV_TRANSPORT) {
-                    (void)settle(in, dispatch(in, XIP_HOST_COMPONENT, XIP_HOST_TRANSPORT, ev.value, 0, NULL, 0));
+                if (ev.kind == XIP_EV_WIFI) {
+                    (void)settle(in, dispatch(in, XIP_HOST_COMPONENT, XIP_HOST_WIFI, ev.value, 0, NULL, 0));
                 } else if (ev.kind == XIP_EV_WAKE) {
                     bool want = false;
                     for (int k = 0; k < XIP_ALARMS; k++) want |= in->alarms[k].used && (in->alarms[k].flags & XIP_ALARM_WINDOW);
                     if (!want) continue;
-                    if (settle(in, dispatch(in, XIP_HOST_COMPONENT, XIP_HOST_WAKE, 0, 0, NULL, 0))) continue;
+                    if (settle(in, dispatch(in, XIP_HOST_COMPONENT, XIP_HOST_WAKE, ev.value, 0, NULL, 0))) continue;
                 } else {
                     if (settle(in, dispatch(in, XIP_HOST_COMPONENT, XIP_HOST_NETWORK, ev.value, 0, NULL, 0))) continue;
                     if (!ev.value) continue;
@@ -884,6 +1513,12 @@ static void worker(void *arg)
             break;
         case XIP_EV_REQUEST: handle_request(in, &ev); break;
         case XIP_EV_PACKET: handle_packets(in); break;
+        case XIP_EV_LINK: {
+            xip_call call = {.size = sizeof(call), .component = ev.component, .method = ev.method, .value = ev.value, .from = ev.from,
+                                .id = ev.id, .flags = ev.flags};
+            (void)settle(in, dispatch_x(in, &call));
+            break;
+        }
         case XIP_EV_IO: {
             if (ev.value >= XIP_SOCKET_EVENT_OPEN && ev.value <= XIP_SOCKET_EVENT_WRITE_DONE) socket_delivered((uint32_t)ev.id);
             xip_call call = {.size = sizeof(call), .component = ev.component, .method = ev.method,
@@ -906,8 +1541,8 @@ esp_err_t xip_host_init(const xip_host_hooks_t *h)
 {
     if (inited) return ESP_OK;
     if (h) hooks = *h;
-    extern void xip_profile_install(xip_host_hooks_t *);
-    xip_profile_install(&hooks);
+    extern void xip_wifi_intent_install(xip_host_hooks_t *);
+    xip_wifi_intent_install(&hooks);
     xip_periph_reserve((h ? h->reserved_pins : 0) | xip_serial_pins());
     if (inited) return ESP_OK;
     if (xip_info_init()) return ESP_ERR_NO_MEM;
@@ -917,8 +1552,8 @@ esp_err_t xip_host_init(const xip_host_hooks_t *h)
         return ESP_ERR_NO_MEM;
     xip_periph_init();
     inited = true;
-    xip_bearer_profile initial = {.size = sizeof(initial)}; uint32_t generation;
-    if (hooks.transport_get && !hooks.transport_get(&initial, &generation)) xip_host_transport_changed(generation);
+    xip_wifi_intent initial = {.size = sizeof(initial)}; uint32_t generation;
+    if (hooks.wifi_get && !hooks.wifi_get(&initial, &generation)) xip_host_wifi_changed(generation);
     return ESP_OK;
 }
 
@@ -935,12 +1570,12 @@ esp_err_t xip_host_init_simple(xip_host_emit_fn emit, const xip_host_ext_t *ext)
     simple_emit = emit;
     xip_host_hooks_t h = {.emit = simple_on_emit};
     if (ext) {
-        h.wifi_start = ext->wifi_start; h.wifi_stop = ext->wifi_stop; h.wifi_status = ext->wifi_status;
-        h.wifi_config = ext->wifi_config; h.wifi_saved = ext->wifi_saved; h.nv = ext->nv; h.pool = ext->pool; h.wifi_scan = ext->wifi_scan;
+        h.wifi_set = ext->wifi_set; h.wifi_get = ext->wifi_get; h.wifi_state = ext->wifi_state;
+        h.nv = ext->nv; h.pool = ext->pool; h.wifi_scan = ext->wifi_scan; h.wifi_monitor = ext->wifi_monitor;
         h.modules_info = ext->modules_info; h.module_start = ext->module_start; h.module_stop = ext->module_stop;
         h.module_manifest = ext->module_manifest;
-        h.transport_reconcile = ext->transport_reconcile;
-        h.transport_set = ext->transport_set; h.transport_get = ext->transport_get;
+        h.wifi_reconcile = ext->wifi_reconcile;
+        h.wifi_tuning_set = ext->wifi_tuning_set; h.wifi_tuning_get = ext->wifi_tuning_get;
         h.packet = ext->packet; h.inbox_ready = ext->inbox_ready;
     }
     return xip_host_init(&h);
@@ -954,27 +1589,36 @@ void xip_host_set_connected(bool connected)
     (void)xQueueSend(worker_queue, &ev, 0);
 }
 
-void xip_host_wake_window(void)
+void xip_power_post(void)
 {
     if (!inited) return;
-    xip_event_t ev = {.kind = XIP_EV_WAKE};
+    xip_event_t ev = {.kind = XIP_EV_SLEEP};
     (void)xQueueSend(worker_queue, &ev, 0);
 }
 
-void xip_host_transport_changed(uint32_t generation)
+void xip_host_wake_window_value(int32_t value)
 {
     if (!inited) return;
-    atomic_store(&transport_generation, generation);
-    atomic_store(&transport_pending, true);
-    xip_event_t ev = {.kind = XIP_EV_TRANSPORT};
+    xip_event_t ev = {.kind = XIP_EV_WAKE, .value = value};
+    (void)xQueueSend(worker_queue, &ev, 0);
+}
+
+void xip_host_wake_window(void) { xip_host_wake_window_value(0); }
+
+void xip_host_wifi_changed(uint32_t generation)
+{
+    if (!inited) return;
+    atomic_store(&wifi_generation, generation);
+    atomic_store(&wifi_pending, true);
+    xip_event_t ev = {.kind = XIP_EV_WIFI};
     (void)xQueueSend(worker_queue, &ev, 0);
 }
 
 uint32_t xip_host_features(void)
 {
-    return XIP_FEAT_FLASH | XIP_FEAT_SOCKET | (hooks.transport_set ? XIP_FEAT_TRANSPORT_PROFILE : 0) | XIP_FEAT_SETTINGS | XIP_FEAT_SPI | XIP_FEAT_SPI_READY | XIP_FEAT_I2C |
+    return XIP_FEAT_FLASH | XIP_FEAT_SOCKET | XIP_FEAT_SETTINGS | XIP_FEAT_SPI | XIP_FEAT_SPI_READY | XIP_FEAT_I2C |
            XIP_FEAT_ADC | XIP_FEAT_RGBLED | XIP_FEAT_SERVICE |
-           (hooks.next_window_ms ? XIP_FEAT_ALARM_FLEX : 0) | (hooks.wifi_start ? XIP_FEAT_WIFI : 0) |
+           (hooks.next_window_ms ? XIP_FEAT_ALARM_FLEX : 0) | (hooks.wifi_set ? XIP_FEAT_WIFI : 0) |
            XIP_FEAT_SERIAL | XIP_FEAT_PACKETS | XIP_FEAT_MEMORY | (hooks.modules_info ? XIP_FEAT_MODULES : 0);
 }
 
@@ -994,7 +1638,6 @@ xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_
     if (!in->state || !in->inbox) { free(in->state); free(in->inbox); free(in); return NULL; }
     in->table = (xip_host){
         .device_info = h_device_info, .info_publish = h_info_publish, .get_component = h_get_component,
-        .transport_set = h_transport_set, .transport_get = h_transport_get,
         .abi_version = XIP_ABI_VERSION,
         .size = sizeof(xip_host),
         .features = xip_host_features(),
@@ -1002,7 +1645,7 @@ xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_
         .log = h_log, .now_ms = h_now_ms, .respond = h_respond, .emit = h_emit,
         .call_service = h_call_service, .get_setting = h_get_setting, .set_setting = h_set_setting,
         .alarm_set = h_alarm_set, .alarm_cancel = h_alarm_cancel, .connected = h_connected,
-        .wifi_start = h_wifi_start, .wifi_stop = h_wifi_stop, .wifi_info = h_wifi_info, .wifi_config = h_wifi_config,
+        .wifi_info = h_wifi_info,
         .serial_open = h_serial_open, .serial_write = h_serial_write, .serial_close = h_serial_close,
         .modules_info = h_modules_info, .module_start = h_module_start, .module_stop = h_module_stop,
         .events_info = h_events_info, .reset = h_reset,

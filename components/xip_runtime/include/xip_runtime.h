@@ -2,7 +2,7 @@
 /* The ESP-IDF side of the module ABI (include/xip.h): builds the host table a module calls.
  *
  * One instance per running module. All module code runs on one worker task, one handler call at a time
- * (abi/API.md, Model): the host sleeps until an alarm, an interrupt or a request. An instance owns everything the
+ * (xip-abi crate docs, Model): the host sleeps until an alarm, an interrupt or a request. An instance owns everything the
  * module acquires (pins, interrupts, SPI devices, alarms, scratch memory) and gives it all back when it ends
  * (STOP, a handler returning XIP_RET_DONE or an error), so nothing is left behind. The instance does not depend
  * on the loader: an application can create one around a handler it links (how the same module source runs linked
@@ -32,21 +32,18 @@ typedef struct {
                         size_t request_len, uint8_t *response, size_t response_capacity,
                         size_t *response_len, uint32_t timeout_ms);
     void *service_ctx;
-    /* wifi_* and the module calls of abi/API.md. NULL: not offered; the optional
+    /* the wifi component and the module calls of include/xip.h. NULL: not offered; the optional
      * xip_wifi component implements simple STA hooks in C, and the Rust host has its own STA hooks.
      * xip_loader implements the module ones; all are called on the
-     * worker and must return at once. wifi_status fills state (0 off, 1 joining, 2 up), the name, the IPv4 address
-     * and the signal; the host turns it into the CBOR of wifi_info. modules_info writes CBOR (slot records). */
-    int (*wifi_start)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
-    void (*wifi_stop)(void);
-    int (*wifi_status)(int *state, char ssid[33], char ip[16], int *rssi);
+     * worker and must return at once. wifi_state fills xip_wifi_state; the host turns it
+     * into the CBOR of wifi_info. modules_info writes CBOR (slot records). */
+    int (*wifi_set)(const xip_wifi_intent *intent, uint32_t *generation);
+    int (*wifi_get)(xip_wifi_intent *intent, uint32_t *generation);
+    int (*wifi_state)(xip_wifi_state *state);
     /* Nonblocking scan: first call starts it and returns -5; later calls return -5 until done, then fill up to `max`
      * entries and return the count. The host turns them into the CBOR array of wifi_scan. */
     int (*wifi_scan)(xip_ap_t *aps, size_t max);
-    /* The device's own (optional) network, kept in NVS by the application: set (empty ssid clears) and read back (1: configured). */
-    int (*wifi_config)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
-    int (*wifi_saved)(char ssid[33], int *has_psk);
-    /* A named device setting (abi/API.md, nv): value NULL reads into out and returns the length; -1 bad argument, -3 storage,
+    /* A named device setting (include/xip.h, nv): value NULL reads into out and returns the length; -1 bad argument, -3 storage,
      * -4 unknown or unset, -5 buffer too small. The application answers for its own names. */
     int (*nv)(const char *key, size_t key_len, const uint8_t *value, size_t value_len, uint8_t *out, size_t cap);
     /* The application's own packet pool (DMesh: the QUIC pool), used for every packet a module takes or is sent, instead of one of
@@ -56,7 +53,7 @@ typedef struct {
     int (*module_start)(const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len);
     int (*module_stop)(const uint8_t *name, size_t name_len);
     int (*module_manifest)(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
-    /* A module sent a packet to ADDR_MAIN (abi/API.md, send): `from` is its component, `data` the message. The packet is
+    /* A module sent a packet to ADDR_MAIN (include/xip.h, send): `from` is its component, `data` the message. The packet is
      * lent for the call and goes back to the pool when the hook returns: copy what must stay. */
     int (*packet)(void *ctx, const char *module, uint32_t from, int component, int method, uint64_t id, const uint8_t *data, size_t len);
     void *packet_ctx;
@@ -72,24 +69,24 @@ typedef struct {
     uint32_t (*next_window_ms)(void *ctx);
     void *window_ctx;
     /* Optional subset owner, invoked on the serialized worker after profile publication. */
-    void (*transport_reconcile)(void);
-    int (*transport_set)(const uint8_t *request, size_t len, uint32_t *generation);
-    int (*transport_get)(xip_bearer_profile *profile, uint32_t *generation);
+    void (*wifi_reconcile)(void);
+    /* The wifi-tuning component (advanced driver settings). A change is announced with xip_host_wifi_changed. */
+    int (*wifi_tuning_set)(const xip_wifi_tuning *tuning);
+    int (*wifi_tuning_get)(xip_wifi_tuning *tuning);
+    /* Promiscuous receive on/off (xip_wifi_monitor, include/xip.h): the frames go to the "promisc" link. NULL: ERR_UNSUPPORTED. */
+    int (*wifi_monitor)(const xip_wifi_monitor *monitor);
 } xip_host_hooks_t;
 
 /* For an application that cannot build the hook table (Rust): events only, plus the network calls when given. */
 typedef int (*xip_host_emit_fn)(const char *module, uint16_t event_id, uint8_t value_type, const uint8_t *value, size_t len);
 typedef struct {
-    int (*wifi_start)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
-    void (*wifi_stop)(void);
-    int (*wifi_status)(int *state, char ssid[33], char ip[16], int *rssi);
+    int (*wifi_set)(const xip_wifi_intent *intent, uint32_t *generation);
+    int (*wifi_get)(xip_wifi_intent *intent, uint32_t *generation);
+    int (*wifi_state)(xip_wifi_state *state);
     /* Nonblocking scan: first call starts it and returns -5; later calls return -5 until done, then fill up to `max`
      * entries and return the count. The host turns them into the CBOR array of wifi_scan. */
     int (*wifi_scan)(xip_ap_t *aps, size_t max);
-    /* The device's own (optional) network, kept in NVS by the application: set (empty ssid clears) and read back (1: configured). */
-    int (*wifi_config)(const uint8_t *ssid, size_t ssid_len, const uint8_t *psk, size_t psk_len);
-    int (*wifi_saved)(char ssid[33], int *has_psk);
-    /* A named device setting (abi/API.md, nv): value NULL reads into out and returns the length; -1 bad argument, -3 storage,
+    /* A named device setting (include/xip.h, nv): value NULL reads into out and returns the length; -1 bad argument, -3 storage,
      * -4 unknown or unset, -5 buffer too small. The application answers for its own names. */
     int (*nv)(const char *key, size_t key_len, const uint8_t *value, size_t value_len, uint8_t *out, size_t cap);
     /* The application's own packet pool (DMesh: the QUIC pool), used for every packet a module takes or is sent, instead of one of
@@ -102,24 +99,60 @@ typedef struct {
     int (*packet)(void *ctx, const char *module, uint32_t from, int component, int method, uint64_t id, const uint8_t *data, size_t len);
     void (*inbox_ready)(void *ctx, int component);
     /* Optional subset owner, invoked on the serialized worker after profile publication. */
-    void (*transport_reconcile)(void);
-    int (*transport_set)(const uint8_t *request, size_t len, uint32_t *generation);
-    int (*transport_get)(xip_bearer_profile *profile, uint32_t *generation);
+    void (*wifi_reconcile)(void);
+    int (*wifi_tuning_set)(const xip_wifi_tuning *tuning);
+    int (*wifi_tuning_get)(xip_wifi_tuning *tuning);
+    int (*wifi_monitor)(const xip_wifi_monitor *monitor);
 } xip_host_ext_t;
 esp_err_t xip_host_init_simple(xip_host_emit_fn emit, const xip_host_ext_t *ext);
 
 /* Once, before the first instance. NVS must be initialised by the application (settings). Starts the worker. */
 esp_err_t xip_host_init(const xip_host_hooks_t *hooks);
 
+/* The sleep owner (xip_power.c, the `power` component): the radio steps around a light sleep. `suspend` stops the radio the way an epoch ends and returns
+ * whether it was up; `resume` brings it back with the same settings. NULL: sleep without touching the radio (an application that owns the radio). */
+typedef struct {
+    bool (*suspend)(void);
+    void (*resume)(void);
+} xip_power_radio;
+void xip_power_set_radio(const xip_power_radio *radio);
+
 /* Connectivity changed (any task): every module gets HOST_NETWORK, and CONNECTED alarms that were waiting are armed. */
 void xip_host_set_connected(bool connected);
 /* A wake window opened (any task): modules with a WINDOW alarm get HOST_WAKE. */
 void xip_host_wake_window(void);
-/* Desired profile committed: queued on the serialized module worker. */
-void xip_host_transport_changed(uint32_t generation);
-/* Desired state API for C owners. Set/get copy a coherent snapshot. */
-int xip_transport_set(const uint8_t *request, size_t len, uint32_t *generation);
-int xip_transport_get(xip_bearer_profile *profile, uint32_t *generation);
+/* The same, with the reason as the value of HOST_WAKE (a sleep ended: the wake cause). */
+void xip_host_wake_window_value(int32_t value);
+/* The wanted Wi-Fi state was committed: queued on the serialized module worker (wifi_reconcile, then HOST_WIFI to modules). */
+void xip_host_wifi_changed(uint32_t generation);
+/* The runtime's own transports (the `link` component): a driver registers a named link with the function that transmits a
+ * frame, and hands every received frame to xip_link_native_rx (any task, including the driver's own: copied into a pool packet,
+ * stamped with the time of the call, routed or delivered to the subscribers; dropped when nobody listens). `dest` is the
+ * destination token of `send` (0: broadcast), `source` the token of the sender, `signal` as xip_link_signal().
+ *
+ * Transmit: `tx` gets the frame in a pool packet that the runtime owns until the driver is done. It returns a negative error to
+ * refuse (XIP_ERR_BUSY: the sender keeps the packet and waits for the READY event; call xip_link_native_ready when there is room),
+ * XIP_LINK_TX_DONE when the frame is already sent, or 0 when it will be: the driver then calls xip_link_native_tx_done(addr,
+ * pkt->slot, outcome) exactly once, from any task. `data` may be moved back into `headroom` to prepend the driver's envelope. */
+typedef struct { uint8_t *data; size_t len; size_t headroom; int slot; } xip_link_packet;
+#define XIP_LINK_TX_DONE 1
+typedef int (*xip_link_tx_fn)(void *ctx, uint64_t dest, const xip_link_packet *pkt);
+int xip_link_native_register(const char *name, uint32_t mtu, uint32_t flags, xip_link_tx_fn tx, void *ctx);
+void xip_link_native_unregister(int addr);
+int xip_link_native_set_state(int addr, uint32_t state, uint32_t rate_kbps);
+void xip_link_native_ready(int addr);
+void xip_link_native_tx_done(int addr, int slot, int outcome);
+int xip_link_native_rx(int addr, uint64_t source, int32_t signal, const uint8_t *data, size_t len);
+/* The same without the copy: begin (0 + a packet to fill, 1 nobody listens, or an error), parse into buf->data, then commit or abort. */
+typedef struct { uint8_t *data; size_t capacity; int slot; } xip_link_rx_buf;
+int xip_link_native_rx_begin(int addr, xip_link_rx_buf *buf);
+void xip_link_native_rx_commit(int addr, const xip_link_rx_buf *buf, size_t len, uint64_t source, int32_t signal);
+void xip_link_native_rx_abort(const xip_link_rx_buf *buf);
+
+/* The wanted state for C owners (the same as the wifi component). Copies a coherent snapshot. */
+int xip_wifi_set_intent(const xip_wifi_intent *intent, uint32_t *generation);
+int xip_wifi_get_intent(xip_wifi_intent *intent, uint32_t *generation);
+int xip_wifi_get_tuning(xip_wifi_tuning *tuning);
 
 /* Structured status for native host components, using the same cache as modules.
  * Native publications live until replaced or cleared (len zero). Copies the map. */

@@ -195,6 +195,10 @@ static void serial_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* The port is USB-Serial/JTAG (selected at boot), connected or not: light sleep powers it down. */
+bool xip_serial_usb_selected(void) { return s.usb; }
+
+/* A USB-Serial/JTAG console with a host attached right now: the sleep owner makes sleeps soft then (xip_power.c explains why). */
 bool xip_serial_usb_active(void)
 {
 #if CONFIG_IDF_TARGET_ESP32C6

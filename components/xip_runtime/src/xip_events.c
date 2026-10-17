@@ -2,6 +2,7 @@
 /* The last events modules emitted (events_info) and the state of the Wi-Fi (wifi_info), as CBOR records: the keys are the
  * `event` and `wifi` records of modules/mod_console/API.md, which the console module turns into text. Nothing here
  * formats a string. */
+#include <stdio.h>
 #include <string.h>
 #include "esp_heap_caps.h"
 #include "sdkconfig.h"
@@ -56,33 +57,30 @@ int xip_events_info(uint8_t *out, size_t cap)
     return len < 0 ? XIP_ERR_SIZE : len;
 }
 
-/* {1: state, 2: ssid, 3: ip, 4: rssi} (the last three once up), 5: configured ssid and 6: psk set (when one is configured) */
+/* {1: state, 2: ssid, 3: ip, 4: rssi} (the last three once up), 5: AP up, 6: channel */
 int xip_wifi_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
 {
-    int state = 0, rssi = 0;
-    char ssid[33] = "", ip[16] = "";
-    int rc = hooks->wifi_status(&state, ssid, ip, &rssi);
+    xip_wifi_state st = {.size = sizeof(st)};
+    int rc = hooks->wifi_state(&st);
     if (rc) return rc;
     xip_cbor_w w;
     xip_cbor_init(&w, out, cap);
-    char saved[33] = "";
-    int has_psk = 0, configured = hooks->wifi_saved ? hooks->wifi_saved(saved, &has_psk) > 0 : 0;
-    xip_cbor_map(&w, (state == 2 ? 4 : 1) + (configured ? 2 : 0));
-    xip_cbor_uint(&w, 1); xip_cbor_uint(&w, (uint64_t)state);
-    if (state == 2) {
-        xip_cbor_uint(&w, 2); xip_cbor_text(&w, ssid, strlen(ssid));
-        xip_cbor_uint(&w, 3); xip_cbor_text(&w, ip, strlen(ip));
-        xip_cbor_uint(&w, 4); xip_cbor_int(&w, rssi);
+    xip_cbor_map(&w, (st.sta == 2 ? 4 : 1) + (st.ap ? 1 : 0) + (st.channel ? 1 : 0));
+    xip_cbor_uint(&w, 1); xip_cbor_uint(&w, st.sta);
+    if (st.sta == 2) {
+        char ip[16];
+        int n = snprintf(ip, sizeof(ip), "%u.%u.%u.%u", st.ip4[0], st.ip4[1], st.ip4[2], st.ip4[3]);
+        xip_cbor_uint(&w, 2); xip_cbor_text(&w, (const char *)st.ssid, st.ssid_len);
+        xip_cbor_uint(&w, 3); xip_cbor_text(&w, ip, n > 0 ? (size_t)n : 0);
+        xip_cbor_uint(&w, 4); xip_cbor_int(&w, st.rssi);
     }
-    if (configured) {
-        xip_cbor_uint(&w, 5); xip_cbor_text(&w, saved, strlen(saved));
-        xip_cbor_uint(&w, 6); xip_cbor_bool(&w, has_psk);
-    }
+    if (st.ap) { xip_cbor_uint(&w, 5); xip_cbor_bool(&w, true); }
+    if (st.channel) { xip_cbor_uint(&w, 6); xip_cbor_uint(&w, st.channel); }
     int len = xip_cbor_done(&w);
     return len < 0 ? XIP_ERR_SIZE : len;
 }
 
-/* wifi_scan: an array of {1: ssid, 2: bssid, 3: rssi, 4: channel, 5: auth}, as many as fit */
+/* wifi_scan: {1: [{1: ssid, 2: bssid, 3: rssi, 4: channel, 5: auth}, ...]}, as many as fit (api/wifi.API.md) */
 int xip_wifi_scan(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
 {
     enum { MAX_APS = 24, ENTRY = 56 };
@@ -91,9 +89,11 @@ int xip_wifi_scan(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
     int n = hooks->wifi_scan(aps, MAX_APS), rc;
     if (n < 0) rc = n == -5 ? XIP_ERR_BUSY : n == -6 ? XIP_ERR_NOMEM : XIP_ERR_IO;
     else {
-        if ((size_t)n > (cap > 4 ? (cap - 4) / ENTRY : 0)) n = (int)(cap > 4 ? (cap - 4) / ENTRY : 0);
+        if ((size_t)n > (cap > 6 ? (cap - 6) / ENTRY : 0)) n = (int)(cap > 6 ? (cap - 6) / ENTRY : 0);
         xip_cbor_w w;
         xip_cbor_init(&w, out, cap);
+        xip_cbor_map(&w, 1);
+        xip_cbor_uint(&w, 1);
         xip_cbor_array(&w, (uint64_t)n);
         for (int i = 0; i < n; ++i) {
             xip_cbor_map(&w, 5);
@@ -126,7 +126,7 @@ int xip_heap_info(uint8_t *out, size_t cap)
     return len < 0 ? XIP_ERR_SIZE : len;
 }
 
-/* heap_dump: kinds in abi/API.md. Printed with the log, for a person at the port. */
+/* heap_dump: kinds in include/xip.h (heap_dump). Printed with the log, for a person at the port. */
 #if CONFIG_HEAP_TRACING_STANDALONE
 #define TRACE_RECORDS 200
 static heap_trace_record_t *trace_buf;

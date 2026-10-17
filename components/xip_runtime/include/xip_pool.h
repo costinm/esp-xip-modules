@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* The packet pool of the C runtime, and the table of packets a module holds. No ESP-IDF in here: it builds on a PC for the host
- * tests. What every runtime must agree on is the contract in abi/API.md and docs/packets.md, not this code.
+ * tests. What every runtime must agree on is the contract in include/xip.h (PKT) and docs/packets.md, not this code.
  *
  * Slots with reference counts, the way QUIC-lite's heap pool does it: a table of at most `slots` entries, each slot's storage
  * allocated when it is first needed and given back when more than `keep` idle slots hold storage, so a device whose modules are

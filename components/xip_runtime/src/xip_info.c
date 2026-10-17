@@ -82,7 +82,7 @@ int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
     /* Let each existing encoder use the unused tail of the caller's buffer. */
     xip_cbor_uint(&w, 2);
     if (w.overflow) return XIP_ERR_SIZE;
-    int n = hooks->wifi_status ? xip_wifi_info(hooks, out + w.len, cap - w.len) : XIP_ERR_UNSUPPORTED;
+    int n = hooks->wifi_state ? xip_wifi_info(hooks, out + w.len, cap - w.len) : XIP_ERR_UNSUPPORTED;
     if (n == XIP_ERR_UNSUPPORTED) xip_cbor_map(&w, 0);
     else if (n < 0) return n; else w.len += (size_t)n;
     xip_cbor_uint(&w, 3);
