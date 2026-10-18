@@ -3,7 +3,7 @@ use super::*;
 use core::ffi::c_void;
 use xip_abi::{CallView, Host};
 use std::cell::RefCell;
-use std::vec::Vec;
+use std::{vec, vec::Vec};
 
 #[derive(Default)]
 struct World {
@@ -16,17 +16,25 @@ struct World {
     cancelled: Vec<i32>,
     registered: Vec<(i32, i32, i32, i32)>,
     unregistered: Vec<i32>,
+    pktbuf: Vec<u8>,
 }
 
 fn w<'a>(user: *mut c_void) -> &'a RefCell<World> { unsafe { &*(user as *const RefCell<World>) } }
 
 unsafe extern "C" fn log(_: *mut c_void, _: *const u8, _: usize) -> i32 { 0 }
 unsafe extern "C" fn now_ms(user: *mut c_void) -> u64 { w(user).borrow().now }
-unsafe extern "C" fn respond(user: *mut c_void, d: *const u8, n: usize) -> i32 {
-    w(user).borrow_mut().responses.push(core::slice::from_raw_parts(d, n).to_vec()); 0
+// messages: a pool packet is a buffer of the world; `send` to the application with an id is a reply, without one an event
+unsafe extern "C" fn pkt_alloc(user: *mut c_void, pkt: *mut u32) -> i32 { *pkt = 1; let _ = w(user); 0 }
+unsafe extern "C" fn pkt_buf(user: *mut c_void, _pkt: u32, ptr: *mut *mut u8, max: *mut usize) -> i32 {
+    let mut s = w(user).borrow_mut();
+    if s.pktbuf.is_empty() { s.pktbuf = vec![0u8; 256]; }
+    *ptr = s.pktbuf.as_mut_ptr(); *max = 256; 0
 }
-unsafe extern "C" fn emit(user: *mut c_void, id: u16, kind: u8, v: *const u8, len: usize) -> i32 {
-    w(user).borrow_mut().events.push((id, kind, core::slice::from_raw_parts(v, len).to_vec()));
+unsafe extern "C" fn pkt_free(_user: *mut c_void, _pkt: u32) -> i32 { 0 }
+unsafe extern "C" fn send(user: *mut c_void, _pkt: u32, len: usize, _dst: u32, _c: i32, method: i32, id: u64) -> i32 {
+    let mut s = w(user).borrow_mut();
+    let data = s.pktbuf[..len].to_vec();
+    if id != 0 { s.responses.push(data); } else { s.events.push((method as u16, 5, data)); }
     0
 }
 unsafe extern "C" fn get_setting(_: *mut c_void, _: *const u8, _: usize, _: *mut u8, _: usize, _: *mut usize) -> i32 { -7 }
@@ -51,15 +59,51 @@ unsafe extern "C" fn adc_read(user: *mut c_void, _pin: i32, _ref: u32, raw: *mut
     *raw = 2000; *mv = w(user).borrow().adc_mv; *unit = 1; *ch = 7; 0
 }
 
+/// The `hw` component of the fake: only what mod_hw calls.
+static HARDWARE: xip_abi::Hardware = xip_abi::Hardware {
+    version: xip_abi::HARDWARE_VERSION,
+    size: core::mem::size_of::<xip_abi::Hardware>() as u32,
+    gpio_config: Some(gpio_config),
+    gpio_read: None,
+    gpio_write: Some(gpio_write),
+    irq_register: Some(irq_register),
+    irq_unregister: Some(irq_unregister),
+    irq_enable: None,
+    spi_open: None,
+    spi_transfer: None,
+    spi_close: None,
+    i2c_transfer: None,
+    adc_read: Some(adc_read),
+    rgbled_write: None,
+};
+
+/// The same without the ADC.
+static HARDWARE_NO_ADC: xip_abi::Hardware = xip_abi::Hardware { adc_read: None, ..copy_hardware() };
+
+const fn copy_hardware() -> xip_abi::Hardware {
+    xip_abi::Hardware {
+        version: HARDWARE.version, size: HARDWARE.size, gpio_config: HARDWARE.gpio_config, gpio_read: None, gpio_write: HARDWARE.gpio_write,
+        irq_register: HARDWARE.irq_register, irq_unregister: HARDWARE.irq_unregister, irq_enable: None, spi_open: None, spi_transfer: None,
+        spi_close: None, i2c_transfer: None, adc_read: HARDWARE.adc_read, rgbled_write: None,
+    }
+}
+
+unsafe extern "C" fn get_component_no_adc(_user: *mut c_void, name: *const core::ffi::c_char) -> *const c_void {
+    if core::ffi::CStr::from_ptr(name) == c"hw" { &HARDWARE_NO_ADC as *const xip_abi::Hardware as *const c_void } else { core::ptr::null() }
+}
+
+unsafe extern "C" fn get_component(_user: *mut c_void, name: *const core::ffi::c_char) -> *const c_void {
+    if core::ffi::CStr::from_ptr(name) == c"hw" { &HARDWARE as *const xip_abi::Hardware as *const c_void } else { core::ptr::null() }
+}
+
 fn table(world: &RefCell<World>) -> Host {
     let mut h: Host = unsafe { core::mem::zeroed() };
     h.abi_version = xip_abi::ABI_VERSION;
     h.size = core::mem::size_of::<Host>() as u32;
     h.user = world as *const _ as *mut c_void;
-    h.log = Some(log); h.now_ms = Some(now_ms); h.respond = Some(respond); h.emit = Some(emit);
-    h.get_setting = Some(get_setting); h.gpio_config = Some(gpio_config); h.gpio_write = Some(gpio_write);
-    h.irq_register = Some(irq_register); h.irq_unregister = Some(irq_unregister); h.alarm_set = Some(alarm_set);
-    h.alarm_cancel = Some(alarm_cancel); h.adc_read = Some(adc_read);
+    h.log = Some(log); h.now_ms = Some(now_ms); h.pkt_alloc = Some(pkt_alloc); h.pkt_buf = Some(pkt_buf); h.pkt_free = Some(pkt_free); h.send = Some(send);
+    h.get_setting = Some(get_setting); h.get_component = Some(get_component); h.alarm_set = Some(alarm_set);
+    h.alarm_cancel = Some(alarm_cancel);
     h
 }
 
@@ -80,7 +124,7 @@ impl Rig {
 
     fn call(&mut self, method: i32, value: i32, data: &[u8], request: bool) -> i32 {
         let hw = unsafe { Hw::new(&self.host) }.unwrap();
-        let view = CallView { component: COMPONENT, method, value, flags: request as u32, data, pkt: 0, from: 0, id: 0 };
+        let view = CallView { component: COMPONENT, method, value, flags: request as u32, data, pkt: 0, from: 0, id: if request { 7 } else { 0 } };
         self.module.handle(&hw, &view)
     }
 }
@@ -225,7 +269,7 @@ fn the_host_stop_releases_everything() {
 #[test]
 fn a_host_table_without_adc_answers_with_an_error() {
     let mut rig = Rig::new(0);
-    rig.host.adc_read = None;
+    rig.host.get_component = Some(get_component_no_adc);
     assert_eq!(rig.call(M_BATTERY, 0, &[], true), 0);
     let w = rig.world.borrow();
     assert_eq!(cbor::get_int(&w.responses[0], 9), Ok(Some(xip_abi::ERR_UNSUPPORTED as i64)));

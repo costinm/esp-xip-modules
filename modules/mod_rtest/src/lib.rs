@@ -1,6 +1,4 @@
-//! `mod_rtest`: the device test of the ABI in Rust, the twin of `mod_test` (C). It answers to the same component (2), methods and
-//! events, so the two are installed in turn in the one `test` slot and the same tests (`tests/device_test.py`, the console) drive
-//! both. It calls every entry of the host table and reports one event per check; on top of the C module it uses `alloc` through
+//! `mod_rtest`: the device test of the ABI in Rust, the device test module (component 2, the `test` slot). The tests (`tests/device_test.py`, the console) drive it. It calls every entry of the host table and reports one event per check; on top of the C module it uses `alloc` through
 //! both allocators of `xip-abi` (the global one and an explicit one) and checks that a failed allocation is an error, not an abort.
 //!
 //! The start request picks the mode: empty or `selftest` (every check that needs no wiring; finishes with 0 when all pass),
@@ -20,9 +18,9 @@ use alloc::vec::Vec;
 
 use xip_abi::cbor::{self, Writer};
 use xip_abi::{
-    CallView, Hw, Module, SpiConfig, ADDR_MAIN, ALARM_EXACT, ERR_ARG, ERR_BUSY, ERR_NOMEM, ERR_NOTFOUND, ERR_SIZE, FEAT_MEMORY,
-    FEAT_PACKETS, FEAT_SETTINGS, GPIO_INPUT, GPIO_OUTPUT, GPIO_PULL_DOWN, GPIO_PULL_NONE, HOST_START, HOST_STOP, IRQ_BOTH,
-    PKT_HEADROOM, PKT_MAX, VALUE_BYTES, VALUE_EMPTY, VALUE_TEXT,
+    CallView, Hw, Module, SpiConfig, ADDR_MAIN, ALARM_EXACT, ERR_AGAIN, ERR_ARG, ERR_BUSY, ERR_NOMEM, ERR_NOTFOUND, ERR_SIZE,
+    GPIO_INPUT, GPIO_OUTPUT, GPIO_PULL_DOWN, GPIO_PULL_NONE, HOST_START, HOST_STOP, IRQ_BOTH,
+    PKT_HEADROOM, PKT_MAX,
 };
 
 #[cfg(feature = "sim")]
@@ -36,7 +34,7 @@ const EV_SUMMARY: u16 = 0x7eff;
 const EV_ECHO: u16 = 0x7e10;
 const EV_PKT: u16 = 0x7e11;
 
-/// This module's own component and methods: the same as `mod_test` (`API.md`).
+/// This module's own component and methods: see `API.md`.
 pub const C_TEST: i32 = 2;
 const M_ECHO: i32 = 1;
 const M_INFO: i32 = 2;
@@ -130,7 +128,7 @@ impl State {
             self.fail += 1;
             hw.log(l.bytes()); // a failure is also a log line: the event list keeps only the last few
         }
-        hw.emit(EV_CHECK + self.n, VALUE_TEXT, l.bytes());
+        hw.event(C_TEST, EV_CHECK + self.n, l.bytes());
         self.n += 1;
     }
 
@@ -140,7 +138,7 @@ impl State {
         l.int(self.pass as i64);
         l.text(" fail=");
         l.int(self.fail as i64);
-        hw.emit(EV_SUMMARY, VALUE_TEXT, l.bytes());
+        hw.event(C_TEST, EV_SUMMARY, l.bytes());
         hw.log(l.bytes());
         if self.fail != 0 { -(self.fail as i32) } else { xip_abi::RET_DONE as i32 }
     }
@@ -261,19 +259,16 @@ impl State {
         let t0 = hw.now_ms();
         self.check(hw, "time", hw.now_ms() >= t0, 0);
 
-        let features = hw.features();
-        if features & FEAT_PACKETS != 0 { self.pkt_checks(hw); }
-        if features & FEAT_MEMORY != 0 {
-            self.mem_checks(hw);
-            self.alloc_checks(hw);
-        }
+        self.pkt_checks(hw);
+        self.mem_checks(hw);
+        self.alloc_checks(hw);
 
         // not a request: nothing to answer; connectivity is a plain query
-        self.check(hw, "respond-no-request", hw.respond(b"x") == ERR_ARG, 0);
-        self.check(hw, "connected", matches!(hw.connected(), true | false), 0);
+        let plain = CallView { component: C_TEST, method: 0, value: 0, flags: 0, data: &[], pkt: 0, from: 0, id: 0 };
+        self.check(hw, "reply-no-request", hw.reply(&plain, b"x") == ERR_ARG, 0);
 
         // settings: own namespace, round trip, overwrite, erase, size error
-        if features & FEAT_SETTINGS != 0 {
+        {
             let (key, val, mut got) = (b"t", [1u8, 2, 3, 4], [0u8; 8]);
             self.check(hw, "setting-set", hw.set_setting(key, &val) == 0, 0);
             let r = hw.get_setting(key, &mut got);
@@ -305,8 +300,8 @@ impl State {
         self.check(hw, "i2c-bad-args", hw.i2c_transfer(0, 1, 2, 100_000, 0x10, &[], &mut [], 10) < 0, 0);
         self.check(hw, "adc-bad-pin", hw.adc_read(500, 3300).is_err(), 0);
 
-        // emit: every value type
-        self.check(hw, "emit", hw.emit(EV_ECHO, VALUE_BYTES, &[1, 0, 0, 0, 0, 0, 0, 0]) == 0 && hw.emit(EV_ECHO, VALUE_EMPTY, &[]) == 0, 0);
+        // events: messages to the application
+        self.check(hw, "event", hw.event(C_TEST, EV_ECHO, &[1, 0, 0, 0, 0, 0, 0, 0]) == 0 && hw.event(C_TEST, EV_ECHO, &[]) == 0, 0);
 
         self.cbor_checks(hw);
         self.finish(hw)
@@ -402,19 +397,19 @@ impl State {
     fn request(&mut self, hw: &Hw, call: &CallView) -> i32 {
         if call.method == M_ECHO {
             let text = cbor::get_text(call.data, 1).ok().flatten().unwrap_or(&[]);
-            hw.emit(EV_ECHO, VALUE_TEXT, text);
+            hw.event(C_TEST, EV_ECHO, text);
             if call.wants_response() {
                 let mut buf = [0u8; 96];
                 let mut w = Writer::new(&mut buf);
                 w.map(1).uint(1);
                 if let Ok(t) = core::str::from_utf8(text) { w.text(t); } else { w.text(""); }
-                if let Some(e) = w.finish() { hw.respond(e); }
+                if let Some(e) = w.finish() { hw.reply(call, e); }
             }
         } else if call.method == M_INFO && call.wants_response() {
             let mut buf = [0u8; 16];
             let mut w = Writer::new(&mut buf);
             w.map(2).uint(1).uint(self.calls as u64).uint(2).uint(self.mode as u64);
-            if let Some(e) = w.finish() { hw.respond(e); }
+            if let Some(e) = w.finish() { hw.reply(call, e); }
         }
         xip_abi::RET_CONTINUE as i32
     }
@@ -431,12 +426,50 @@ fn parse_int(s: &[u8], pos: &mut usize) -> i32 {
     if any { v } else { -1 }
 }
 
+impl State {
+    /// The traffic of the manifest's two ports, both an echo (the end-to-end test of a link, whatever the link): a **datagram** (port 3, a packet of
+    /// a link with `CALL_LINK`) goes back to `from` with the token it came with, in the same packet; a **stream** (stream port 3, TCP 5228: a
+    /// socket event) is read and written back. `CALL_LINK_EVENT`s of a link need no answer.
+    fn port_traffic(&mut self, hw: &Hw, call: &CallView) -> i32 {
+        const CONTINUE: i32 = xip_abi::RET_CONTINUE as i32;
+        if call.flags & xip_abi::CALL_LINK != 0 {
+            if call.flags & xip_abi::CALL_LINK_EVENT == 0 && call.pkt != 0 {
+                // a link takes only a packet the module owns: keep the lent one, then pass it on (the zero copy path of a relay)
+                if hw.pkt_keep(call.pkt) == 0 {
+                    let _ = hw.send(call.pkt, call.data.len(), call.from, 0, 0, call.id);
+                }
+            }
+            return CONTINUE;
+        }
+        let handle = call.id as u32;
+        match call.value as u32 {
+            xip_abi::SOCKET_EVENT_READABLE => {
+                let mut buf = [0u8; 256];
+                loop {
+                    let n = hw.socket_read(handle, &mut buf);
+                    if n == ERR_AGAIN { break; }
+                    if n <= 0 { hw.socket_close(handle); break; }
+                    let mut at = 0;
+                    while at < n as usize {
+                        let w = hw.socket_write(handle, &buf[at..n as usize]);
+                        if w <= 0 { break; } // TODO: flow control; the echo drops what the socket does not take
+                        at += w as usize;
+                    }
+                }
+            }
+            xip_abi::SOCKET_EVENT_CLOSED | xip_abi::SOCKET_EVENT_EOF => { hw.socket_close(handle); }
+            _ => {}
+        }
+        CONTINUE
+    }
+}
+
 impl Module for State {
     fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
         self.calls += 1;
         if call.component == 0 {
             if call.is_host(HOST_STOP) {
-                hw.emit(EV_SUMMARY, VALUE_TEXT, b"stopped");
+                hw.event(C_TEST, EV_SUMMARY, b"stopped");
                 return 0;
             }
             if !call.is_host(HOST_START) { return xip_abi::RET_CONTINUE as i32; } // NETWORK, WAKE: not used
@@ -453,6 +486,7 @@ impl Module for State {
             return self.selftest(hw);
         }
         if call.component != C_TEST { return xip_abi::RET_CONTINUE as i32; }
+        if call.method == 0 { return self.port_traffic(hw, call); }
         match call.method {
             M_ONESHOT | M_TICK => self.alarm_fired(hw, call),
             M_IRQ => self.gpio_irq(hw, call),
@@ -473,7 +507,7 @@ impl Module for State {
                 xip_abi::RET_CONTINUE as i32
             }
             M_PKT_REPLY => {
-                hw.emit(EV_PKT, VALUE_TEXT, b"reply");
+                hw.event(C_TEST, EV_PKT, b"reply");
                 xip_abi::RET_CONTINUE as i32
             }
             M_PKT_KEEP => {

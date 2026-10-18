@@ -13,8 +13,8 @@ publish = false
 xip-abi = { path = "../../crates/xip-abi" }
 
 [package.metadata]
-# Options for tools/mkmod.py (scripts/build.sh). The slot is mod_hello's for now: install one or the other (`start hello`).
-mkmod = "--slot hello --stack 4096 --state 512 --features WIFI,PACKETS"
+# Options for tools/mkmod.py (scripts/build.sh). Its component number is 46 (it has no API.md yet).
+mkmod = "--name nan --tag 46 --stack 4096 --state 512"
 
 [features]
 flat-image = ["xip-abi/global-alloc"]

@@ -3,7 +3,7 @@ name = "esp-mod-con"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "The text console in Rust: the features of mod_console (C), in the same slot"
+description = "The text console of a device (Rust)"
 publish = false
 
 # Standalone: built by tools/mkmod.py --cargo (scripts/build.sh), not as part of a cargo workspace.
@@ -13,8 +13,8 @@ publish = false
 xip-abi = { path = "../../crates/xip-abi", features = ["global-alloc"] }
 
 [package.metadata]
-# Options for tools/mkmod.py (scripts/build.sh). The slot is mod_console's: install one or the other.
-mkmod = "--slot console --stack 8192 --state 16 --features SERIAL,PACKETS,MEMORY --autostart"
+# Options for tools/mkmod.py (scripts/build.sh).
+mkmod = "--stack 8192 --state 40 --port 1 --stream 1 --autostart"
 
 [features]
 flat-image = []

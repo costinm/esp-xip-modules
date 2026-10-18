@@ -1,5 +1,5 @@
 //! `mod_nan`, first shape: a bench of the NAN discovery window against the public components only (`wifi`, `link`, `power`).
-//! Start it with the console (`start hello`, its slot for now):
+//! Start it with the console (`start nan`):
 //!
 //! disconnect (radio on, no station) -> sleep 500 ms -> promiscuous on, timer 20 ms -> count and print the frames -> promiscuous
 //! off, sleep 500 ms (12 windows: a 500 ms sleep plus the resume drifts against the 512 TU window, so they sweep it) -> the wifi
@@ -16,7 +16,7 @@ use xip_abi::{
 const CONTINUE: i32 = RET_CONTINUE as i32;
 const DONE: i32 = RET_DONE as i32;
 
-/// The tag of the `hello` slot, this module's component for now.
+/// This module's component number (`--tag` in Cargo.toml: it has no API.md yet).
 const C_SELF: i32 = 46;
 const M_FRAME: i32 = 1;
 const M_WINDOW: i32 = 2;

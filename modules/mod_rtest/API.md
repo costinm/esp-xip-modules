@@ -1,6 +1,6 @@
 # `test` API (2)
 
-The device test module in Rust (`mod_rtest`): the same component, methods and events as the C `mod_test`, so the two are installed in turn in the one `test` slot and the same tests drive both. See `docs/testing.md`. Start it with a mode (`start test serve`), then call it.
+The device test module (`mod_rtest`, the `test` slot): the tests (`tests/device_test.py`, the console) drive it. Start it with a mode (`start test serve`), then call it.
 
 
 ## 1. `echo` — answer with the same text and emit it as an event

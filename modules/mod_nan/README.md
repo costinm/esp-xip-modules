@@ -36,7 +36,7 @@ disconnect (radio on, no station) -> sleep 500 ms -> promiscuous on, timer 20 ms
   -> the wifi intent as it was -> look at the station again after 8 s
 ```
 
-Start it with the console (`start hello`; it uses the `hello` slot until it has its own). Results go to the device log: sleeps entered and rejected,
+Start it with the console (`start nan`). Results go to the device log: sleeps entered and rejected,
 the real sleep time, the radio resume time, frames seen (type, address 3, RSSI, length) and how many the early filter dropped, and the state of the station
 afterwards. With a UART console the sleep is physical light sleep; with the console on USB-Serial/JTAG it is soft (`power.info soft_sleep`).
 

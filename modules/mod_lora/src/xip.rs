@@ -110,7 +110,7 @@ impl Hal for EspmodHal<'_> {
         let mut w = Writer::new(&mut out);
         w.array(3).int(rssi as i64).int(snr as i64).bytes(data);
         match w.finish() {
-            Some(encoded) => self.hw.emit(EV_PACKET, xip_abi::VALUE_CBOR, encoded),
+            Some(encoded) => self.hw.event(COMPONENT, EV_PACKET, encoded),
             None => -3,
         }
     }
@@ -120,8 +120,7 @@ impl Hal for EspmodHal<'_> {
     }
 
     fn event(&mut self, id: u16, value: &[u8]) {
-        let kind = if value.is_empty() { xip_abi::VALUE_EMPTY } else { xip_abi::VALUE_BYTES };
-        let _ = self.hw.emit(id, kind, value);
+        let _ = self.hw.event(COMPONENT, id, value);
     }
 }
 
@@ -143,7 +142,7 @@ impl Module for Lora {
                 let mut buf = [0u8; 16];
                 let mut w = Writer::new(&mut buf);
                 w.map(1).uint(1).int(rc as i64);
-                if let Some(encoded) = w.finish() { let _ = hw.respond(encoded); }
+                if let Some(encoded) = w.finish() { let _ = hw.reply(call, encoded); }
             }
         }
         ret

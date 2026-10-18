@@ -1,6 +1,5 @@
-//! `mod_con`: the text interface of a device, in Rust, with the features of `mod_console` (C). The API is the same (`API.md`: component 20,
-//! `parse`, `render`, and a line typed on the serial port). It owns the serial port through the host (`serial_open`): every line typed
-//! arrives as a packet and what the handler answers is printed. A line is `status`, `start NAME [TEXT]`, `stop NAME`, `events`, `reset`,
+//! `mod_con`: the text interface of a device (`API.md`: component 20, `parse`, `render`, and a line typed on the serial port). Its manifest names a port (the serial line): every line arrives as a frame of that link
+//! and what the handler answers is sent back to where the line came from. A line is `status`, `start NAME [TEXT]`, `stop NAME`, `reset`,
 //! `heap ...`, `nv ...`, `wifi ...`, `help`, or `component.method key=value ...`: the last turns into the tagged-CBOR request of the module
 //! `component` (names and tags from the catalog, generated from the modules' API.md files), is sent as a packet, and what comes back is
 //! printed as it arrives. A method of a host component with a native function (`wifi.set`, `power.sleep`, ...) is called through the
@@ -16,7 +15,7 @@ use alloc::vec::Vec;
 use core::ffi::{c_int, c_void, CStr};
 
 use xip_abi::cbor::{self, Item, Reader, Writer};
-use xip_abi::{CallView, Hw, Module, ADDR_MAIN, ERR_BUSY, ERR_NOTFOUND, ERR_SIZE, ERR_UNSUPPORTED, FEAT_MODULES, FEAT_SERIAL, FEAT_WIFI, HOST_START, HOST_STOP};
+use xip_abi::{CallView, Hw, Module, ADDR_MAIN, ERR_AGAIN, ERR_BUSY, ERR_NOTFOUND, ERR_SIZE, ERR_UNSUPPORTED, HOST_START, HOST_STOP};
 
 mod tables;
 use tables::*;
@@ -36,14 +35,33 @@ const MAX_TOKENS: usize = 24;
 const OUT_MAX: usize = 1000;
 const RESP_MAX: usize = 1000;
 
-/// Bytes of state the image asks for (`mkmod` in Cargo.toml).
-pub const STATE_BYTES: usize = 16;
+const LINE_MAX: usize = 160;
 
-/// The only memory of the console: the next request id.
+/// Bytes of state the image asks for (`mkmod` in Cargo.toml).
+pub const STATE_BYTES: usize = 40;
+
+/// The memory of the console: the next request id, and where the last line came from (a link address and its token): what the console
+/// says goes back there, whether the line came from the serial port or from the network.
 #[derive(Default)]
 pub struct State {
     next_id: u32,
+    peer: u32,
+    has_peer: bool,
+    /// The TCP connection the last line came on (a stream port: the console reads and cuts the lines itself), 0: it came as a packet.
+    sock: u32,
+    peer_id: u64,
+    /// The one console connection (a `Conn` from `mem_alloc`), 0: none.
+    conn: usize,
 }
+
+/// The line being typed on a console connection: the stream is bytes, the lines are cut here.
+#[repr(C)]
+struct Conn {
+    handle: u32,
+    len: usize,
+    text: [u8; LINE_MAX],
+}
+
 
 // ---- catalog lookups ----
 
@@ -245,8 +263,8 @@ fn error_rc(o: &mut Out, what: &str, rc: i32) {
     o.s("\n");
 }
 
-/// `status`: the device info as JSON, written to the serial port directly. True when nothing is left to print.
-fn cmd_status(hw: &Hw, o: &mut Out) -> bool {
+/// `status`: the device info as JSON, sent to where the line came from. True when nothing is left to print.
+fn cmd_status(hw: &Hw, st: &State, o: &mut Out) -> bool {
     let mut cap = RESP_MAX;
     let (buf, n) = loop {
         let mut buf = vec![0u8; cap];
@@ -276,9 +294,7 @@ fn cmd_status(hw: &Hw, o: &mut Out) -> bool {
         return false;
     }
     dump.s("\n");
-    if hw.features() & FEAT_SERIAL != 0 {
-        hw.serial_write(&dump.b);
-    }
+    say_bytes(hw, st, &dump.b);
     o.b.is_empty()
 }
 
@@ -730,21 +746,6 @@ fn render_cbor(data: &[u8]) -> Vec<u8> {
     w.finish().map(|s| s.to_vec()).unwrap_or_default()
 }
 
-/// A CBOR array of maps (the host's slot and event records): one line of `name=value` words each.
-fn render_list(o: &mut Out, data: &[u8], record: &str) {
-    let rec = CAT_RECORDS[..CAT_RECORDS_N].iter().find(|r| cname(r.name) == record.as_bytes());
-    let mut r = Reader::new(data);
-    let (Some(rec), Some(Item::Array(n))) = (rec, r.next()) else {
-        o.s("error: bad answer\n");
-        return;
-    };
-    for _ in 0..n {
-        let Some(Item::Map(pairs)) = r.next() else { break };
-        render_pairs(o, &mut r, pairs, record_fields(rec), 1);
-        o.s("\n");
-    }
-}
-
 /// The answer a module sent, printed as the answer to `(comp, meth)`.
 fn render_answer(comp: i64, meth: i64, res: &[u8], err: Option<&str>) -> Out {
     let mut buf = vec![0u8; RESP_MAX];
@@ -870,10 +871,14 @@ fn cmd_nv(hw: &Hw, t: &[Vec<u8>], o: &mut Out) {
     o.s("\n");
 }
 
-/// `wifi scan`: one line per network in range, strongest first (the first call starts the scan, a later one has the list).
+/// `wifi scan`: one line per network in range, strongest first (the first call starts the scan, a later one has the list), through the `wifi` component.
 fn wifi_scan_list(hw: &Hw, o: &mut Out) {
-    let mut buf = [0u8; 1024];
-    let n = hw.wifi_scan(&mut buf);
+    let Some(scan) = hw.wifi().and_then(|w| w.scan) else {
+        o.s("error: this host has no Wi-Fi\n");
+        return;
+    };
+    let mut aps = [xip_abi::WifiAp { ssid: [0; 32], ssid_len: 0, bssid: [0; 6], rssi: 0, channel: 0, auth: 0 }; 16];
+    let n = unsafe { scan(hw.ctx(), aps.as_mut_ptr(), aps.len()) };
     if n == ERR_BUSY {
         o.s("scanning; run `wifi scan` again in a few seconds\n");
         return;
@@ -882,52 +887,23 @@ fn wifi_scan_list(hw: &Hw, o: &mut Out) {
         error_rc(o, "wifi scan", n);
         return;
     }
-    let data = &buf[..n as usize];
-    let mut r = Reader::new(data);
-    let ok = matches!(r.next(), Some(Item::Map(1))) && r.next().is_some();
-    let Some(Item::Array(count)) = (if ok { r.next() } else { None }) else {
-        o.s("error: bad scan answer\n");
-        return;
-    };
-    for _ in 0..count {
-        let entry = r.rest();
-        let mut after = r;
-        if !after.skip() {
-            break;
-        }
-        let elen = entry.len() - after.rest().len();
-        let entry = &entry[..elen];
-        let name = match cbor::get(entry, 1) {
-            Ok(Some(mut v)) => match v.next() {
-                Some(Item::Bytes(b)) | Some(Item::Text(b)) => b,
-                _ => &[],
-            },
-            _ => &[],
-        };
-        let int = |k| cbor::get_int(entry, k).ok().flatten().unwrap_or(0);
+    for ap in &aps[..(n as usize).min(aps.len())] {
         o.s("ssid=\"");
-        o.put(name);
+        o.put(&ap.ssid[..(ap.ssid_len as usize).min(32)]);
         o.s("\" ch=");
-        o.n(int(4));
+        o.n(ap.channel as i64);
         o.s(" rssi=");
-        o.n(int(3));
+        o.n(ap.rssi as i64);
         o.s(" auth=");
-        o.n(int(5));
-        if let Ok(Some(mut v)) = cbor::get(entry, 2) {
-            if let Some(Item::Bytes(b)) = v.next() {
-                if b.len() == 6 {
-                    o.s(" bssid=");
-                    for (k, c) in b.iter().enumerate() {
-                        o.hex(&[*c]);
-                        if k < 5 {
-                            o.s(":");
-                        }
-                    }
-                }
+        o.n(ap.auth as i64);
+        o.s(" bssid=");
+        for (k, c) in ap.bssid.iter().enumerate() {
+            o.hex(&[*c]);
+            if k < 5 {
+                o.s(":");
             }
         }
         o.s("\n");
-        r = after;
     }
 }
 
@@ -935,7 +911,7 @@ fn wifi_scan_list(hw: &Hw, o: &mut Out) {
 /// `wifi start|stop` switches the radio; `wifi scan` lists the networks in range. All of it goes through the `wifi` component.
 fn cmd_wifi(hw: &Hw, t: &[Vec<u8>], o: &mut Out) {
     use xip_abi::{WifiIntent, WifiState};
-    let wifi = if hw.features() & FEAT_WIFI != 0 { hw.wifi() } else { None };
+    let wifi = hw.wifi();
     let Some((get, set, state)) = wifi.and_then(|w| Some((w.get?, w.set?, w.state?))) else {
         o.s("error: this host has no Wi-Fi\n");
         return;
@@ -1044,7 +1020,7 @@ fn cmd_wifi(hw: &Hw, t: &[Vec<u8>], o: &mut Out) {
 }
 
 fn help_text(o: &mut Out) {
-    o.s("status | start NAME [TEXT] | stop NAME | events | reset | heap [regions|blocks|tasks|trace ...] | nv KEY[=VALUE] | wifi [ssid=NAME] [psk=SECRET] [start|stop]\n");
+    o.s("status | start NAME [TEXT] | stop NAME | reset | heap [regions|blocks|tasks|trace ...] | nv KEY[=VALUE] | wifi [ssid=NAME] [psk=SECRET] [start|stop]\n");
     o.s("component.method key=value ... (values: 12, -3, true, hex:0a0b, text, \"two words\"); wifi.get/set and wifi.tuning/set_tuning call the host's components\n");
     for c in &CAT_COMPS[..CAT_COMPS_N] {
         o.put(cname(c.name));
@@ -1062,9 +1038,6 @@ fn help_text(o: &mut Out) {
 fn manifest_allows(hw: &Hw, comp: u64, method: u64, o: &mut Out) -> bool {
     let Some(c) = CAT_COMPS[..CAT_COMPS_N].iter().find(|c| c.id as u64 == comp) else { return true };
     let name = cname(c.name);
-    if hw.features() & FEAT_MODULES == 0 {
-        return true;
-    }
     let mut m = vec![0u8; 1024];
     let n = hw.module_manifest(name, &mut m);
     if n <= 0 {
@@ -1425,21 +1398,13 @@ fn do_line(hw: &Hw, st: &mut State, line: &[u8], o: &mut Out) -> bool {
     } else if word_is(cmd, "wifi") {
         cmd_wifi(hw, &t, o);
     } else if word_is(cmd, "status") {
-        return cmd_status(hw, o);
-    } else if word_is(cmd, "events") || word_is(cmd, "reset") || word_is(cmd, "start") || word_is(cmd, "stop") {
-        if hw.features() & FEAT_MODULES == 0 {
-            o.s("error: this host has no module control\n");
-            return false;
-        }
-        if word_is(cmd, "events") {
-            let mut buf = vec![0u8; RESP_MAX];
-            let len = hw.events_info(&mut buf);
-            if len > 0 {
-                render_list(o, &buf[..len as usize], "Event");
-            }
-        } else if word_is(cmd, "reset") {
+        return cmd_status(hw, st, o);
+    } else if word_is(cmd, "reset") || word_is(cmd, "start") || word_is(cmd, "stop") {
+        if word_is(cmd, "reset") {
             let rc = hw.reset();
-            if rc != 0 {
+            if rc == ERR_UNSUPPORTED {
+                o.s("error: this host has no module control\n");
+            } else if rc != 0 {
                 error_rc(o, "reset", rc);
             } else {
                 o.s("ok\n");
@@ -1463,6 +1428,8 @@ fn do_line(hw: &Hw, st: &mut State, line: &[u8], o: &mut Out) -> bool {
             };
             if rc == ERR_NOTFOUND {
                 o.s("error: unknown module\n");
+            } else if rc == ERR_UNSUPPORTED {
+                o.s("error: this host has no module control\n");
             } else if rc != 0 {
                 error_rc(o, if stop { "stop" } else { "start" }, rc);
             } else {
@@ -1480,9 +1447,111 @@ fn do_line(hw: &Hw, st: &mut State, line: &[u8], o: &mut Out) -> bool {
     false
 }
 
-fn say(hw: &Hw, o: &Out) {
-    if !o.b.is_empty() && hw.features() & FEAT_SERIAL != 0 {
-        hw.serial_write(&o.b);
+/// To where the last line came from; nothing before the first line.
+fn say_bytes(hw: &Hw, st: &State, b: &[u8]) {
+    if b.is_empty() {
+        return;
+    }
+    if st.sock != 0 {
+        // TODO: flow control; the console writes what the socket takes and drops the rest
+        let mut at = 0;
+        while at < b.len() {
+            let n = hw.socket_write(st.sock, &b[at..]);
+            if n <= 0 {
+                break;
+            }
+            at += n as usize;
+        }
+    } else if st.has_peer {
+        hw.message(st.peer, 0, 0, st.peer_id, b);
+    }
+}
+
+fn say(hw: &Hw, st: &State, o: &Out) {
+    say_bytes(hw, st, &o.b);
+}
+
+impl State {
+    /// A line from either kind of port: run it, answer to where it came from.
+    fn run_line(&mut self, hw: &Hw, line: &[u8]) {
+        let mut o = Out::new(OUT_MAX);
+        if do_line(hw, self, line, &mut o) {
+            return; // what the module says comes as packets
+        }
+        say(hw, self, &o);
+    }
+
+    fn drop_conn(&mut self, hw: &Hw) {
+        if self.conn != 0 {
+            let c = self.conn as *mut Conn;
+            let handle = unsafe { (*c).handle };
+            hw.socket_close(handle);
+            if self.sock == handle {
+                self.sock = 0;
+            }
+            hw.mem_free(c.cast());
+            self.conn = 0;
+        }
+    }
+
+    /// The stream port: a connection opens, bytes arrive (read here, cut into lines), the peer goes.
+    fn socket_event(&mut self, hw: &Hw, c: &CallView) {
+        let handle = c.id as u32;
+        match c.value as u32 {
+            xip_abi::SOCKET_EVENT_OPEN => {
+                let mem = hw.mem_alloc(core::mem::size_of::<Conn>()).cast::<Conn>();
+                if self.conn != 0 || mem.is_null() {
+                    hw.socket_close(handle); // one console connection at a time
+                    if !mem.is_null() {
+                        hw.mem_free(mem.cast());
+                    }
+                    return;
+                }
+                unsafe { mem.write(Conn { handle, len: 0, text: [0; LINE_MAX] }) };
+                self.conn = mem as usize;
+            }
+            xip_abi::SOCKET_EVENT_READABLE => {
+                if self.conn == 0 || unsafe { (*(self.conn as *mut Conn)).handle } != handle {
+                    hw.socket_close(handle);
+                    return;
+                }
+                let mut buf = [0u8; 128];
+                loop {
+                    let n = hw.socket_read(handle, &mut buf);
+                    if n == ERR_AGAIN {
+                        return;
+                    }
+                    if n <= 0 {
+                        self.drop_conn(hw);
+                        return;
+                    }
+                    for &b in &buf[..n as usize] {
+                        let conn = unsafe { &mut *(self.conn as *mut Conn) };
+                        if b == b'\r' || b == b'\n' {
+                            if conn.len == 0 {
+                                continue;
+                            }
+                            let mut line = [0u8; LINE_MAX];
+                            let len = conn.len;
+                            line[..len].copy_from_slice(&conn.text[..len]);
+                            conn.len = 0;
+                            self.sock = handle;
+                            self.run_line(hw, &line[..len]);
+                            if self.conn == 0 {
+                                return;
+                            }
+                        } else if (b == 0x08 || b == 0x7f) && conn.len > 0 {
+                            conn.len -= 1;
+                        } else if b >= b' ' && b != 0x7f && conn.len < LINE_MAX - 1 {
+                            conn.text[conn.len] = b;
+                            conn.len += 1;
+                        }
+                    }
+                }
+            }
+            xip_abi::SOCKET_EVENT_CLOSED | xip_abi::SOCKET_EVENT_EOF => self.drop_conn(hw),
+            _ => {}
+        }
     }
 }
 
@@ -1490,17 +1559,28 @@ impl Module for State {
     fn handle(&mut self, hw: &Hw, c: &CallView) -> i32 {
         const CONTINUE: i32 = xip_abi::RET_CONTINUE as i32;
         if c.component == xip_abi::HOST_COMPONENT as i32 {
-            if hw.features() & FEAT_SERIAL != 0 {
-                if c.method == HOST_START as i32 {
-                    hw.serial_open(C_CONSOLE, M_LINE);
-                } else if c.method == HOST_STOP as i32 {
-                    hw.serial_close();
-                }
-            }
+            // the port of the manifest binds the lines to this module: nothing to open or close
             return CONTINUE;
         }
+        let frame = c.flags & xip_abi::CALL_LINK != 0;
+        if !frame && c.component == C_CONSOLE && c.method == 0 && c.value != 0 {
+            self.socket_event(hw, c); // a connection of the stream port
+            return CONTINUE;
+        }
+        // a frame of the port (a typed line, from the serial line or any other link) or a line the application sends: run it, answer to its source
+        if c.pkt != 0 && ((frame && c.flags & xip_abi::CALL_LINK_EVENT == 0) || (c.component == C_CONSOLE && c.method == M_LINE && c.from == ADDR_MAIN)) {
+            self.peer = c.from;
+            self.peer_id = c.id;
+            self.has_peer = true;
+            self.sock = 0;
+            self.run_line(hw, c.data);
+            return CONTINUE;
+        }
+        if frame {
+            return CONTINUE; // a link event
+        }
         // a message from a module: print it as the answer to (component, method) it carries; it may be one of many
-        if c.pkt != 0 && c.from != ADDR_MAIN && !(c.component == C_CONSOLE && c.method == M_LINE) {
+        if c.pkt != 0 && c.from != ADDR_MAIN {
             let mut o = render_answer(c.component as i64, c.method as i64, c.data, None);
             if o.b.is_empty() {
                 o.s("ok");
@@ -1508,18 +1588,10 @@ impl Module for State {
             if !o.ends_with_newline() {
                 o.s("\n");
             }
-            say(hw, &o);
+            say(hw, self, &o);
             return CONTINUE;
         }
         if c.component != C_CONSOLE {
-            return CONTINUE;
-        }
-        if c.method == M_LINE && c.pkt != 0 {
-            let mut o = Out::new(OUT_MAX);
-            if do_line(hw, self, c.data, &mut o) {
-                return CONTINUE; // what the module says comes as packets
-            }
-            say(hw, &o);
             return CONTINUE;
         }
         if !c.wants_response() {
@@ -1536,7 +1608,7 @@ impl Module for State {
             return CONTINUE;
         };
         if !out.is_empty() {
-            hw.respond(&out);
+            hw.reply(c, &out);
         }
         CONTINUE
     }

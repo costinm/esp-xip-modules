@@ -13,8 +13,8 @@ publish = false
 xip-abi = { path = "../../crates/xip-abi" }
 
 [package.metadata]
-# Options for tools/mkmod.py (scripts/build.sh): stack the deepest handler needs, state block, host features used.
-mkmod = "--stack 6144 --state 768 --features SPI,SPI_READY"
+# Options for tools/mkmod.py (scripts/build.sh): stack the deepest handler needs, state block.
+mkmod = "--stack 6144 --state 768"
 
 [features]
 flat-image = ["xip-abi/global-alloc"]

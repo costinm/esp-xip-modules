@@ -10,8 +10,7 @@
 extern crate std;
 
 use xip_abi::cbor::{self, Item, Writer};
-use xip_abi::{CallView, Hw, Module, ALARM_EXACT, GPIO_INPUT, GPIO_OUTPUT, GPIO_PULL_NONE, GPIO_PULL_UP, IRQ_BOTH,
-                 VALUE_CBOR};
+use xip_abi::{CallView, Hw, Module, ALARM_EXACT, GPIO_INPUT, GPIO_OUTPUT, GPIO_PULL_NONE, GPIO_PULL_UP, IRQ_BOTH};
 
 /// The component number of the module: its slot tag, as in DMesh.
 pub const COMPONENT: i32 = 45;
@@ -143,17 +142,17 @@ fn emit_array(hw: &Hw, id: u16, values: &[u64]) -> i32 {
     w.array(values.len());
     for v in values { w.uint(*v); }
     match w.finish() {
-        Some(encoded) => hw.emit(id, VALUE_CBOR, encoded),
+        Some(encoded) => hw.event(COMPONENT, id, encoded),
         None => -3,
     }
 }
 
-fn respond_map(hw: &Hw, pairs: &[(u64, u64)]) {
+fn respond_map(hw: &Hw, call: &CallView, pairs: &[(u64, u64)]) {
     let mut buf = [0u8; 64];
     let mut w = Writer::new(&mut buf);
     w.map(pairs.len());
     for (k, v) in pairs { w.uint(*k).uint(*v); }
-    if let Some(encoded) = w.finish() { let _ = hw.respond(encoded); }
+    if let Some(encoded) = w.finish() { let _ = hw.reply(call, encoded); }
 }
 
 /// One ADC reading of `pin`; with a divider it is the battery (millivolts and percent), without one a raw sample.
@@ -184,7 +183,8 @@ impl HwModule {
 
     /// Read the request (or the settings) and measure. With a control pin the measurement waits for the pin to
     /// settle: the result arrives as event 111 and the request is answered empty.
-    fn battery(&mut self, hw: &Hw, data: &[u8]) -> i32 {
+    fn battery(&mut self, hw: &Hw, call: &CallView) -> i32 {
+        let data = call.data;
         let get = |key| field(data, key);
         let (Ok(pin), Ok(ref_mv), Ok(div), Ok(min), Ok(max), Ok(ctrl), Ok(lvl), Ok(enabled)) =
             (get(1), get(2), get(3), get(4), get(5), get(6), get(7), get(8)) else { return ERR_REQUEST };
@@ -212,7 +212,7 @@ impl HwModule {
         }
         match self.measure(hw) {
             Ok(values) => {
-                respond_map(hw, &[(1, values[0]), (2, values[1]), (3, values[2]), (4, values[3]), (5, values[4]),
+                respond_map(hw, call, &[(1, values[0]), (2, values[1]), (3, values[2]), (4, values[3]), (5, values[4]),
                                   (6, values[5]), (7, values[6]), (8, values[7])]);
                 0
             }
@@ -330,7 +330,7 @@ impl Module for HwModule {
         }
         if call.component != COMPONENT { return xip_abi::RET_CONTINUE as i32; }
         let rc = match call.method {
-            M_BATTERY => self.battery(hw, call.data),
+            M_BATTERY => self.battery(hw, call),
             M_PROBE => self.probe(hw, call.data),
             M_BUTTON => self.button(hw, call.data),
             M_BUTTON_IRQ => { self.button_edge(hw, call.value); 0 }
@@ -342,7 +342,7 @@ impl Module for HwModule {
             let mut buf = [0u8; 16];
             let mut w = Writer::new(&mut buf);
             w.map(1).uint(9).int(rc as i64);   // 9: error
-            if let Some(encoded) = w.finish() { let _ = hw.respond(encoded); }
+            if let Some(encoded) = w.finish() { let _ = hw.reply(call, encoded); }
         }
         // a failed request does not end the module; only the host does
         xip_abi::RET_CONTINUE as i32

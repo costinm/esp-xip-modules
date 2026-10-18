@@ -1,7 +1,8 @@
 # `console` API (20)
 
-The text interface of a device, and the only place text is made or read. It takes the serial port from the host
-(`serial_open`): each line typed arrives as a request (method 3, the line as bytes) and the text it answers is printed.
+The text interface of a device, and the only place text is made or read. Its manifest names a port (the serial line, a link
+like any other): each line arrives as a frame of that link (the line as bytes) and the text it answers goes back to the source of the line, with
+the `from` and `id` the frame carried, so a line from the network is answered on the network.
 A line is one of the commands below or `component.method key=value ...` (the spelling of the ssh-mesh `mesh` CLI), which
 becomes the tagged-CBOR request of the module `component` (names and tags from the `API.md` files of the modules,
 `mesh-api-gen`, `scripts/gen.sh`), and is sent as a packet with an id. Nothing waits for an answer: whatever packets modules send to the
@@ -13,7 +14,7 @@ Native calls: a method of a host component that has a native function (`wifi.get
 fills the request struct of the function from the fields of the line, calls the function in its table, and prints the output struct as the answer. The layout of the structs and the position of the function come from `native.h`
 (`mesh-api-gen --out-console-native`, generated from the API.md and the Rust declaration), so adding a function to such an API adds no console code. A field the line does not name is zero, so `wifi.set` replaces the whole intent.
 
-Commands: `status` (the host device_info map, including Wi-Fi, heap, slots and cached component status), `start NAME [TEXT]`, `stop NAME`, `events` (the last events modules emitted), `reset`,
+Commands: `status` (the host device_info map, including Wi-Fi, heap, slots and cached component status), `start NAME [TEXT]`, `stop NAME`, `reset`,
 `wifi [ssid=NAME] [psk=SECRET] [start|stop]` (the network is a setting of this module, never in an image; an empty ssid is
 the flash network), `loader start NAME` / `loader stop` (the upload server, which announces that the device wants the
 package NAME), `help`.
@@ -57,7 +58,7 @@ value looks like (`name=123` stays text when `name` is a `string`).
 |---:|---|---|---|
 | 1 | `text` | `string` | `key=value` words on one line; a record list one record per line; `ok` for an empty answer. |
 
-The answers the console prints as lists, one record per line (`device_info` modules; the host's `modules_info` and `events_info`):
+The answers the console prints as lists, one record per line (`device_info` modules; the host's `modules_info`):
 
 `Slot` fields:
 
