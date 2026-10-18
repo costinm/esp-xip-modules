@@ -81,7 +81,7 @@ pub const IRQ_BOTH: u32 = 3;
 pub const ALARM_EXACT: u32 = 0;
 /// May fire anywhere in `[delay, delay + window]`; the host prefers the next wake window inside that range and fires at the end of the range at the latest.
 pub const ALARM_FLEXIBLE: u32 = 1;
-/// Do not fire while `connected()` is 0 (JobScheduler's network constraint). The alarm becomes due when connectivity returns and fires in the next wake window.
+/// Do not fire while the network is down (`HOST_NETWORK` 0, `wifi.state`; JobScheduler's network constraint). The alarm becomes due when connectivity returns and fires in the next wake window.
 pub const ALARM_CONNECTED: u32 = 2;
 /// Also deliver `HOST_WAKE` whenever a wake window opens (a module that batches its work on windows).
 pub const ALARM_WINDOW: u32 = 4;
@@ -100,38 +100,6 @@ pub const ADDR_MAIN: u32 = 0;
 /// The first address of a link (`link` component): `ADDR_LINK + n`. Frames arrive `from` it, and `send` to it transmits. It is below 2^31 so that
 /// `link.open` can return an address like a result, positive, and an error stays negative. Module addresses (component numbers) are below it.
 pub const ADDR_LINK: u32 = 0x4000_0000;
-
-// FEAT: Bits of `xip_host.features`: what the host really implements.
-/// `get_setting` / `set_setting`.
-pub const FEAT_SETTINGS: u32 = 1;
-/// `spi_open` / `spi_transfer` / `spi_close`.
-pub const FEAT_SPI: u32 = 2;
-/// The `ready_pin` option of `spi_open`.
-pub const FEAT_SPI_READY: u32 = 4;
-/// `i2c_transfer`.
-pub const FEAT_I2C: u32 = 8;
-/// `adc_read`.
-pub const FEAT_ADC: u32 = 16;
-/// `rgbled_write`.
-pub const FEAT_RGBLED: u32 = 32;
-/// `call_service`.
-pub const FEAT_SERVICE: u32 = 64;
-/// `ALARM_FLEXIBLE` windows are real (the host has a sleepy mode); otherwise a flexible alarm fires at its delay.
-pub const FEAT_ALARM_FLEX: u32 = 128;
-/// The Wi-Fi owner: the `wifi` and `wifi-tuning` components, `wifi_info` and `wifi_scan`.
-pub const FEAT_WIFI: u32 = 256;
-/// `serial_open` / `serial_write` / `serial_close`.
-pub const FEAT_SERIAL: u32 = 1024;
-/// `modules_info`, `module_start`, `module_stop`, `events_info`, `reset`.
-pub const FEAT_MODULES: u32 = 4096;
-/// `pkt_*` and `send`, `call.pkt` / `call.from` / `call.id`.
-pub const FEAT_PACKETS: u32 = 8192;
-/// `mem_alloc` / `mem_free`.
-pub const FEAT_MEMORY: u32 = 16384;
-/// Nonblocking TCP sockets and packet writes.
-pub const FEAT_SOCKET: u32 = 32768;
-/// Physical flash erase, pool-packet write and read; image policy belongs to callers.
-pub const FEAT_FLASH: u32 = 65536;
 
 // SOCKET_MODE: `SOCKET_MODE`
 /// Readiness callback; the module calls nonblocking `socket_read` or `socket_write`.
@@ -243,7 +211,7 @@ pub struct DmodHeader {
     pub data_vma: u32,
     /// Stack the deepest handler needs; the worker uses the largest of its modules. 0 = host default.
     pub stack_bytes: u32,
-    /// `FEAT_*` the module cannot run without.
+    /// Reserved, zero: it was a set of host feature bits. What a module uses from the host is found at run time with `get_component`.
     pub required_features: u32,
     /// `DMOD_FLAG_*`.
     pub flags: u32,
@@ -264,7 +232,6 @@ const _: () = assert!(core::mem::size_of::<DmodHeader>() == 64);
 pub struct Host {
     pub abi_version: u32,
     pub size: u32,
-    pub features: u32,
     pub user: *mut c_void,
     /// Write one line to the host's log.
     ///
@@ -287,60 +254,6 @@ pub struct Host {
     ///
     /// `uint64_t` — the time.
     pub now_ms: Option<unsafe extern "C" fn(user: *mut c_void) -> u64>,
-    /// Answer the current request.
-    ///
-    /// TODO: not sure about this. The struct passed to the entrypint can take a return value, but 'data' is wrong - no copy if we can avoid it. Top priority is to port the packet pool from dmesh - so module can send messages. I don't think they need to 'respond', just send (like they do for log).
-    ///
-    /// The answer to a call with `flags` bit 0. By convention one CBOR item (a map keyed by field tags, like the
-    /// request), delivered to whoever posted the request. No answer means an empty one.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK`, `ERR_BUSY` if already answered, `ERR_ARG` if the call was not a request.
-    ///
-    /// # Arguments
-    ///
-    /// * `data` (`const uint8_t *`): The answer (copied).
-    /// * `len` (`size_t`): Length.
-    pub respond: Option<unsafe extern "C" fn(user: *mut c_void, data: *const u8, len: usize) -> core::ffi::c_int>,
-    /// Send an event to the application.
-    ///
-    /// TODO: rename, like log and response it is a case of message send() - with component, method and data, and should use a borrowed packet from the pool for reduced copy. The modules receive and send messages - to other modules or remote.
-    ///
-    /// The module's output channel besides `respond` and `log`; main receives `(module, event_id, value_type, value)`.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK`, or an error.
-    ///
-    /// # Arguments
-    ///
-    /// * `event_id` (`uint16_t`): Module-defined.
-    /// * `value_type` (`uint8_t`): `VALUE_*`.
-    /// * `value` (`const uint8_t *`): Payload (copied).
-    /// * `len` (`size_t`): Length.
-    pub emit: Option<unsafe extern "C" fn(user: *mut c_void, event_id: u16, value_type: u8, value: *const u8, len: usize) -> core::ffi::c_int>,
-    /// Call a service of the application by tag.
-    ///
-    /// TODO: would be great if we can avoid this or discourage it. First because of 'synchronous', also complicates upgrades and other things. If messages can be used - would be great.
-    ///
-    /// The call is synchronous and must be short; `timeout_ms` bounds it. For anything slow ask the service to
-    /// answer later through a request to this module.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK`, `ERR_NOTFOUND` when nothing answers.
-    ///
-    /// # Arguments
-    ///
-    /// * `tag` (`uint16_t`): The service.
-    /// * `request` (`const uint8_t *`): Request.
-    /// * `request_len` (`size_t`): Length.
-    /// * `response` (`uint8_t *`): Buffer for the answer.
-    /// * `response_capacity` (`size_t`): Its size.
-    /// * `response_len` (`size_t *`): Answer length.
-    /// * `timeout_ms` (`uint32_t`): Longest wait.
-    pub call_service: Option<unsafe extern "C" fn(user: *mut c_void, tag: u16, request: *const u8, request_len: usize, response: *mut u8, response_capacity: usize, response_len: *mut usize, timeout_ms: u32) -> core::ffi::c_int>,
     /// Read a persistent setting of this module.
     ///
     /// Own namespace; the key is up to 15 bytes, the value up to 256.
@@ -372,170 +285,6 @@ pub struct Host {
     /// * `value` (`const uint8_t *`): Value.
     /// * `value_len` (`size_t`): Length.
     pub set_setting: Option<unsafe extern "C" fn(user: *mut c_void, key: *const u8, key_len: usize, value: *const u8, value_len: usize) -> core::ffi::c_int>,
-    /// Configure a pin.
-    ///
-    /// Also sets the initial level of an output. The pin belongs to the module until the instance is destroyed.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK`, `ERR_BUSY` if another module owns it, `ERR_UNSUPPORTED` if main reserved it.
-    ///
-    /// # Arguments
-    ///
-    /// * `pin` (`int`): GPIO number.
-    /// * `mode` (`int`): `GPIO_*`.
-    /// * `pull` (`int`): `GPIO_PULL_*`.
-    /// * `level` (`int`): Initial output level.
-    pub gpio_config: Option<unsafe extern "C" fn(user: *mut c_void, pin: core::ffi::c_int, mode: core::ffi::c_int, pull: core::ffi::c_int, level: core::ffi::c_int) -> core::ffi::c_int>,
-    /// Read a pin.
-    ///
-    /// # Returns
-    ///
-    /// `int` — level 0/1, or a negative error.
-    ///
-    /// # Arguments
-    ///
-    /// * `pin` (`int`): A pin configured by this module.
-    pub gpio_read: Option<unsafe extern "C" fn(user: *mut c_void, pin: core::ffi::c_int) -> core::ffi::c_int>,
-    /// Set an output level.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK` or an error.
-    ///
-    /// # Arguments
-    ///
-    /// * `pin` (`int`): A pin configured by this module.
-    /// * `level` (`int`): 0 or 1.
-    pub gpio_write: Option<unsafe extern "C" fn(user: *mut c_void, pin: core::ffi::c_int, level: core::ffi::c_int) -> core::ffi::c_int>,
-    /// Report the edges of a pin.
-    ///
-    /// An edge becomes a call `(component, method)` with `value` = the pin level. The interrupt itself never runs
-    /// module code; edges that arrive while the queue is full are counted and dropped.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK` or an error.
-    ///
-    /// # Arguments
-    ///
-    /// * `pin` (`int`): The pin.
-    /// * `edge` (`int`): `IRQ_*`.
-    /// * `component` (`int`): Returned in the call.
-    /// * `method` (`int`): Returned in the call.
-    pub irq_register: Option<unsafe extern "C" fn(user: *mut c_void, pin: core::ffi::c_int, edge: core::ffi::c_int, component: core::ffi::c_int, method: core::ffi::c_int) -> core::ffi::c_int>,
-    /// Stop reporting a pin.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK`, `ERR_NOTFOUND`.
-    ///
-    /// # Arguments
-    ///
-    /// * `pin` (`int`): The pin.
-    pub irq_unregister: Option<unsafe extern "C" fn(user: *mut c_void, pin: core::ffi::c_int) -> core::ffi::c_int>,
-    /// Mask or unmask a registered pin.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK`, `ERR_NOTFOUND`.
-    ///
-    /// # Arguments
-    ///
-    /// * `pin` (`int`): The pin.
-    /// * `enabled` (`int`): 1 unmask, 0 mask.
-    pub irq_enable: Option<unsafe extern "C" fn(user: *mut c_void, pin: core::ffi::c_int, enabled: core::ffi::c_int) -> core::ffi::c_int>,
-    /// Open a full-duplex SPI device.
-    ///
-    /// The first open of a controller initialises it with the pins of the config; later opens must use the same
-    /// pins. A controller that main initialised is shared as is.
-    ///
-    /// # Returns
-    ///
-    /// `int` — a handle (>= 0) or a negative error.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` (`const xip_spi_config *`): See `spi_config`.
-    pub spi_open: Option<unsafe extern "C" fn(user: *mut c_void, config: *const SpiConfig) -> core::ffi::c_int>,
-    /// One chip-select cycle.
-    ///
-    /// `tx` and `rx` are both `len` bytes (`rx` may be NULL). Bounded; waits for `ready_pin` when configured.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK`, `ERR_BUSY` when `ready_pin` never became ready, `ERR_IO`.
-    ///
-    /// # Arguments
-    ///
-    /// * `handle` (`int`): From `spi_open`.
-    /// * `tx` (`const uint8_t *`): Bytes to send.
-    /// * `rx` (`uint8_t *`): Bytes received, or NULL.
-    /// * `len` (`size_t`): Length.
-    pub spi_transfer: Option<unsafe extern "C" fn(user: *mut c_void, handle: core::ffi::c_int, tx: *const u8, rx: *mut u8, len: usize) -> core::ffi::c_int>,
-    /// Release an SPI device.
-    ///
-    /// Also done when the instance is destroyed.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK`, `ERR_ARG`.
-    ///
-    /// # Arguments
-    ///
-    /// * `handle` (`int`): From `spi_open`.
-    pub spi_close: Option<unsafe extern "C" fn(user: *mut c_void, handle: core::ffi::c_int) -> core::ffi::c_int>,
-    /// Write then read on an I2C bus.
-    ///
-    /// Either direction may be empty. The pins are held for the call only.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK` or an error.
-    ///
-    /// # Arguments
-    ///
-    /// * `port` (`int`): Controller.
-    /// * `sda` (`int`): Pin.
-    /// * `scl` (`int`): Pin.
-    /// * `frequency` (`uint32_t`): Hz.
-    /// * `address` (`uint8_t`): 7-bit address.
-    /// * `tx` (`const uint8_t *`): Bytes to write.
-    /// * `tx_len` (`size_t`): Length.
-    /// * `rx` (`uint8_t *`): Buffer for the read.
-    /// * `rx_len` (`size_t`): Length.
-    /// * `timeout_ms` (`uint32_t`): Longest wait.
-    pub i2c_transfer: Option<unsafe extern "C" fn(user: *mut c_void, port: core::ffi::c_int, sda: core::ffi::c_int, scl: core::ffi::c_int, frequency: u32, address: u8, tx: *const u8, tx_len: usize, rx: *mut u8, rx_len: usize, timeout_ms: u32) -> core::ffi::c_int>,
-    /// One-shot 12-bit reading.
-    ///
-    /// `unit` and `channel` may be NULL.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK` or an error.
-    ///
-    /// # Arguments
-    ///
-    /// * `pin` (`int`): GPIO number.
-    /// * `ref_mv` (`uint32_t`): Reference for the millivolt value.
-    /// * `raw` (`int *`): Raw reading.
-    /// * `mv` (`uint32_t *`): Millivolts.
-    /// * `unit` (`int *`): ADC unit used.
-    /// * `channel` (`int *`): ADC channel used.
-    pub adc_read: Option<unsafe extern "C" fn(user: *mut c_void, pin: core::ffi::c_int, ref_mv: u32, raw: *mut core::ffi::c_int, mv: *mut u32, unit: *mut core::ffi::c_int, channel: *mut core::ffi::c_int) -> core::ffi::c_int>,
-    /// Set a WS2812-style LED.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK` or an error.
-    ///
-    /// # Arguments
-    ///
-    /// * `pin` (`int`): The data pin.
-    /// * `red` (`uint8_t`): 0..255.
-    /// * `green` (`uint8_t`): 0..255.
-    /// * `blue` (`uint8_t`): 0..255.
-    pub rgbled_write: Option<unsafe extern "C" fn(user: *mut c_void, pin: core::ffi::c_int, red: u8, green: u8, blue: u8) -> core::ffi::c_int>,
     /// Call me later, once or periodically.
     ///
     /// At `delay_ms` from now the host calls the handler with `(component, method)` and `value` = lateness in
@@ -567,66 +316,9 @@ pub struct Host {
     ///
     /// * `alarm` (`int`): An id from `alarm_set`.
     pub alarm_cancel: Option<unsafe extern "C" fn(user: *mut c_void, alarm: core::ffi::c_int) -> core::ffi::c_int>,
-    /// Does main have a network path.
-    ///
-    /// Cheap. Use `ALARM_CONNECTED` to defer work until it is true.
-    ///
-    /// # Returns
-    ///
-    /// `int` — 1 yes, 0 no.
-    pub connected: Option<unsafe extern "C" fn(user: *mut c_void) -> core::ffi::c_int>,
-    /// State of the Wi-Fi.
-    ///
-    /// The CBOR of the `wifi.state` method: the map and its fields are defined in `api/wifi.API.md`; the component modules use
-    /// (`state`) is in `crates/xip-abi/src/wifi.rs`.
-    ///
-    /// # Returns
-    ///
-    /// `int` — the length of the answer, or a negative error (`ERR_SIZE`: the buffer is too small).
-    ///
-    /// # Arguments
-    ///
-    /// * `out` (`uint8_t *`): Buffer.
-    /// * `capacity` (`size_t`): Its size.
-    pub wifi_info: Option<unsafe extern "C" fn(user: *mut c_void, out: *mut u8, capacity: usize) -> core::ffi::c_int>,
-    /// Receive the lines typed on the board's serial port.
-    ///
-    /// The host owns the port: it picks USB-Serial/JTAG or UART0, runs the driver tuned for the board, edits the line (backspace)
-    /// and starts and stops all of it. Each line becomes a packet `(component, method)` to this module (`call.pkt`, `from` = `ADDR_MAIN`, `id` 0), `data` the line without
-    /// a newline. Nothing is answered: the module writes what it has to say with `serial_write`, whenever it has it. The port is
-    /// released by `serial_close` or when the module ends.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK`, `ERR_UNSUPPORTED`, `ERR_BUSY` if another module has the port, `ERR_IO` if there is no port.
-    ///
-    /// # Arguments
-    ///
-    /// * `component` (`int`): Returned in the call.
-    /// * `method` (`int`): Returned in the call.
-    pub serial_open: Option<unsafe extern "C" fn(user: *mut c_void, component: core::ffi::c_int, method: core::ffi::c_int) -> core::ffi::c_int>,
-    /// Write text to the serial port.
-    ///
-    /// For output that is not the answer to a line.
-    ///
-    /// # Returns
-    ///
-    /// `int` — the bytes taken, or a negative error (`ERR_NOTFOUND` when this module does not have the port).
-    ///
-    /// # Arguments
-    ///
-    /// * `data` (`const uint8_t *`): Text.
-    /// * `len` (`size_t`): Length.
-    pub serial_write: Option<unsafe extern "C" fn(user: *mut c_void, data: *const u8, len: usize) -> core::ffi::c_int>,
-    /// Give the serial port back.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK`; the driver is released in the background.
-    pub serial_close: Option<unsafe extern "C" fn(user: *mut c_void) -> core::ffi::c_int>,
     /// Every module slot.
     ///
-    /// One CBOR array with a map per slot, keyed as the `slot` record of `modules/mod_console/API.md`: name, tag, installed, running,
+    /// One CBOR array with a map per slot, keyed as the `slot` record of `modules/mod_con/API.md`: name, tag, installed, running,
     /// version, last result, runs, duration of the last run, stack high-water mark, result of the last image check.
     ///
     /// # Returns
@@ -664,20 +356,6 @@ pub struct Host {
     /// * `name` (`const uint8_t *`): Slot name.
     /// * `name_len` (`size_t`): Length.
     pub module_stop: Option<unsafe extern "C" fn(user: *mut c_void, name: *const u8, name_len: usize) -> core::ffi::c_int>,
-    /// The last events modules emitted.
-    ///
-    /// One CBOR array, oldest first, of maps keyed as the `event` record of `modules/mod_console/API.md`: module, event id, and the
-    /// value as text (a text value as it is, any other as hex). The host keeps the last 16.
-    ///
-    /// # Returns
-    ///
-    /// `int` — the length of the answer.
-    ///
-    /// # Arguments
-    ///
-    /// * `out` (`uint8_t *`): Buffer.
-    /// * `capacity` (`size_t`): Its size.
-    pub events_info: Option<unsafe extern "C" fn(user: *mut c_void, out: *mut u8, capacity: usize) -> core::ffi::c_int>,
     /// Restart the device.
     ///
     /// # Returns
@@ -822,20 +500,6 @@ pub struct Host {
     /// * `out` (`uint8_t *`): Buffer.
     /// * `capacity` (`size_t`): Its size.
     pub module_manifest: Option<unsafe extern "C" fn(user: *mut c_void, name: *const u8, name_len: usize, out: *mut u8, capacity: usize) -> core::ffi::c_int>,
-    /// The networks in range.
-    ///
-    /// Never blocks (first call starts the scan and returns `ERR_BUSY`; poll about once a second). The answer is the CBOR of the
-    /// `wifi.scan` method, defined in `api/wifi.API.md`.
-    ///
-    /// # Returns
-    ///
-    /// `int` — the length of the answer, `ERR_BUSY` while the scan is running, `ERR_UNSUPPORTED` without Wi-Fi, `ERR_IO` if the driver refused, `ERR_SIZE` when the buffer is too small.
-    ///
-    /// # Arguments
-    ///
-    /// * `out` (`uint8_t *`): Buffer.
-    /// * `capacity` (`size_t`): Its size.
-    pub wifi_scan: Option<unsafe extern "C" fn(user: *mut c_void, out: *mut u8, capacity: usize) -> core::ffi::c_int>,
     /// Free memory of the device.
     ///
     /// RAM is the scarce resource on these chips, so the host reports it to any module that asks (the console's `heap`). One CBOR map of
@@ -893,22 +557,8 @@ pub struct Host {
     ///
     /// * `kind` (`int`): What to print (above).
     pub heap_dump: Option<unsafe extern "C" fn(user: *mut c_void, kind: core::ffi::c_int) -> core::ffi::c_int>,
-    /// Register a nonblocking TCP listener.
-    ///
-    /// The host owns the listener and accepted sockets. It calls `(component, method)` on the module worker for socket events; `call.value` is `SOCKET_EVENT_*` and `call.id` is the opaque socket handle. The first accepted-socket event is `OPEN` with zero data length. A handle belongs to this instance and is closed when it stops. The listener can be closed with `socket_close`. `SOCKET_MODE_DIRECT` reports readiness only. `SOCKET_MODE_BUFFERED` reads into pool packets and reports `DATA`; the module must release or keep each packet. No callback runs on the poll task.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK`; `ERR_ARG`, `ERR_BUSY`, `ERR_IO`, `ERR_UNSUPPORTED`.
-    ///
-    /// # Arguments
-    ///
-    /// * `port` (`uint16_t`): TCP listen port.
-    /// * `mode` (`uint32_t`): `SOCKET_MODE_DIRECT` or `SOCKET_MODE_BUFFERED`.
-    /// * `component` (`int32_t`): Component of socket events.
-    /// * `method` (`int32_t`): Method of socket events.
-    /// * `listener` (`uint32_t *`): Receives an opaque listener handle.
-    pub tcp_accept: Option<unsafe extern "C" fn(user: *mut c_void, port: u16, mode: u32, component: i32, method: i32, listener: *mut u32) -> core::ffi::c_int>,
+    // Accepting is declarative: the manifest port (key 9) listens on TCP port `PORT_NET + port`, and each accepted connection arrives as a call
+    // `(component, 0)` with `value = SOCKET_EVENT_*` and `id` = the socket handle (first `OPEN`), which the module reads and writes below.
     /// Nonblocking read into module memory or a packet span.
     ///
     /// Only for direct-mode accepted sockets. One call may read fewer than `len` bytes. The buffer is borrowed for this call only. A packet span may be passed as `out` while the module owns its mutable lease.
@@ -1054,7 +704,7 @@ pub struct Host {
     /// Device is `{1: uptime_ms, 2: chip, 3: flash_size, 4: active_partition_label,
     /// 5: active_partition_address, 6: active_partition_size}`. Chip is an ESP chip model number;
     /// partition fields are omitted when the platform cannot identify its running partition.
-    /// Wi-Fi, heap and modules reuse `wifi_info`, `heap_info` and `modules_info` records;
+    /// Wi-Fi, heap and modules reuse the Wi-Fi state, `heap_info` and `modules_info` records;
     /// unavailable Wi-Fi is an empty map and unavailable module enumeration is an empty array.
     /// Components is `{component: {method: {1: updated_ms, 2: status_map}}}`.
     /// Times are milliseconds since boot. Built-in records are read during the call; contributed
@@ -1115,41 +765,20 @@ pub struct Host {
     pub get_component: Option<unsafe extern "C" fn(user: *mut c_void, name: *const core::ffi::c_char) -> *const c_void>,
 }
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<Host>() == 244);
+const _: () = assert!(core::mem::size_of::<Host>() == 148);
 
 /// Byte offset of each host call, for `Hw`'s check that an older host has the slot.
 pub mod slot {
     use super::Host;
     pub const LOG: usize = core::mem::offset_of!(Host, log);
     pub const NOW_MS: usize = core::mem::offset_of!(Host, now_ms);
-    pub const RESPOND: usize = core::mem::offset_of!(Host, respond);
-    pub const EMIT: usize = core::mem::offset_of!(Host, emit);
-    pub const CALL_SERVICE: usize = core::mem::offset_of!(Host, call_service);
     pub const GET_SETTING: usize = core::mem::offset_of!(Host, get_setting);
     pub const SET_SETTING: usize = core::mem::offset_of!(Host, set_setting);
-    pub const GPIO_CONFIG: usize = core::mem::offset_of!(Host, gpio_config);
-    pub const GPIO_READ: usize = core::mem::offset_of!(Host, gpio_read);
-    pub const GPIO_WRITE: usize = core::mem::offset_of!(Host, gpio_write);
-    pub const IRQ_REGISTER: usize = core::mem::offset_of!(Host, irq_register);
-    pub const IRQ_UNREGISTER: usize = core::mem::offset_of!(Host, irq_unregister);
-    pub const IRQ_ENABLE: usize = core::mem::offset_of!(Host, irq_enable);
-    pub const SPI_OPEN: usize = core::mem::offset_of!(Host, spi_open);
-    pub const SPI_TRANSFER: usize = core::mem::offset_of!(Host, spi_transfer);
-    pub const SPI_CLOSE: usize = core::mem::offset_of!(Host, spi_close);
-    pub const I2C_TRANSFER: usize = core::mem::offset_of!(Host, i2c_transfer);
-    pub const ADC_READ: usize = core::mem::offset_of!(Host, adc_read);
-    pub const RGBLED_WRITE: usize = core::mem::offset_of!(Host, rgbled_write);
     pub const ALARM_SET: usize = core::mem::offset_of!(Host, alarm_set);
     pub const ALARM_CANCEL: usize = core::mem::offset_of!(Host, alarm_cancel);
-    pub const CONNECTED: usize = core::mem::offset_of!(Host, connected);
-    pub const WIFI_INFO: usize = core::mem::offset_of!(Host, wifi_info);
-    pub const SERIAL_OPEN: usize = core::mem::offset_of!(Host, serial_open);
-    pub const SERIAL_WRITE: usize = core::mem::offset_of!(Host, serial_write);
-    pub const SERIAL_CLOSE: usize = core::mem::offset_of!(Host, serial_close);
     pub const MODULES_INFO: usize = core::mem::offset_of!(Host, modules_info);
     pub const MODULE_START: usize = core::mem::offset_of!(Host, module_start);
     pub const MODULE_STOP: usize = core::mem::offset_of!(Host, module_stop);
-    pub const EVENTS_INFO: usize = core::mem::offset_of!(Host, events_info);
     pub const RESET: usize = core::mem::offset_of!(Host, reset);
     pub const PKT_ALLOC: usize = core::mem::offset_of!(Host, pkt_alloc);
     pub const PKT_BUF: usize = core::mem::offset_of!(Host, pkt_buf);
@@ -1160,11 +789,9 @@ pub mod slot {
     pub const MEM_ALLOC: usize = core::mem::offset_of!(Host, mem_alloc);
     pub const MEM_FREE: usize = core::mem::offset_of!(Host, mem_free);
     pub const MODULE_MANIFEST: usize = core::mem::offset_of!(Host, module_manifest);
-    pub const WIFI_SCAN: usize = core::mem::offset_of!(Host, wifi_scan);
     pub const HEAP_INFO: usize = core::mem::offset_of!(Host, heap_info);
     pub const NV: usize = core::mem::offset_of!(Host, nv);
     pub const HEAP_DUMP: usize = core::mem::offset_of!(Host, heap_dump);
-    pub const TCP_ACCEPT: usize = core::mem::offset_of!(Host, tcp_accept);
     pub const SOCKET_READ: usize = core::mem::offset_of!(Host, socket_read);
     pub const SOCKET_WRITE: usize = core::mem::offset_of!(Host, socket_write);
     pub const SOCKET_CLOSE: usize = core::mem::offset_of!(Host, socket_close);

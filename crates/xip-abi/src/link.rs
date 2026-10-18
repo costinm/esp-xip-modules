@@ -2,7 +2,7 @@
 //! `mod_lora` are all the same thing to a module that speaks a protocol (QUIC, a mesh, a console): a place frames come
 //! from and go to.
 //!
-//! A **link** has a name (`"espnow"`, `"udp6"`, `"ppp"`, `"line"`, `"lora"`, ...) and an **address**, a number from
+//! A **link** has a name (`"espnow"`, `"udp6"`, `"ppp"`, `"serial"`, `"lora"`, ...) and an **address**, a number from
 //! [`ADDR_LINK`] up. It is provided either by the runtime (a *native* link: the runtime owns the driver) or by a module (`mod_lora`
 //! provides `"lora"`: it owns the radio). Modules subscribe to it. Which side of a link a frame is on does not matter to a
 //! protocol module, so QUIC runs unchanged over ESP-NOW, UDP6, a serial line or LoRa.
@@ -70,7 +70,23 @@ pub const fn event_kind(flags: u32) -> u32 {
 pub const LINK_ESPNOW: &core::ffi::CStr = c"espnow";
 pub const LINK_UDP6: &core::ffi::CStr = c"udp6";
 pub const LINK_PPP: &core::ffi::CStr = c"ppp";
-pub const LINK_LINE: &core::ffi::CStr = c"line";
+pub const LINK_SERIAL: &core::ffi::CStr = c"serial";
+
+/// A module's **port** (manifest key 9, an integer): a virtual, numbered place that frames are addressed to, and that is not tied to a link or an encoding.
+/// The runtime binds the module to its port when it starts; every link that can deliver frames to a port does (the serial line, later UDP and TCP), and
+/// the frame arrives like any link frame: `from` is the link, `id` the token of the far end, so the module answers with `send(from, .., id)` and
+/// does not know which link it was. 0: none.
+///
+/// * `PORT_CONSOLE` (1): the console. On the serial line these are the text lines a person types (newline delimited), and a record that
+///   starts with the byte 1 in a PPP frame (below).
+/// * Ports are **datagram** (manifest key 9, packets and messages: the serial line, UDP later) or **stream** (key 10: TCP, QUIC streams later; a module can
+///   have both, and the two are separate numbers). A stream port listens on TCP port `PORT_NET + stream`: the console is stream 1 (5226), the flasher
+///   stream 2 (5227, the port the DMesh loader uses). Its connections arrive as socket events `(component, 0)` with `value = SOCKET_EVENT_*` and
+///   `id` = the handle, which the module reads and writes with `socket_read` / `socket_write` (the buffering and flow control are the socket's).
+/// * Other ports are the first byte of a PPP-framed record on the serial line: `0x7e port bytes... 0x7e`, with `0x7d` escaping (the byte `^ 0x20`).
+///   DMesh's `0xf7` is the port of its QUIC packets.
+pub const PORT_CONSOLE: u32 = 1;
+pub const PORT_NET: u32 = 5225;
 
 /// Who provides a link ([`LinkInfo::provider`]).
 pub const LINK_NONE: u32 = 0;

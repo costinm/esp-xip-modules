@@ -1,4 +1,4 @@
-//! `alloc` for modules, over the host's managed heap (`mem_alloc` / `mem_free`, FEAT_MEMORY): two ways, the same blocks.
+//! `alloc` for modules, over the host's managed heap (`mem_alloc` / `mem_free`): two ways, the same blocks.
 //!
 //! * [`HostAlloc`] (feature `allocator-api`, nightly): an explicit `Allocator` value, `Vec::new_in(hw.allocator())`. Nothing
 //!   hidden; code that is generic over the allocator can use it.

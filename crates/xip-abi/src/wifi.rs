@@ -51,21 +51,10 @@
 //! if (wifi->state(host->user, &now) == 0 && now.sta == 2) { /* joined: now.ip4, now.rssi */ }
 //! ```
 //!
-//! # Status and scan for text and network front ends
+//! # Status and scan
 //!
-//! Two host calls return CBOR for the console and for remote tools. They are not for modules that need the values (read
-//! `state`) and only exist on hosts with `FEAT_WIFI`:
-//!
-//! * `wifi_info(out, capacity)`: one map `{1: state, 2: ssid, 3: ip, 4: rssi, 5: ap_up, 6: channel}`. `state` is 0 off, 1
-//!   joining, 2 up. `ssid` (text), `ip` (IPv4 as text) and `rssi` (signed dBm) are present once the station is up; `ap_up`
-//!   (bool) when the soft AP is running; `channel` when the radio has one.
-//! * `wifi_scan(out, capacity)`: never blocks, because a scan takes seconds and a handler has a budget of milliseconds. The
-//!   first call starts it and returns `ERR_BUSY`; poll with an alarm (about once a second). The call that finds it done
-//!   returns the answer, once: `{1: [networks]}`, strongest first, each a map `{1: ssid, 2: bssid, 3: rssi, 4: channel, 5: auth}`. `ssid`
-//!   and `bssid` are byte strings (a name is not always text), `rssi` is signed dBm, `auth` is 0 open, 1 WEP, 2 WPA, 3 WPA2, 4
-//!   WPA/WPA2, 5 enterprise, 6 WPA3 (anything else: the driver's number). The radio is switched on for the scan and off again
-//!   if it was off; while a join is under way the call returns `ERR_BUSY`. A network in range that is not listed was missed;
-//!   scan again. The `scan` of the `wifi` component table returns the same list to a module, in every radio mode.
+//! `state` is what is true now (station, address, signal, channel) and `scan` lists the networks in range, for a module, in every radio mode;
+//! a console or a network front end calls them like any module (`api/wifi.API.md` is their CBOR / JSON / text view).
 //!
 //! # Device settings
 //!

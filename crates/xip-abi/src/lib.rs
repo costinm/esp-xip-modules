@@ -69,6 +69,8 @@ mod link;
 pub use link::*;
 mod power;
 pub use power::*;
+mod hardware;
+pub use hardware::*;
 
 pub mod psa;
 
@@ -83,6 +85,16 @@ macro_rules! call {
         let h = $self.table();
         if (h.size as usize) < slot::$slot + 4 { ERR_UNSUPPORTED } else {
             match h.$field { Some(f) => unsafe { f(h.user $(, $arg)*) }, None => ERR_UNSUPPORTED }
+        }
+    }};
+}
+
+/// A call through the `hw` component (`ERR_UNSUPPORTED` when the host has none or leaves the member empty).
+macro_rules! hwcall {
+    ($self:ident, $field:ident ( $($arg:expr),* )) => {{
+        match $self.hardware() {
+            Some(t) => match t.$field { Some(f) => unsafe { f($self.ctx() $(, $arg)*) }, None => ERR_UNSUPPORTED },
+            None => ERR_UNSUPPORTED,
         }
     }};
 }
@@ -105,10 +117,6 @@ impl Hw {
         self.table().abi_version
     }
 
-    /// `FEAT_*` bits the host really implements.
-    pub fn features(&self) -> u32 {
-        self.table().features
-    }
 
     /// Structured device status, including cached component/method contributions.
     pub fn device_info(&self, out: &mut [u8]) -> Result<usize, i32> {
@@ -129,16 +137,6 @@ impl Hw {
         let h = self.table();
         if (h.size as usize) < slot::NOW_MS + 4 { return 0; }
         match h.now_ms { Some(f) => unsafe { f(h.user) }, None => 0 }
-    }
-
-    /// Answer the current request (only valid inside a call with [`Call::wants_response`]): one CBOR item, copied.
-    pub fn respond(&self, data: &[u8]) -> i32 {
-        call!(self, RESPOND, respond(data.as_ptr(), data.len()))
-    }
-
-    /// Send an event to the application.
-    pub fn emit(&self, event_id: u16, value_type: u32, value: &[u8]) -> i32 {
-        call!(self, EMIT, emit(event_id, value_type as u8, value.as_ptr(), value.len()))
     }
 
     /// `(headroom, max payload)` of this host's packets.
@@ -195,12 +193,6 @@ impl Hw {
         if rc == 0 { Ok((base, cap)) } else { Err(rc) }
     }
 
-    pub fn tcp_accept(&self, port: u16, mode: u32, component: i32, method: i32) -> Result<u32, i32> {
-        let mut listener = 0;
-        let rc = call!(self, TCP_ACCEPT, tcp_accept(port, mode, component, method, &mut listener));
-        if rc == 0 { Ok(listener) } else { Err(rc) }
-    }
-
     /// POSIX-like nonblocking read: positive count, zero EOF, negative error including ERR_AGAIN.
     pub fn socket_read(&self, socket: u32, out: &mut [u8]) -> i32 {
         call!(self, SOCKET_READ, socket_read(socket, out.as_mut_ptr(), out.len()))
@@ -234,16 +226,35 @@ impl Hw {
     }
     pub fn reset(&self) -> i32 { call!(self, RESET, reset()) }
 
-    /// Take the serial port: every line typed arrives as a call `(component, method)` with the line as the packet payload.
-    pub fn serial_open(&self, component: i32, method: i32) -> i32 {
-        call!(self, SERIAL_OPEN, serial_open(component, method))
+    /// Answer the request `call` (a call with `wants_response()`): `data` goes back to whoever sent it as a message with the same `component`,
+    /// `method` and `id`. By convention one CBOR item, a map keyed by field tags like the request. `ERR_ARG` if the call is not a request, `ERR_NOMEM` if the
+    /// pool has no packet, `ERR_SIZE` if `data` does not fit one.
+    pub fn reply(&self, call: &CallView, data: &[u8]) -> i32 {
+        if !call.wants_response() { return ERR_ARG; }
+        self.message(call.from, call.component, call.method, call.id, data)
     }
-    pub fn serial_write(&self, data: &[u8]) -> i32 {
-        call!(self, SERIAL_WRITE, serial_write(data.as_ptr(), data.len()))
+
+    /// Send `data` as a message to `dst` (`ADDR_MAIN`: the application, or a module's component): the pool packet is allocated, filled and sent in one go. What a
+    /// module used to `emit` is a message to the application with its own component and the event number as the method.
+    pub fn message(&self, dst: u32, component: i32, method: i32, id: u64, data: &[u8]) -> i32 {
+        let pkt = match self.pkt_alloc() { Ok(p) => p, Err(e) => return e };
+        match self.pkt_buf(pkt) {
+            Ok((window, room)) if data.len() <= room => unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), window, data.len()) },
+            Ok(_) => { self.pkt_free(pkt); return ERR_SIZE; }
+            Err(e) => { self.pkt_free(pkt); return e; }
+        }
+        self.send(pkt, data.len(), dst, component, method, id)
     }
-    pub fn serial_close(&self) -> i32 {
-        call!(self, SERIAL_CLOSE, serial_close())
+
+    /// An event: `data` as a message to the application with the module's own `component` and the event number as the method (what a module used to
+    /// `emit`). Nobody listening is not an error for the module; the host decides what to do with it (a log and routing component will).
+    pub fn event(&self, component: i32, id: u16, data: &[u8]) -> i32 {
+        match self.message(ADDR_MAIN, component, id as i32, 0, data) {
+            ERR_NOTFOUND => 0, // the application listens to nothing: the event is dropped
+            rc => rc,
+        }
     }
+
     /// Start the installed module `name` with `request`.
     pub fn module_start(&self, name: &[u8], request: &[u8]) -> i32 {
         call!(self, MODULE_START, module_start(name.as_ptr(), name.len(), request.as_ptr(), request.len()))
@@ -251,14 +262,6 @@ impl Hw {
     /// The manifest of the installed module `name` (CBOR), or a negative error.
     pub fn module_manifest(&self, name: &[u8], out: &mut [u8]) -> i32 {
         call!(self, MODULE_MANIFEST, module_manifest(name.as_ptr(), name.len(), out.as_mut_ptr(), out.len()))
-    }
-    /// The last events modules emitted (CBOR array of records).
-    pub fn events_info(&self, out: &mut [u8]) -> i32 {
-        call!(self, EVENTS_INFO, events_info(out.as_mut_ptr(), out.len()))
-    }
-    /// The scan of the networks in range, as CBOR (`ERR_BUSY` while it runs).
-    pub fn wifi_scan(&self, out: &mut [u8]) -> i32 {
-        call!(self, WIFI_SCAN, wifi_scan(out.as_mut_ptr(), out.len()))
     }
     /// Free memory of the device, as CBOR.
     pub fn heap_info(&self, out: &mut [u8]) -> i32 {
@@ -287,6 +290,13 @@ impl Hw {
         if p.is_null() { return None; }
         let t = unsafe { &*p };
         (t.version == LINK_VERSION && t.size as usize >= core::mem::size_of::<Link>()).then_some(t)
+    }
+    /// The `hw` component (pins, interrupts, SPI, I2C, ADC, RGB LED), or None when this host has none.
+    pub fn hardware(&self) -> Option<&'static Hardware> {
+        let p = self.get_component(c"hw") as *const Hardware;
+        if p.is_null() { return None; }
+        let t = unsafe { &*p };
+        (t.version == HARDWARE_VERSION && t.size as usize >= core::mem::size_of::<Hardware>()).then_some(t)
     }
     /// The `power` component (sleep, power and FreeRTOS state), or None when this host has none.
     pub fn power(&self) -> Option<&'static Power> {
@@ -344,10 +354,6 @@ impl Hw {
         call!(self, ALARM_CANCEL, alarm_cancel(alarm))
     }
 
-    /// Does main have a network path?
-    pub fn connected(&self) -> bool {
-        call!(self, CONNECTED, connected()) == 1
-    }
 
     pub fn get_setting(&self, key: &[u8], value: &mut [u8]) -> Result<usize, i32> {
         let mut len = 0usize;
@@ -360,60 +366,60 @@ impl Hw {
     }
 
     pub fn gpio_config(&self, pin: i32, mode: u32, pull: u32, level: i32) -> i32 {
-        call!(self, GPIO_CONFIG, gpio_config(pin, mode as i32, pull as i32, level))
+        hwcall!(self, gpio_config(pin, mode as i32, pull as i32, level))
     }
 
     pub fn gpio_read(&self, pin: i32) -> i32 {
-        call!(self, GPIO_READ, gpio_read(pin))
+        hwcall!(self, gpio_read(pin))
     }
 
     pub fn gpio_write(&self, pin: i32, level: i32) -> i32 {
-        call!(self, GPIO_WRITE, gpio_write(pin, level))
+        hwcall!(self, gpio_write(pin, level))
     }
 
     /// Report the edges of `pin` as calls `(component, method)` with `value` = the level.
     pub fn irq_register(&self, pin: i32, edge: u32, component: i32, method: i32) -> i32 {
-        call!(self, IRQ_REGISTER, irq_register(pin, edge as i32, component, method))
+        hwcall!(self, irq_register(pin, edge as i32, component, method))
     }
 
     pub fn irq_unregister(&self, pin: i32) -> i32 {
-        call!(self, IRQ_UNREGISTER, irq_unregister(pin))
+        hwcall!(self, irq_unregister(pin))
     }
 
     pub fn irq_enable(&self, pin: i32, enabled: bool) -> i32 {
-        call!(self, IRQ_ENABLE, irq_enable(pin, enabled as i32))
+        hwcall!(self, irq_enable(pin, enabled as i32))
     }
 
     /// A handle (>= 0) or a negative error.
     pub fn spi_open(&self, config: &SpiConfig) -> i32 {
-        call!(self, SPI_OPEN, spi_open(config))
+        hwcall!(self, spi_open(config))
     }
 
     pub fn spi_transfer(&self, handle: i32, tx: &[u8], rx: &mut [u8]) -> i32 {
         if rx.len() < tx.len() { return ERR_ARG; }
-        call!(self, SPI_TRANSFER, spi_transfer(handle, tx.as_ptr(), rx.as_mut_ptr(), tx.len()))
+        hwcall!(self, spi_transfer(handle, tx.as_ptr(), rx.as_mut_ptr(), tx.len()))
     }
 
     pub fn spi_close(&self, handle: i32) -> i32 {
-        call!(self, SPI_CLOSE, spi_close(handle))
+        hwcall!(self, spi_close(handle))
     }
 
     /// Write `tx`, then read `rx.len()` bytes in one transaction (either may be empty).
     pub fn i2c_transfer(&self, port: i32, sda: i32, scl: i32, hz: u32, address: u8, tx: &[u8], rx: &mut [u8],
                         timeout_ms: u32) -> i32 {
-        call!(self, I2C_TRANSFER, i2c_transfer(port, sda, scl, hz, address, tx.as_ptr(), tx.len(),
+        hwcall!(self, i2c_transfer(port, sda, scl, hz, address, tx.as_ptr(), tx.len(),
                                               rx.as_mut_ptr(), rx.len(), timeout_ms))
     }
 
     /// One-shot reading of `pin`: `(raw, millivolts, adc unit, channel)`.
     pub fn adc_read(&self, pin: i32, ref_mv: u32) -> Result<(i32, u32, i32, i32), i32> {
         let (mut raw, mut mv, mut unit, mut channel) = (0i32, 0u32, 0i32, 0i32);
-        let rc = call!(self, ADC_READ, adc_read(pin, ref_mv, &mut raw, &mut mv, &mut unit, &mut channel));
+        let rc = hwcall!(self, adc_read(pin, ref_mv, &mut raw, &mut mv, &mut unit, &mut channel));
         if rc == 0 { Ok((raw, mv, unit, channel)) } else { Err(rc) }
     }
 
     pub fn rgbled_write(&self, pin: i32, red: u8, green: u8, blue: u8) -> i32 {
-        call!(self, RGBLED_WRITE, rgbled_write(pin, red, green, blue))
+        hwcall!(self, rgbled_write(pin, red, green, blue))
     }
 }
 

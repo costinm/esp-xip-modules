@@ -23,7 +23,7 @@ _Static_assert(sizeof(xip_power_sleep) == 12, "xip_power_sleep layout");
 _Static_assert(sizeof(xip_power_info) == 76, "xip_power_info layout");
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(sizeof(xip_call) == 48, "xip_call layout");
-_Static_assert(sizeof(xip_host) == 244, "xip_host layout");
+_Static_assert(sizeof(xip_host) == 148, "xip_host layout");
 #endif
 
 /* Non-zero when the host's table includes this call (older hosts are shorter). */
@@ -40,7 +40,7 @@ int xip_handle(const xip_host *host, void *state, const xip_call *call);
 """
 
 [export]
-include = ["Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo"]
+include = ["Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware"]
 prefix = "xip_"
 
 [export.rename]
@@ -60,6 +60,7 @@ WifiAp = "wifi_ap"
 Power = "power"
 PowerSleep = "power_sleep"
 PowerInfo = "power_info"
+Hardware = "hardware"
 
 [layout]
 packed = "__attribute__((packed))"
