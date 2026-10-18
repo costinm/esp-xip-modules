@@ -1,7 +1,8 @@
 # xip-abi
 
-The module ABI, declared in Rust. `src/host.rs` is the host table and its constants (`include/xip.h` is generated from it by
-`scripts/gen.sh`); `src/wifi.rs` and `src/psa.rs` are components; `src/lib.rs` is the safe `Hw` wrapper Rust modules
-use and the model of the ABI. The documentation is the doc comments: `cargo doc -p xip-abi`, or read `include/xip.h`.
+The module ABI, declared in Rust. The C header [include/xip.h](../../include/xip.h) is generated from it with
+`scripts/gen.sh`. Modules for the C, Rust and host runtimes use `Hw` for hardware and services, and `task::Task` to write
+handlers as `async` functions.
 
-The CBOR, JSON and text view of the same APIs (field tags and names, for consoles and gateways) is in `api/*.API.md`.
+API reference: `cargo doc --manifest-path crates/xip-abi/Cargo.toml`. Command schemas: [api](../../api).
+Examples: [mod_rtest](../../modules/mod_rtest/src/lib.rs). The guide to writing a module is kept with the project notes.

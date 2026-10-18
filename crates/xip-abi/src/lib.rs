@@ -54,13 +54,13 @@
 //!   tags are skipped but not decoded.
 #![no_std]
 #![cfg_attr(feature = "allocator-api", feature(allocator_api))]
-#![cfg_attr(target_arch = "xtensa", feature(asm_experimental_arch))]
 
 #[cfg(test)]
 extern crate std;
 
 pub mod cbor;
 pub mod heap;
+pub mod task;
 mod host;
 pub use host::*;
 mod wifi;
@@ -236,6 +236,7 @@ impl Hw {
 
     /// Send `data` as a message to `dst` (`ADDR_MAIN`: the application, or a module's component): the pool packet is allocated, filled and sent in one go. What a
     /// module used to `emit` is a message to the application with its own component and the event number as the method.
+    /// The helper releases its internal packet on a blocked link; retry using the original data.
     pub fn message(&self, dst: u32, component: i32, method: i32, id: u64, data: &[u8]) -> i32 {
         let pkt = match self.pkt_alloc() { Ok(p) => p, Err(e) => return e };
         match self.pkt_buf(pkt) {
@@ -243,7 +244,11 @@ impl Hw {
             Ok(_) => { self.pkt_free(pkt); return ERR_SIZE; }
             Err(e) => { self.pkt_free(pkt); return e; }
         }
-        self.send(pkt, data.len(), dst, component, method, id)
+        let result = self.send(pkt, data.len(), dst, component, method, id);
+        // A blocked link retains the packet, but this copying helper cannot hand
+        // that lease back to its caller. Release it; the caller can retry data.
+        if dst >= ADDR_LINK && result == ERR_BUSY { self.pkt_free(pkt); }
+        result
     }
 
     /// An event: `data` as a message to the application with the module's own `component` and the event number as the method (what a module used to

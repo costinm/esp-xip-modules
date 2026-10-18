@@ -3,14 +3,14 @@
 //! * [`HostAlloc`] (feature `allocator-api`, nightly): an explicit `Allocator` value, `Vec::new_in(hw.allocator())`. Nothing
 //!   hidden; code that is generic over the allocator can use it.
 //! * [`ModuleAlloc`] (feature `global-alloc`): the `#[global_allocator]`, so plain `Vec`, `String`, `Box` and crates written
-//!   for `no_std + alloc` work unchanged. A module has no writable statics, so the allocator finds the host through the
-//!   thread-pointer register: [`export_module!`](crate::export_module) points it at the host table for the duration of
-//!   each call and puts the old value back (a module is flat code and uses no thread-local storage; the register is the
-//!   one place the call can leave a pointer that code without a context argument can reach).
+//!   for `no_std + alloc` work unchanged. Embedded images have one host-pointer cell in the platform's reserved module
+//!   RAM arena. The packer encodes its address at build time. [`export_module!`](crate::export_module) installs the Host
+//!   pointer for each handler and restores the previous value when it returns. SDK thread pointers and TLS are untouched.
 //!
-//! Every block must be freed before the module stops: the host adds up the bytes and a non-zero balance is `ERR_LEAK`
-//! (the slot then needs a reboot to be replaced). A `Vec` that lives in the module state block cannot exist (the state is
-//! plain zero-valid data), so hold the raw pointer there and rebuild the `Vec` per call, or free before returning.
+//! Calls sharing an image's allocator cell must be serialized, including future destruction. An allocator context must
+//! not escape to another task or interrupt. Keep explicit `HostAlloc` values where an API accepts an allocator.
+//! Every block must be freed before the module stops: a non-zero balance is `ERR_LEAK`. Futures and other owned values
+//! may persist in instance-owned memory, provided they are dropped inside a handler before the module stops.
 //! Blocks are aligned for any type up to 8 bytes (larger alignment fails: null / `AllocError`).
 
 use core::alloc::Layout;
@@ -58,42 +58,63 @@ mod explicit {
 #[cfg(feature = "allocator-api")]
 pub use explicit::HostAlloc;
 
-// ---- the thread-pointer register: where a call leaves the host table for the global allocator ----
+// ---- the image's current-host cell; never the SDK thread-pointer register ----
 
-#[cfg(target_arch = "riscv32")]
-unsafe fn tp_swap(new: usize) -> usize {
-    let old: usize;
-    core::arch::asm!("mv {o}, tp", "mv tp, {n}", o = out(reg) old, n = in(reg) new, options(nostack));
-    old
+#[cfg(all(feature = "global-alloc", any(target_arch = "riscv32", target_arch = "xtensa")))]
+mod context {
+    // The address is an absolute RAM constant, even for movable PIC flash code.
+    // It must match the image header, and the runtime reserves/validates its cell.
+    const fn address(text: &str) -> usize {
+        let b = text.as_bytes();
+        let mut value = 0usize;
+        let mut i = if b.len() >= 2 && b[0] == b'0' && b[1] == b'x' { 2 } else { 0 };
+        while i < b.len() {
+            let digit = match b[i] {
+                b'0'..=b'9' => b[i] - b'0',
+                b'a'..=b'f' => b[i] - b'a' + 10,
+                b'A'..=b'F' => b[i] - b'A' + 10,
+                _ => panic!("invalid module RAM address"),
+            };
+            value = (value << 4) | digit as usize;
+            i += 1;
+        }
+        assert!(value != 0 && value % core::mem::align_of::<usize>() == 0);
+        value
+    }
+    const ADDRESS: usize = address(env!("XIP_MODULE_STATIC_ADDR", "build embedded modules with tools/mkmod.py"));
+
+    pub unsafe fn get() -> usize {
+        core::ptr::read_volatile(ADDRESS as *const usize)
+    }
+    pub unsafe fn swap(new: usize) -> usize {
+        let old = get();
+        core::ptr::write_volatile(ADDRESS as *mut usize, new);
+        old
+    }
 }
 
-#[cfg(target_arch = "xtensa")]
-unsafe fn tp_swap(new: usize) -> usize {
-    let old: usize;
-    core::arch::asm!("rur.threadptr {o}", "wur.threadptr {n}", o = out(reg) old, n = in(reg) new, options(nostack));
-    old
-}
-
-// anything else (host tests): one static, fine for the single-threaded tests
-#[cfg(not(any(target_arch = "riscv32", target_arch = "xtensa")))]
-unsafe fn tp_swap(new: usize) -> usize {
+// Native shared modules have ordinary writable storage. The dispatcher serializes
+// access to each image; this is not thread-local storage or a thread register.
+#[cfg(not(all(feature = "global-alloc", any(target_arch = "riscv32", target_arch = "xtensa"))))]
+mod context {
     use core::sync::atomic::{AtomicUsize, Ordering};
-    static TP: AtomicUsize = AtomicUsize::new(0);
-    TP.swap(new, Ordering::SeqCst)
+    static HOST: AtomicUsize = AtomicUsize::new(0);
+    pub unsafe fn get() -> usize { HOST.load(Ordering::SeqCst) }
+    pub unsafe fn swap(new: usize) -> usize { HOST.swap(new, Ordering::SeqCst) }
 }
 
-/// Make `host` the table the global allocator uses; the result goes to [`leave`]. [`export_module!`](crate::export_module)
-/// does this around every call; a no-op without the `global-alloc` feature.
+/// Install `host` in this image's allocator cell, returning its previous value.
+/// `export_module!` does this around every call. Does nothing without `global-alloc`.
 #[doc(hidden)]
 #[inline(always)]
 pub unsafe fn enter(host: *const Host) -> usize {
-    if cfg!(feature = "global-alloc") { tp_swap(host as usize) } else { 0 }
+    if cfg!(feature = "global-alloc") { context::swap(host as usize) } else { 0 }
 }
 
 #[doc(hidden)]
 #[inline(always)]
 pub unsafe fn leave(saved: usize) {
-    if cfg!(feature = "global-alloc") { tp_swap(saved); }
+    if cfg!(feature = "global-alloc") { context::swap(saved); }
 }
 
 /// The global allocator: `mem_alloc`/`mem_free` of the host of the call in progress. Outside a call (no host) it fails.
@@ -101,8 +122,7 @@ pub struct ModuleAlloc;
 
 unsafe impl core::alloc::GlobalAlloc for ModuleAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let host = tp_swap(0);
-        tp_swap(host);
+        let host = context::get();
         match Hw::new(host as *const Host) {
             Some(hw) => hw.raw_alloc(layout),
             None => core::ptr::null_mut(),
@@ -110,8 +130,7 @@ unsafe impl core::alloc::GlobalAlloc for ModuleAlloc {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-        let host = tp_swap(0);
-        tp_swap(host);
+        let host = context::get();
         if let Some(hw) = Hw::new(host as *const Host) { hw.mem_free(ptr); }
     }
 }
@@ -162,6 +181,14 @@ mod tests {
             let layout = Layout::from_size_align(24, 8).unwrap();
             assert!(core::alloc::GlobalAlloc::alloc(&a, layout).is_null(), "outside a call there is no host");
             let saved = enter(&h);
+            if cfg!(feature = "global-alloc") {
+                assert_eq!(context::get(), &h as *const Host as usize);
+                let nested_host = host();
+                let nested = enter(&nested_host);
+                assert_eq!(context::get(), &nested_host as *const Host as usize);
+                leave(nested);
+                assert_eq!(context::get(), &h as *const Host as usize);
+            }
             let p = core::alloc::GlobalAlloc::alloc(&a, layout);
             assert!(!p.is_null() || !cfg!(feature = "global-alloc"));
             if !p.is_null() {
@@ -170,6 +197,7 @@ mod tests {
             }
             assert!(core::alloc::GlobalAlloc::alloc(&a, Layout::from_size_align(8, 16).unwrap()).is_null(), "alignment above 8");
             leave(saved);
+            assert!(core::alloc::GlobalAlloc::alloc(&a, layout).is_null(), "return clears allocator context");
             assert_eq!(LIVE.load(core::sync::atomic::Ordering::SeqCst), 0);
         }
         let _: Vec<u8> = Vec::new();

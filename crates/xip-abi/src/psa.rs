@@ -17,6 +17,7 @@ pub const ERROR_INSUFFICIENT_MEMORY: i32 = -141;
 pub const ERROR_INVALID_SIGNATURE: i32 = -149;
 pub const ERROR_CORRUPTION_DETECTED: i32 = -151;
 
+#[cfg(not(xip_psa_esp32))]
 #[repr(C)]
 pub struct Sha512Context {
     pub total: [u64; 2],
@@ -24,10 +25,21 @@ pub struct Sha512Context {
     pub buffer: [u8; 128],
     pub is384: i32,
 }
+#[cfg(xip_psa_esp32)]
+#[repr(C)]
+pub struct Sha256Context {
+    pub buffer: [u8; 64],
+    pub total: [u32; 2],
+    pub state: [u32; 8],
+    pub is224: i32,
+}
 #[repr(C)]
 pub struct BuiltinHashContext {
     pub alg: u32,
+    #[cfg(not(xip_psa_esp32))]
     pub ctx: Sha512Context,
+    #[cfg(xip_psa_esp32)]
+    pub ctx: Sha256Context,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -168,6 +180,18 @@ impl PsaTable {
         Some(&*table)
     }
 }
+#[cfg(xip_psa_esp32)]
+const _: () = {
+    assert!(mem::size_of::<HashOperation>() == 116);
+    assert!(mem::align_of::<HashOperation>() == 4);
+    assert!(mem::offset_of!(HashOperation, ctx) == 4);
+};
+#[cfg(all(target_arch = "riscv32", not(xip_psa_esp32)))]
+const _: () = {
+    assert!(mem::size_of::<HashOperation>() == 232);
+    assert!(mem::align_of::<HashOperation>() == 8);
+    assert!(mem::offset_of!(HashOperation, ctx) == 8);
+};
 const _: () = assert!(mem::size_of::<KeyAttributes>() == 24);
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(mem::size_of::<PsaTable>() == 100);

@@ -129,6 +129,15 @@ pub const DMOD_MAGIC: u32 = 0x444f4d44;
 pub const DMOD_HEADER_SIZE: u32 = 64;
 /// Linked at code_vma/data_vma (Xtensa); otherwise position independent (RISC-V).
 pub const DMOD_FLAG_FIXED_VMA: u32 = 1;
+/// Required: this image uses its declared platform RAM cell for call context.
+pub const DMOD_FLAG_STATIC_RAM: u32 = 2;
+/// Bytes reserved for each module's call context (currently only a Host pointer).
+pub const DMOD_STATIC_SLOT_BYTES: u32 = 16;
+/// Cells in the platform's reserved module-context arena.
+pub const DMOD_STATIC_SLOTS: u32 = 16;
+pub const DMOD_STATIC_ESP32_BASE: u32 = 0x3ffdd000;
+pub const DMOD_STATIC_ESP32C6_BASE: u32 = 0x40860000;
+pub const DMOD_STATIC_ESP32S3_BASE: u32 = 0x3fcd0000;
 
 /// argument of `spi_open`
 #[repr(C)]
@@ -221,8 +230,11 @@ pub struct DmodHeader {
     pub manifest_offset: u32,
     /// Its length.
     pub manifest_size: u32,
+    /// Address of this image's reserved platform RAM cell, aligned to DMOD_STATIC_SLOT_BYTES.
+    /// Independent of its flash mapping address (PIC images may move).
+    pub static_addr: u32,
     /// Zero.
-    pub reserved: [u8; 12],
+    pub reserved: [u8; 8],
 }
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(core::mem::size_of::<DmodHeader>() == 64);
@@ -413,7 +425,7 @@ pub struct Host {
     pub pkt_free: Option<unsafe extern "C" fn(user: *mut c_void, pkt: u32) -> core::ffi::c_int>,
     /// Hand a packet to a module or to the application.
     ///
-    /// The packet moves: **the handle is consumed on success and on failure**, so there is never a doubt who owns it. The first
+    /// For an application or module destination, **the handle is consumed on success and on failure**. For a link destination, `ERR_BUSY` retains the exact held packet for retry; success and every other failure consume it. The first
     /// `len` bytes of the payload window are the message. The receiver gets a call `(component, method)` with `call.pkt`,
     /// `call.from` = this module's component and `call.id` = `id`. A non-zero `id` asks for an answer, and the receiver sees
     /// `flags` bit 0: it answers with a `send` to that `from` with the same `id`. The answer is an ordinary message, and so is every other one the module sends the asker: any number of them,
@@ -427,7 +439,7 @@ pub struct Host {
     ///
     /// * `pkt` (`uint32_t`): A held packet, or the packet of this call.
     /// * `len` (`size_t`): Message length, at most `PKT_MAX`.
-    /// * `dst` (`uint32_t`): `ADDR_MAIN` or a module's component.
+    /// * `dst` (`uint32_t`): `ADDR_MAIN`, a module's component, or a link address (`ADDR_LINK + n`).
     /// * `component` (`int`): Returned in the receiver's call.
     /// * `method` (`int`): Returned in the receiver's call.
     /// * `id` (`uint64_t`): Correlation number, returned in the call.
