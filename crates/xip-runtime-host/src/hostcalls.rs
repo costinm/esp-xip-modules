@@ -64,62 +64,6 @@ unsafe extern "C" fn h_now(user: *mut c_void) -> u64 {
     sh.st.borrow().now
 }
 
-unsafe extern "C" fn h_respond(user: *mut c_void, data: *const u8, len: usize) -> i32 {
-    let (_sh, me) = cx!(user, "respond");
-    let mut st = me.st.borrow_mut();
-    if !st.in_request {
-        return ERR_ARG;
-    }
-    if st.responded {
-        return ERR_BUSY;
-    }
-    if (len > 0 && data.is_null()) || len > 512 {
-        return ERR_SIZE;
-    }
-    st.response = Some(sl(data, len).to_vec());
-    st.responded = true;
-    0
-}
-
-unsafe extern "C" fn h_emit(user: *mut c_void, id: u16, kind: u8, value: *const u8, len: usize) -> i32 {
-    let (_sh, me) = cx!(user, "emit");
-    if len > 0 && value.is_null() {
-        return ERR_ARG;
-    }
-    let mut st = me.st.borrow_mut();
-    if st.events.len() < 128 {
-        st.events.push(Event { id, kind, data: sl(value, len.min(63)).to_vec() });
-    }
-    0
-}
-
-unsafe extern "C" fn h_service(user: *mut c_void, tag: u16, req: *const u8, n: usize, resp: *mut u8, cap: usize, rl: *mut usize, _to: u32) -> i32 {
-    let (sh, _me) = cx!(user, "call_service");
-    if !rl.is_null() {
-        *rl = 0;
-    }
-    match tag {
-        1 => {
-            if n > cap {
-                return ERR_SIZE;
-            }
-            std::ptr::copy_nonoverlapping(req, resp, n);
-            *rl = n;
-            0
-        }
-        2 => {
-            if cap < 8 {
-                return ERR_SIZE;
-            }
-            let now = sh.st.borrow().now;
-            std::ptr::copy_nonoverlapping(now.to_le_bytes().as_ptr(), resp, 8);
-            *rl = 8;
-            0
-        }
-        _ => ERR_NOTFOUND,
-    }
-}
-
 unsafe extern "C" fn h_get_setting(user: *mut c_void, k: *const u8, kn: usize, v: *mut u8, cap: usize, vl: *mut usize) -> i32 {
     let (_sh, me) = cx!(user, "get_setting");
     if k.is_null() || kn == 0 || kn > 15 || vl.is_null() || (cap > 0 && v.is_null()) {
@@ -288,11 +232,6 @@ unsafe extern "C" fn h_alarm_cancel(user: *mut c_void, i: i32) -> i32 {
     }
 }
 
-unsafe extern "C" fn h_connected(user: *mut c_void) -> i32 {
-    let (sh, _me) = cx!(user, "connected");
-    sh.st.borrow().connected as i32
-}
-
 unsafe extern "C" fn h_spi_open(user: *mut c_void, c: *const SpiConfig) -> i32 {
     let (_sh, me) = cx!(user, "spi_open");
     if c.is_null() {
@@ -362,33 +301,6 @@ unsafe extern "C" fn h_led(user: *mut c_void, pin: i32, _r: u8, _g: u8, _b: u8) 
     claim(sh, &me, pin)
 }
 
-unsafe extern "C" fn h_wifi_scan(user: *mut c_void, out: *mut u8, cap: usize) -> i32 {
-    let _ = cx!(user, "wifi_scan");
-    let v = cbor(|w| {
-        w.map(1).uint(1).array(2);
-        w.map(5).uint(1).bytes(b"costin").uint(2).bytes(&[0x10, 0xbd, 0xa3, 0xac, 0x5a, 0x21]).uint(3).int(-41).uint(4).uint(6).uint(5).uint(3);
-        w.map(5).uint(1).bytes(b"").uint(2).bytes(&[1, 2, 3, 4, 5, 6]).uint(3).int(-80).uint(4).uint(11).uint(5).uint(0);
-    });
-    put(out, cap, &v)
-}
-
-unsafe extern "C" fn h_wifi_info(user: *mut c_void, out: *mut u8, cap: usize) -> i32 {
-    let _ = cx!(user, "wifi_info");
-    let st = crate::wifi::FIX.with(|f| f.borrow().state);
-    let v = cbor(|w| {
-        w.map(if st.sta == 2 { 4 } else { 1 } + usize::from(st.ap != 0) + usize::from(st.channel != 0));
-        w.uint(1).uint(u64::from(st.sta));
-        if st.sta == 2 {
-            let ip = format!("{}.{}.{}.{}", st.ip4[0], st.ip4[1], st.ip4[2], st.ip4[3]);
-            w.uint(2).text(&String::from_utf8_lossy(&st.ssid[..st.ssid_len as usize]));
-            w.uint(3).text(&ip).uint(4).int(i64::from(st.rssi));
-        }
-        if st.ap != 0 { w.uint(5).boolean(true); }
-        if st.channel != 0 { w.uint(6).uint(u64::from(st.channel)); }
-    });
-    put(out, cap, &v)
-}
-
 unsafe extern "C" fn h_heap_info(user: *mut c_void, out: *mut u8, cap: usize) -> i32 {
     let _ = cx!(user, "heap_info");
     let v = cbor(|w| {
@@ -424,24 +336,6 @@ unsafe extern "C" fn h_nv(user: *mut c_void, key: *const u8, kn: usize, value: *
     put(out, cap, s.nv_value.as_bytes())
 }
 
-unsafe extern "C" fn h_serial_open(user: *mut c_void, component: i32, method: i32) -> i32 {
-    let (sh, _me) = cx!(user, "serial_open");
-    let mut s = sh.st.borrow_mut();
-    s.serial_component = component;
-    s.serial_method = method;
-    0
-}
-unsafe extern "C" fn h_serial_write(user: *mut c_void, data: *const u8, len: usize) -> i32 {
-    let (sh, _me) = cx!(user, "serial_write");
-    sh.st.borrow_mut().serial_out.extend_from_slice(sl(data, len));
-    len as i32
-}
-unsafe extern "C" fn h_serial_close(user: *mut c_void) -> i32 {
-    let (sh, _me) = cx!(user, "serial_close");
-    sh.st.borrow_mut().serial_component = -1;
-    0
-}
-
 unsafe extern "C" fn h_device_info(user: *mut c_void, out: *mut u8, cap: usize) -> i32 {
     let (sh, _me) = cx!(user, "device_info");
     let s = sh.st.borrow();
@@ -459,10 +353,7 @@ unsafe extern "C" fn h_modules_info(user: *mut c_void, out: *mut u8, cap: usize)
     let (sh, _me) = cx!(user, "modules_info");
     put(out, cap, &sh.st.borrow().modules_cbor)
 }
-unsafe extern "C" fn h_events_info(user: *mut c_void, out: *mut u8, cap: usize) -> i32 {
-    let (sh, _me) = cx!(user, "events_info");
-    put(out, cap, &sh.st.borrow().events_cbor)
-}
+
 unsafe extern "C" fn h_module_start(user: *mut c_void, name: *const u8, n: usize, req: *const u8, rn: usize) -> i32 {
     let (sh, _me) = cx!(user, "module_start");
     if sl(name, n) != b"test" {
@@ -493,7 +384,6 @@ unsafe extern "C" fn h_reset(user: *mut c_void) -> i32 {
     sh.st.borrow_mut().reset_called = true;
     0
 }
-
 // ---- packets ----
 
 unsafe extern "C" fn h_pkt_alloc(user: *mut c_void, out: *mut u32) -> i32 {
@@ -576,7 +466,7 @@ unsafe extern "C" fn h_send(user: *mut c_void, pkt: u32, len: usize, dst: u32, c
         ERR_SIZE
     } else if dst == ADDR_MAIN {
         let data = sl(sh.pool.slot(slot).add(e.start as usize), len).to_vec();
-        sh.st.borrow_mut().main.push(MainMsg { from: from as u32, component, method, id, data });
+        sh.st.borrow_mut().main.push(MainMsg { inst: Rc::as_ptr(&me) as usize, from: from as u32, component, method, id, data });
         sh.pool.release(slot);
         return 0;
     } else {
@@ -612,6 +502,9 @@ unsafe extern "C" fn h_get_component(user: *mut c_void, name: *const c_char) -> 
     if name == "wifi" {
         return crate::wifi::component().cast();
     }
+    if name == "hw" {
+        return &HARDWARE as *const Hardware as *const c_void;
+    }
     if name == "power" {
         return crate::power::component().cast();
     }
@@ -624,44 +517,38 @@ unsafe extern "C" fn h_get_component(user: *mut c_void, name: *const c_char) -> 
     sh.st.borrow().components.get(&name).map_or(std::ptr::null(), |p| *p as *const c_void)
 }
 
+/// get_component("hw"): the pins, buses and converters of the fixture.
+static HARDWARE: Hardware = Hardware {
+    version: HARDWARE_VERSION,
+    size: std::mem::size_of::<Hardware>() as u32,
+    gpio_config: Some(h_gpio_config),
+    gpio_read: Some(h_gpio_read),
+    gpio_write: Some(h_gpio_write),
+    irq_register: Some(h_irq_register),
+    irq_unregister: Some(h_irq_unregister),
+    irq_enable: Some(h_irq_enable),
+    spi_open: Some(h_spi_open),
+    spi_transfer: Some(h_spi_transfer),
+    spi_close: Some(h_spi_close),
+    i2c_transfer: Some(h_i2c),
+    adc_read: Some(h_adc),
+    rgbled_write: Some(h_led),
+};
+
 pub(crate) fn fill(t: &mut Host, user: *mut c_void) {
     t.abi_version = ABI_VERSION;
     t.size = std::mem::size_of::<Host>() as u32;
-    t.features = FEAT_SETTINGS | FEAT_SPI | FEAT_SPI_READY | FEAT_I2C | FEAT_ADC | FEAT_RGBLED | FEAT_SERVICE | FEAT_ALARM_FLEX | FEAT_WIFI
-        | FEAT_PACKETS | FEAT_MEMORY | FEAT_SERIAL | FEAT_MODULES;
     t.user = user;
     t.log = Some(h_log);
     t.now_ms = Some(h_now);
-    t.respond = Some(h_respond);
-    t.emit = Some(h_emit);
-    t.call_service = Some(h_service);
     t.get_setting = Some(h_get_setting);
     t.set_setting = Some(h_set_setting);
-    t.gpio_config = Some(h_gpio_config);
-    t.gpio_read = Some(h_gpio_read);
-    t.gpio_write = Some(h_gpio_write);
-    t.irq_register = Some(h_irq_register);
-    t.irq_unregister = Some(h_irq_unregister);
-    t.irq_enable = Some(h_irq_enable);
-    t.spi_open = Some(h_spi_open);
-    t.spi_transfer = Some(h_spi_transfer);
-    t.spi_close = Some(h_spi_close);
-    t.i2c_transfer = Some(h_i2c);
-    t.adc_read = Some(h_adc);
-    t.rgbled_write = Some(h_led);
     t.alarm_set = Some(h_alarm_set);
     t.alarm_cancel = Some(h_alarm_cancel);
-    t.connected = Some(h_connected);
-    t.wifi_info = Some(h_wifi_info);
-    t.wifi_scan = Some(h_wifi_scan);
-    t.serial_open = Some(h_serial_open);
-    t.serial_write = Some(h_serial_write);
-    t.serial_close = Some(h_serial_close);
     t.modules_info = Some(h_modules_info);
     t.module_start = Some(h_module_start);
     t.module_stop = Some(h_module_stop);
     t.module_manifest = Some(h_module_manifest);
-    t.events_info = Some(h_events_info);
     t.reset = Some(h_reset);
     t.pkt_alloc = Some(h_pkt_alloc);
     t.pkt_buf = Some(h_pkt_buf);

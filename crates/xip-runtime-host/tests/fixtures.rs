@@ -9,7 +9,7 @@ use xip_runtime_host::fixtures::{self, Loopback, Recorder, Replay, SpiRecord};
 use xip_runtime_host::{Runtime, TraceKind};
 
 fn spi_module(rt: &Runtime) -> xip_runtime_host::Instance {
-    let m = rt.add_module(module("mod_test"), 64).unwrap();
+    let m = rt.add_module(module("mod_rtest"), 64).unwrap();
     m.start(b"spi 1 2 3 4"); // sck miso mosi cs: the device is selected by its chip-select pin, 4
     m
 }
@@ -77,7 +77,8 @@ fn the_trace_shows_handler_calls_and_host_calls() {
 unsafe extern "C" fn claim_pin_5(h: *const Host, _s: *mut u8, c: *const Call) -> i32 {
     let (h, c) = (&*h, &*c);
     if c.component == HOST_COMPONENT as i32 && c.method == HOST_START as i32 {
-        return (h.gpio_config.unwrap())(h.user, 5, GPIO_OUTPUT as i32, GPIO_PULL_NONE as i32, 0);
+        let hw = (h.get_component.unwrap())(h.user, c"hw".as_ptr()) as *const Hardware;
+        return ((*hw).gpio_config.unwrap())(h.user, 5, GPIO_OUTPUT as i32, GPIO_PULL_NONE as i32, 0);
     }
     0
 }

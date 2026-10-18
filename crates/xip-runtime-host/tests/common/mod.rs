@@ -26,6 +26,15 @@ pub fn started(name: &str, request: &str) -> (Runtime, Instance) {
     (rt, m)
 }
 
+/// What a handler does to report something to the application: a message to `ADDR_MAIN` with `id` as the method (what used to be `emit`).
+pub unsafe fn notify(h: &xip_abi::Host, id: u16, data: &[u8]) {
+    let (mut pkt, mut window, mut room) = (0u32, std::ptr::null_mut(), 0usize);
+    assert_eq!((h.pkt_alloc.unwrap())(h.user, &mut pkt), 0);
+    assert_eq!((h.pkt_buf.unwrap())(h.user, pkt, &mut window, &mut room), 0);
+    std::ptr::copy_nonoverlapping(data.as_ptr(), window, data.len());
+    assert_eq!((h.send.unwrap())(h.user, pkt, data.len(), xip_abi::ADDR_MAIN, 0, id as i32, 0), 0);
+}
+
 pub fn dump(m: &Instance) {
     for e in m.events() {
         eprintln!("  event 0x{:04x} {}", e.id, e.text());

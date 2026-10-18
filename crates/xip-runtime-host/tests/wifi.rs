@@ -1,5 +1,7 @@
 //! The `wifi` component of the host-runtime: a module states the wanted radio state, the runtime tells every module
 //! (`HOST_WIFI`), and the state a test scripts is what the module reads back.
+mod common;
+use common::notify;
 use xip_abi::*;
 use xip_runtime_host::Runtime;
 
@@ -23,12 +25,12 @@ unsafe extern "C" fn module(host: *const Host, _state: *mut u8, call: *const Cal
         assert_eq!((wifi.set.unwrap())(h.user, &i, &mut generation), ERR_ARG);
     } else if call.method == HOST_WIFI as i32 {
         let g = (call.value as u64).to_le_bytes();
-        (h.emit.unwrap())(h.user, 1, VALUE_U64 as u8, g.as_ptr(), 8);
+        notify(h, 1, &g);
         let mut st = WifiState::default();
         st.size = core::mem::size_of::<WifiState>() as u32;
         assert_eq!((wifi.state.unwrap())(h.user, &mut st), 0);
         let v = [st.sta, st.ap, st.channel];
-        (h.emit.unwrap())(h.user, 2, VALUE_BYTES as u8, v.as_ptr(), 3);
+        notify(h, 2, &v);
     }
     RET_CONTINUE as i32
 }

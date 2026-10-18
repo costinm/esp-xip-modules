@@ -31,7 +31,7 @@ impl Default for Config {
     }
 }
 
-/// One `emit` of a module.
+/// A message a module sent to the application (what it used to `emit`): its event number is the method.
 #[derive(Clone, Debug)]
 pub struct Event {
     pub id: u16,
@@ -47,6 +47,8 @@ impl Event {
 /// A packet a module sent to the application (`ADDR_MAIN`).
 #[derive(Clone, Debug)]
 pub struct MainMsg {
+    /// The instance that sent it (its address in memory: stable while the runtime lives).
+    pub inst: usize,
     pub from: u32,
     pub component: i32,
     pub method: i32,
@@ -93,17 +95,14 @@ pub struct RtState {
     pub(crate) window_period: u64,
     /// Packets modules sent to the application.
     pub main: Vec<MainMsg>,
-    /// What modules wrote with `serial_write`.
-    pub serial_out: Vec<u8>,
-    pub serial_component: i32,
-    pub serial_method: i32,
+    /// The id of the last `Instance::request`.
+    pub next_request: u64,
     pub reset_called: bool,
     pub started: String,
     pub start_request: String,
     pub stopped: String,
     /// What `modules_info`, `events_info` and `module_manifest("test")` return.
     pub modules_cbor: Vec<u8>,
-    pub events_cbor: Vec<u8>,
     pub manifest: Vec<u8>,
     pub(crate) nv_value: String,
     pub(crate) pins: Vec<Pin>,
@@ -147,16 +146,12 @@ pub(crate) struct QItem {
 pub(crate) struct InstState {
     pub queue: VecDeque<QItem>,
     pub alarms: Vec<Alarm>,
-    pub events: Vec<Event>,
     pub logs: Vec<String>,
     pub settings: HashMap<Vec<u8>, Vec<u8>>,
     pub spi_open: [Option<i32>; 4],
     pub spi_transfers: u32,
     pub held: Box<Held>,
     pub mem: Box<Mem>,
-    pub response: Option<Vec<u8>>,
-    pub in_request: bool,
-    pub responded: bool,
     pub component: Option<i32>,
     pub ended: bool,
     pub result: i32,
@@ -218,15 +213,12 @@ impl Runtime {
             window_first: 0,
             window_period: 0,
             main: Vec::new(),
-            serial_out: Vec::new(),
-            serial_component: -1,
-            serial_method: -1,
+            next_request: 0,
             reset_called: false,
             started: String::new(),
             start_request: String::new(),
             stopped: String::new(),
             modules_cbor: Vec::new(),
-            events_cbor: Vec::new(),
             manifest: Vec::new(),
             nv_value: String::new(),
             pins: vec![Pin::default(); PINS],
@@ -274,16 +266,12 @@ impl Runtime {
             st: RefCell::new(InstState {
                 queue: VecDeque::new(),
                 alarms: vec![Alarm::default(); ALARMS],
-                events: Vec::new(),
                 logs: Vec::new(),
                 settings: HashMap::new(),
                 spi_open: [None; 4],
                 spi_transfers: 0,
                 held: Held::new(sh.cfg.held_quota),
                 mem: Mem::new(sh.cfg.mem_quota),
-                response: None,
-                in_request: false,
-                responded: false,
                 component: None,
                 ended: false,
                 result: 0,
@@ -573,9 +561,6 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
         let wants = c.id != 0 && c.lflags & CALL_LINK == 0;
         {
             let mut st = me.st.borrow_mut();
-            st.in_request = wants;
-            st.responded = false;
-            st.response = None;
             st.calls += 1;
         }
         let call = Call {
@@ -593,14 +578,6 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
         };
         let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
         finish_call(sh, me, c.component, c.method, rc);
-        let answer = {
-            let mut st = me.st.borrow_mut();
-            st.in_request = false;
-            if wants && st.responded { st.response.take() } else { None }
-        };
-        if let Some(data) = answer {
-            send_answer(sh, me, c.from, c.component, c.method, c.id, &data);
-        }
         let mut st = me.st.borrow_mut();
         // a packet still borrowed (not kept, not sent) goes back to the pool
         if matches!(st.held.get(handle), Some(e) if e.state as u32 == HELD_BORROWED) {
@@ -635,13 +612,7 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
         return;
     }
     if c.request != 0 {
-        {
-            let mut st = me.st.borrow_mut();
-            st.in_request = true;
-            st.responded = false;
-        }
-        dispatch(sh, me, c.component, c.method, 0, (c.request == 2) as u32, &c.data);
-        me.st.borrow_mut().in_request = false;
+        dispatch(sh, me, c.component, c.method, 0, 0, &c.data);
     } else {
         dispatch(sh, me, c.component, c.method, c.value, 0, &c.data);
     }
@@ -728,21 +699,6 @@ fn fire_alarm(sh: &Shared, me: &Rc<Inst>, i: usize) {
     st.alarms[i].fire = now + fire_delay(&sh.st.borrow(), left, a.window, a.flags) as u64;
 }
 
-/// `respond()` on a packet that carried an id: the same bytes go to the sender as a message with that id.
-fn send_answer(sh: &Shared, me: &Inst, to: u32, component: i32, method: i32, id: u64, data: &[u8]) {
-    let from = me.st.borrow().component.unwrap_or(0);
-    if to == ADDR_MAIN {
-        sh.st.borrow_mut().main.push(MainMsg { from: from as u32, component, method, id, data: data.to_vec() });
-        return;
-    }
-    let Some(t) = route(sh, to as i32) else { return };
-    let Some(slot) = sh.pool.acquire(0) else { return };
-    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), sh.pool.slot(slot).add(PKT_HEADROOM as usize), data.len()) };
-    if deliver(sh, &t, slot, PKT_HEADROOM as u16, data.len() as u16, component, method, from as u32, id, 0, 0, 0) != 0 {
-        sh.pool.release(slot);
-    }
-}
-
 pub(crate) fn route(sh: &Shared, component: i32) -> Option<Rc<Inst>> {
     sh.insts.borrow().iter().find(|i| {
         let st = i.st.borrow();
@@ -776,6 +732,12 @@ impl Instance {
         self.me.st.borrow_mut().component = Some(component);
     }
 
+    /// What the manifest's port (key 9) does at start: the runtime binds the module to the link (`PORT_CONSOLE`: the link `"serial"`, which the C runtime serves by port and this host-runtime by subscription, provided by
+    /// the test with [`Runtime::add_native_link`]): its frames arrive as calls `(component, 0)`. Call it before `start`.
+    pub fn bind_port(&self, port: u32) -> i32 {
+        crate::link::bind_port(&self.rt.sh, &self.me, port)
+    }
+
     /// HOST_START with the start request.
     pub fn start(&self, request: &[u8]) {
         let mut st = self.me.st.borrow_mut();
@@ -804,24 +766,24 @@ impl Instance {
         st.queue.push_back(QItem { component, method, request: 1, data: data.to_vec(), ..Default::default() });
         0
     }
-    /// A request with an answer; runs the simulation until it is handled. `Err` is an ABI error code.
+    /// A request with an answer: a packet with a fresh id from the application; runs the simulation until it is handled and returns the message the module
+    /// sent back to the application with that id (empty if it sent none). `Err` is an ABI error code.
     pub fn request(&self, component: i32, method: i32, data: &[u8]) -> Result<Vec<u8>, i32> {
-        let rc = self.post(component, method, data);
+        let id = {
+            let mut st = self.rt.sh.st.borrow_mut();
+            st.next_request += 1;
+            st.next_request
+        };
+        let rc = self.send(component, method, id, data);
         if rc != 0 {
             return Err(rc);
         }
-        self.me.st.borrow_mut().queue.back_mut().unwrap().request = 2;
-        {
-            let mut st = self.me.st.borrow_mut();
-            st.responded = false;
-            st.response = None;
-        }
         self.rt.run(0);
-        if !self.me.st.borrow().queue.is_empty() {
-            return Err(ERR_BUSY);
-        }
-        let mut st = self.me.st.borrow_mut();
-        Ok(if st.responded { st.response.take().unwrap_or_default() } else { Vec::new() })
+        let mut st = self.rt.sh.st.borrow_mut();
+        Ok(match st.main.iter().position(|m| m.id == id) {
+            Some(i) => st.main.remove(i).data,
+            None => Vec::new(),
+        })
     }
     /// A packet from the application (`from` = ADDR_MAIN) to this module.
     pub fn send(&self, component: i32, method: i32, id: u64, data: &[u8]) -> i32 {
@@ -856,12 +818,14 @@ impl Instance {
     pub fn calls(&self) -> u32 {
         self.me.st.borrow().calls
     }
+    /// The messages this module sent to the application (events: the method is the event number), oldest first.
     pub fn events(&self) -> Vec<Event> {
-        self.me.st.borrow().events.clone()
+        let inst = Rc::as_ptr(&self.me) as usize;
+        self.rt.sh.st.borrow().main.iter().filter(|m| m.inst == inst && m.id == 0).map(|m| Event { id: m.method as u16, kind: 0, data: m.data.clone() }).collect()
     }
     /// Index of the first event with `id` whose text contains `needle`.
     pub fn find_event(&self, id: u16, needle: &str) -> Option<usize> {
-        self.me.st.borrow().events.iter().position(|e| e.id == id && String::from_utf8_lossy(&e.data).contains(needle))
+        self.events().iter().position(|e| e.id == id && String::from_utf8_lossy(&e.data).contains(needle))
     }
     pub fn logs(&self) -> Vec<String> {
         self.me.st.borrow().logs.clone()

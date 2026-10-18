@@ -12,7 +12,7 @@ cargo test --manifest-path crates/xip-runtime-host/Cargo.toml
 
 ```rust
 let rt = xip_runtime_host::Runtime::default();
-let m = rt.add_module("target/host-modules/mod_test.so", 64)?;   // state bytes, as the image header asks
+let m = rt.add_module("target/host-modules/mod_rtest.so", 64)?;   // state bytes, as the image header asks
 m.start(b"selftest");
 rt.run(100);                                                      // 100 ms of virtual time
 assert!(m.ended() && m.find_event(0x7eff, "fail=0").is_some());

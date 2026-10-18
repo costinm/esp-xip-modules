@@ -1,6 +1,8 @@
 //! The `link` component of the host-runtime: frames from a provider (the runtime's driver, or a module like mod_lora) reach the
 //! subscribers as packets with `CALL_LINK`; `send` to a link address reaches the provider, and the packet comes back as a TX_DONE
 //! event when the sender asked; READY and STATE events; and routes forward frames before any module sees them.
+mod common;
+use common::notify;
 use xip_abi::*;
 use xip_runtime_host::{Event, Instance, NativeTx, Runtime};
 
@@ -33,10 +35,10 @@ unsafe fn record(h: &Host, event: u16, call: &Call) {
     if !call.data.is_null() {
         v.extend_from_slice(std::slice::from_raw_parts(call.data, call.len));
     }
-    (h.emit.unwrap())(h.user, event, VALUE_BYTES as u8, v.as_ptr(), v.len());
+    notify(h, event, &v);
 }
 unsafe fn emit_i32(h: &Host, event: u16, v: i32) {
-    (h.emit.unwrap())(h.user, event, VALUE_BYTES as u8, v.to_le_bytes().as_ptr(), 4);
+    notify(h, event, &v.to_le_bytes());
 }
 unsafe fn packet(h: &Host, data: &[u8]) -> u32 {
     let (mut pkt, mut window, mut room) = (0u32, std::ptr::null_mut(), 0usize);

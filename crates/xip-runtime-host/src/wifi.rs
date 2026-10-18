@@ -25,9 +25,19 @@ thread_local! {
     pub(crate) static FIX: RefCell<Fixture> = RefCell::new(Fixture::new());
 }
 
+/// What a scan finds unless a test says otherwise.
+fn default_networks() -> Vec<WifiAp> {
+    let ap = |name: &[u8], bssid: [u8; 6], rssi: i8, channel: u8, auth: u8| {
+        let mut a = WifiAp { ssid: [0; 32], ssid_len: name.len() as u8, bssid, rssi, channel, auth };
+        a.ssid[..name.len()].copy_from_slice(name);
+        a
+    };
+    vec![ap(b"costin", [0x10, 0xbd, 0xa3, 0xac, 0x5a, 0x21], -41, 6, 3), ap(b"", [1, 2, 3, 4, 5, 6], -80, 11, 0)]
+}
+
 impl Fixture {
     pub fn new() -> Self {
-        Fixture { intent: WifiIntent::default(), generation: 0, state: WifiState::default(), scripted: false, pending: false, aps: Vec::new(), scanning: false, monitor: None }
+        Fixture { intent: WifiIntent::default(), generation: 0, state: WifiState::default(), scripted: false, pending: false, aps: default_networks(), scanning: false, monitor: None }
     }
     fn derive(&mut self) {
         if self.scripted { return; }

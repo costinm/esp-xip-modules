@@ -1,21 +1,10 @@
-//! `mod_hello` and `mod_test` (C) and `mod_rtest` (its Rust twin), loaded as shared objects, against the host-runtime: virtual
-//! time, so alarms of a second cost nothing. The same suite runs for the C and the Rust test module, so the two cannot
-//! drift apart. (These are the cases of the former C simulator, tests/host/test_modules.c.)
+//! `mod_rtest` (the device test module), loaded as a shared object, against the host-runtime: virtual time, so alarms of a second cost
+//! nothing. (These are the cases of the former C simulator; the C modules were dropped, see git history.)
 mod common;
 use common::*;
 use std::ffi::c_void;
 use xip_abi::*;
 use xip_runtime_host::{Runtime, Instance};
-
-#[test]
-fn hello_logs_echoes_and_finishes() {
-    let (rt, m) = new("mod_hello", 0);
-    m.start(b"hi");
-    rt.run(0);
-    assert!(m.ended() && m.result() == RET_DONE as i32);
-    assert!(m.logs()[0].contains("hello from mod_hello"));
-    assert_eq!(m.find_event(1, "hi"), Some(0));
-}
 
 fn selftest(name: &str) {
     let (rt, m) = started(name, "selftest");
@@ -175,9 +164,6 @@ macro_rules! suite {
     ($module:literal, $($case:ident),*) => {
         $( #[test] fn $case() { super::$case($module) } )*
     };
-}
-mod mod_test {
-    suite!("mod_test", selftest, serve_request_stop, packets, memory, alarms, gpio_loop, spi_loop);
 }
 mod mod_rtest {
     suite!("mod_rtest", selftest, serve_request_stop, packets, memory, alarms, gpio_loop, spi_loop);

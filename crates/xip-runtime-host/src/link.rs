@@ -137,6 +137,25 @@ unsafe extern "C" fn open(user: *mut c_void, name: *const c_char, component: c_i
     addr_of(at) as c_int
 }
 
+/// TODO: the host-runtime should share the receive path of the Rust runtime (`xip-runtime-esp::uart_frames`: the PPP-style decoder that writes a record straight into a
+/// pool packet, and the line editor for the console port) instead of binding by subscription and injecting whole frames, so the tests exercise the decoder, the
+/// packet layout (headroom in front) and the drops of the real path; and a fake TCP/UDP listener for the manifest's stream and datagram ports (`PORT_NET + stream`), so `mod_test` (datagram port 3, stream port 3: an echo on both) and the console run end to end in the host-runtime against a Rust server or client on the host; once `send` and routing exist `mod_test` becomes the e2e test between two devices.
+///
+/// The port of a manifest (key 9) for a module: subscribe it to the link of that port, as the C runtime does when it creates the instance.
+pub(crate) fn bind_port(sh: &Shared, me: &Rc<Inst>, port: u32) -> c_int {
+    if port != PORT_CONSOLE {
+        return ERR_UNSUPPORTED;
+    }
+    let owner = component_of(me);
+    let mut links = sh.links.borrow_mut();
+    let Some(at) = links.named("serial") else { return ERR_NOMEM };
+    let entry = &mut links.list[at];
+    if !entry.subs.contains(&(owner, owner, 0)) {
+        entry.subs.push((owner, owner, 0));
+    }
+    addr_of(at) as c_int
+}
+
 unsafe extern "C" fn close(user: *mut c_void, addr: u32) -> c_int {
     let (sh, me) = unsafe { ctx(user) };
     let owner = component_of(&me);
