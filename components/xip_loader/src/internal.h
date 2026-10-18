@@ -25,6 +25,9 @@ typedef struct {
 
 typedef struct {
     xip_loader_config_t cfg;
+    xip_slot_t *slots_found;      /* the scan: names point into names_found */
+    char (*names_found)[24];
+    size_t found, capacity;      /* modules found, and the pages the partition has */
     const esp_partition_t *part;
     xip_slot_state_t *slots;
     SemaphoreHandle_t lock;       /* guards xip_slot_state_t.inst: a stop or post must not meet the exit of the task */

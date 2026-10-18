@@ -2,8 +2,9 @@
 /* Runs module images from flash. A module is not a task: its image stays mapped
  * while the host's worker calls its handler.
  *
- * The application passes a slot table (which module lives where). The loader maps an image, runs it on the host and
- * stops it; it has no network, crypto, or image installer. It knows no module by name.
+ * The loader scans the module partition: every flash page (XIP_SLOT_ALIGN) that starts with an image header is a module, named by its
+ * manifest (key 1) and numbered by its header (the component). Nobody tells it where a module lives or what it is called. It maps an
+ * image, runs it on the host and stops it; it has no network, crypto, or image installer. It knows no module by name.
  * Mapping, tasks and the host table are the part that depends on the chip; the checks before a
  * module is mapped are in xip_check.h. */
 #pragma once
@@ -16,26 +17,25 @@
 extern "C" {
 #endif
 
-#define XIP_SLOT_ALIGN 0x10000u   /* the flash MMU page: slots start and end on it */
+#define XIP_SLOT_ALIGN 0x10000u   /* the flash MMU page: images start and end on it */
 
+/* What a scan found: the loader's index of a module is its position in the order found (by offset), valid until the next rescan. */
 typedef struct {
-    const char *name;     /* module name; also the name in a signed package */
-    uint16_t tag;         /* must equal the tag in the module's image header */
+    const char *name;     /* from the manifest of the image (key 1), or "@<offset>" without one */
+    uint16_t tag;         /* the component number: the tag in the image header */
     uint32_t offset;      /* in the module partition, multiple of XIP_SLOT_ALIGN */
-    uint32_t size;        /* multiple of XIP_SLOT_ALIGN; xtensa: offset + size <= 1 MiB (ESP32) */
+    uint32_t size;        /* the pages the image spans; xtensa: offset + size <= the fixed-address window */
 } xip_slot_t;
 
 typedef struct {
-    const xip_slot_t *slots;
-    size_t slot_count;
-    const char *partition;          /* data partition holding the slots, e.g. "data" */
+    const char *partition;          /* data partition holding the modules, e.g. "data" */
     uint32_t default_stack_bytes;   /* for an image that asks for none */
 } xip_loader_config_t;
 
 /* Loader errors (negative, distinct from XIP_ERR_*). */
 enum {
-    XIP_LOADER_ERR_SLOT = -101,    /* no such slot */
-    XIP_LOADER_ERR_IMAGE = -102,   /* no valid image in the slot */
+    XIP_LOADER_ERR_SLOT = -101,    /* no such module index */
+    XIP_LOADER_ERR_IMAGE = -102,   /* the image is not acceptable (see last_check) */
     XIP_LOADER_ERR_RUNNING = -103,
     XIP_LOADER_ERR_NOT_RUNNING = -104,
     XIP_LOADER_ERR_NOMEM = -105,
@@ -56,8 +56,11 @@ typedef struct {
     bool needs_reboot;       /* the module stopped with memory it had not freed: the slot cannot be replaced until a restart */
 } xip_slot_status_t;
 
-/* Once, after xip_host_init(), NVS and the event loop (an upload needs the network). */
+/* Once, after xip_host_init(), NVS and the event loop (an upload needs the network). Scans the partition. */
 esp_err_t xip_loader_init(const xip_loader_config_t *config);
+
+/* Scan again (after something was installed or erased). Not while a module runs: XIP_LOADER_ERR_RUNNING. Indices change. */
+int xip_loader_rescan(void);
 
 /* Start every installed module whose manifest asks for it (manifest key 6: its start request; `mkmod.py --autostart`). What
  * runs at boot is therefore decided by what is installed, not by the build. Returns how many were started. */
@@ -73,7 +76,7 @@ int xip_loader_start_named(const uint8_t *name, size_t name_len, const uint8_t *
 int xip_loader_stop_named(const uint8_t *name, size_t name_len);
 int xip_loader_manifest_named(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
 
-int xip_loader_find(const char *name);     /* slot index or -1 */
+int xip_loader_find(const char *name);     /* module index or -1 */
 const xip_slot_t *xip_loader_slot(int slot);
 size_t xip_loader_slot_count(void);
 

@@ -437,13 +437,15 @@ static int h_i2c_transfer(void *user, int port, int sda, int scl, uint32_t freq,
     return rc;
 }
 
-void xip_periph_fill(xip_host *t)
-{
-    t->gpio_config = h_gpio_config; t->gpio_read = h_gpio_read; t->gpio_write = h_gpio_write;
-    t->irq_register = h_irq_register; t->irq_unregister = h_irq_unregister; t->irq_enable = h_irq_enable;
-    t->spi_open = h_spi_open; t->spi_transfer = h_spi_transfer; t->spi_close = h_spi_close;
-    t->i2c_transfer = h_i2c_transfer; t->adc_read = h_adc_read; t->rgbled_write = h_rgbled_write;
-}
+/* get_component("hw"): the same functions for every instance (ctx is the host table's user: the instance that owns the pins). */
+static const xip_hardware hardware_table = {
+    .version = 1, .size = sizeof(xip_hardware),
+    .gpio_config = h_gpio_config, .gpio_read = h_gpio_read, .gpio_write = h_gpio_write,
+    .irq_register = h_irq_register, .irq_unregister = h_irq_unregister, .irq_enable = h_irq_enable,
+    .spi_open = h_spi_open, .spi_transfer = h_spi_transfer, .spi_close = h_spi_close,
+    .i2c_transfer = h_i2c_transfer, .adc_read = h_adc_read, .rgbled_write = h_rgbled_write,
+};
+const xip_hardware *xip_periph_table(void) { return &hardware_table; }
 
 void xip_periph_release(struct xip_instance *in)
 {

@@ -35,19 +35,18 @@ typedef struct {
 } xip_spi_dev_t;
 
 void xip_periph_reserve(uint64_t mask);
-/* xip_events.c: the last events modules emitted, and the CBOR of events_info and wifi_info */
-void xip_events_add(const char *module, uint16_t id, uint8_t type, const uint8_t *value, size_t len);
-int xip_events_info(uint8_t *out, size_t cap);
+/* xip_events.c: the CBOR of the Wi-Fi state, heap_info and heap_dump (the events ring went: events are messages, routed later) */
 int xip_wifi_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap);
 int xip_heap_dump(int kind);
 int xip_heap_info(uint8_t *out, size_t cap);
-int xip_wifi_scan(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap);
 
 /* xip_serial.c: the pins of the serial port, reserved from modules whether or not the port is started. */
 uint64_t xip_serial_pins(void);
 bool xip_serial_usb_selected(void);
 
 /* A worker event. Interrupts, alarm timers and other tasks only ever queue these; module code runs on the worker. */
+/* the id of a request a task waits for (xip_instance_request): the answer is a message to the application that carries it */
+#define XIP_REQUEST_ID 0x5249440000000001ull
 enum { XIP_EV_CALL = 1, XIP_EV_REQUEST, XIP_EV_START, XIP_EV_ALARM, XIP_EV_NETWORK, XIP_EV_WAKE, XIP_EV_PACKET, XIP_EV_WIFI, XIP_EV_IO, XIP_EV_LINK, XIP_EV_SLEEP };
 typedef struct {
     uint8_t kind;
@@ -75,6 +74,8 @@ struct xip_instance {
     char name[16];
     uint32_t id;
     int component;                /* call() address */
+    uint32_t port;                /* the datagram port the manifest binds it to (XIP_PORT_*), 0: none */
+    uint32_t stream;              /* its stream port (TCP XIP_PORT_NET + stream), 0: none */
     int slot;                     /* index in the registry */
     xip_handle_fn handler;
     xip_done_fn done;
@@ -110,7 +111,7 @@ bool xip_connected(void);
 /* xip_periph.c: pins, interrupts, buses, analog, LED. Every call checks the pin owner. */
 void xip_periph_init(void);
 void xip_periph_release(struct xip_instance *inst);
-void xip_periph_fill(xip_host *table);
+const xip_hardware *xip_periph_table(void);      /* get_component("hw") */
 
 /* Shared status store: owner zero is a native host component. */
 int xip_info_init(void);

@@ -8,6 +8,7 @@
  *    That needs the HAL MMU calls: esp_partition_mmap() never lets the caller choose the address.
  *  - ESP32-C6 (RISC-V): the image is position independent; esp_partition_mmap() is enough.
  * The fixed-address part is the proven code of DMesh's module loader (docs/architecture.md). */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "esp_log.h"
@@ -53,15 +54,14 @@ xip_loader_t em;
 
 xip_slot_rules_t xip_rules(int slot)
 {
-    const xip_slot_t *s = &em.cfg.slots[slot];
-    return (xip_slot_rules_t){.tag = s->tag, .slot_offset = s->offset, .slot_size = s->size,
-                                 .host_features = xip_host_features(), .max_stack_bytes = CONFIG_XIP_WORKER_STACK,
+    const xip_slot_t *s = &em.slots_found[slot];
+    return (xip_slot_rules_t){.slot_offset = s->offset, .slot_size = s->size, .max_stack_bytes = CONFIG_XIP_WORKER_STACK,
                                  .fixed_vma = XIP_FIXED, .code_base = XIP_CODE_BASE, .data_base = XIP_DATA_BASE};
 }
 
 esp_err_t xip_read_header(int slot, xip_dmod_header *h)
 {
-    return esp_partition_read(em.part, em.cfg.slots[slot].offset, h, sizeof(*h));
+    return esp_partition_read(em.part, em.slots_found[slot].offset, h, sizeof(*h));
 }
 
 #if XIP_FIXED
@@ -106,9 +106,9 @@ static uint32_t mmu_id(void)
 static esp_err_t map_fixed(int slot, const xip_dmod_header *h, fixed_map_t *m)
 {
     const uint32_t id = mmu_id(), page = mmu_hal_pages_to_bytes(id, 1);
-    const uint32_t paddr = em.part->address + em.cfg.slots[slot].offset;
+    const uint32_t paddr = em.part->address + em.slots_found[slot].offset;
     const uint32_t rounded = ((h->image_size + page - 1) / page) * page;
-    if (page == 0 || paddr % page || h->code_vma % page || h->data_vma % page || rounded > em.cfg.slots[slot].size)
+    if (page == 0 || paddr % page || h->code_vma % page || h->data_vma % page || rounded > em.slots_found[slot].size)
         return ESP_ERR_INVALID_ARG;
     uint32_t code_len = 0, data_len = 0;
 #if CONFIG_IDF_TARGET_ESP32
@@ -152,7 +152,7 @@ static esp_err_t map_image(int slot, const xip_dmod_header *h, xip_slot_state_t 
     *base = (const void *)(uintptr_t)st->fixed.code_vaddr;
     return ESP_OK;
 #else
-    if (esp_partition_mmap(em.part, em.cfg.slots[slot].offset, h->image_size, ESP_PARTITION_MMAP_INST, base,
+    if (esp_partition_mmap(em.part, em.slots_found[slot].offset, h->image_size, ESP_PARTITION_MMAP_INST, base,
                            &st->mmap) != ESP_OK) { *base = NULL; return ESP_FAIL; }
     return ESP_OK;
 #endif
@@ -181,58 +181,119 @@ static void instance_done(void *ctx, int result, const xip_stats_t *stats)
     st->st.last_runtime_ms = (uint32_t)((esp_timer_get_time() - st->started_us) / 1000);
     st->st.runs++;
     if (stats && stats->mem_leaked) st->st.needs_reboot = true;     /* its memory is lost until the device restarts */
-    ESP_LOGI(TAG, "%s ended with %d after %u ms", em.cfg.slots[slot].name, result, (unsigned)st->st.last_runtime_ms);
+    ESP_LOGI(TAG, "%s ended with %d after %u ms", em.slots_found[slot].name, result, (unsigned)st->st.last_runtime_ms);
     st->st.running = false;   /* last: xip_loader_stop() may erase the slot once this is clear */
 }
 
 /* ---- public API ---- */
+/* The name of the module in the image at `offset`: key 1 of its manifest, or "@<hex offset>". */
+static void name_of(uint32_t offset, const xip_dmod_header *h, char *out, size_t cap)
+{
+    snprintf(out, cap, "@%x", (unsigned)offset);
+    if (!h->manifest_size || h->manifest_size > 4096 || h->manifest_offset < XIP_DMOD_HEADER_SIZE || (h->manifest_offset & 3) ||
+        h->manifest_offset > h->image_size || h->manifest_size > h->image_size - h->manifest_offset) return;
+    uint8_t *m = malloc(h->manifest_size);
+    if (!m) return;
+    const uint8_t *text;
+    size_t n;
+    if (esp_partition_read(em.part, offset + h->manifest_offset, m, h->manifest_size) == ESP_OK &&
+        xip_cbor_get_str(m, h->manifest_size, 1, XIP_CBOR_TEXT, &text, &n) == 0 && n > 0 && n < cap) {
+        memcpy(out, text, n);
+        out[n] = 0;
+    }
+    free(m);
+}
+
+/* Look at every page of the partition: a page that starts with an image header starts a module, which spans the pages its size says. */
+static void scan(void)
+{
+    em.found = 0;
+    for (uint32_t offset = 0; offset + XIP_SLOT_ALIGN <= em.part->size;) {
+        xip_dmod_header h;
+        if (esp_partition_read(em.part, offset, &h, sizeof(h)) != ESP_OK || h.magic != XIP_DMOD_MAGIC || h.image_size <= XIP_DMOD_HEADER_SIZE) {
+            offset += XIP_SLOT_ALIGN;
+            continue;
+        }
+        const uint32_t size = ((h.image_size + XIP_SLOT_ALIGN - 1) / XIP_SLOT_ALIGN) * XIP_SLOT_ALIGN;
+        if (size > em.part->size - offset || (XIP_FIXED && (uint64_t)offset + size > XIP_WINDOW_MAX)) {
+            ESP_LOGW(TAG, "image at 0x%x does not fit its room", (unsigned)offset);
+            offset += XIP_SLOT_ALIGN;
+            continue;
+        }
+        char *name = em.names_found[em.found];
+        name_of(offset, &h, name, sizeof(em.names_found[0]));
+        bool taken = false;
+        for (size_t i = 0; i < em.found; i++) taken |= !strcmp(em.slots_found[i].name, name);
+        if (taken) {
+            ESP_LOGW(TAG, "two modules are called %s: the one at 0x%x is ignored", name, (unsigned)offset);
+        } else {
+            em.slots_found[em.found] = (xip_slot_t){.name = name, .tag = h.tag, .offset = offset, .size = size};
+            memset(&em.slots[em.found], 0, sizeof(em.slots[em.found]));
+            em.slots[em.found].st.last_result = INT32_MIN;
+            em.slots[em.found].st.installed = true;
+            em.found++;
+        }
+        offset += size;
+    }
+}
+
 esp_err_t xip_loader_init(const xip_loader_config_t *cfg)
 {
     if (em.inited) return ESP_OK;
-    if (!cfg || !cfg->slots || !cfg->slot_count || !cfg->partition) return ESP_ERR_INVALID_ARG;
+    if (!cfg || !cfg->partition) return ESP_ERR_INVALID_ARG;
     em.part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, cfg->partition);
     if (!em.part) { ESP_LOGE(TAG, "partition \"%s\" not found", cfg->partition); return ESP_ERR_NOT_FOUND; }
-    for (size_t i = 0; i < cfg->slot_count; i++) {
-        const xip_slot_t *s = &cfg->slots[i];
-        if (!s->name || !s->size || s->offset % XIP_SLOT_ALIGN || s->size % XIP_SLOT_ALIGN ||
-            s->offset > em.part->size || s->size > em.part->size - s->offset ||
-            (XIP_FIXED && (uint64_t)s->offset + s->size > XIP_WINDOW_MAX)) {
-            ESP_LOGE(TAG, "slot %s does not fit", s->name ? s->name : "?");
-            return ESP_ERR_INVALID_ARG;
-        }
-        for (size_t j = 0; j < i; j++) {
-            const xip_slot_t *o = &cfg->slots[j];
-            if (s->offset < o->offset + o->size && o->offset < s->offset + s->size) return ESP_ERR_INVALID_ARG;
-        }
-    }
-    em.slots = calloc(cfg->slot_count, sizeof(*em.slots));
+    em.capacity = em.part->size / XIP_SLOT_ALIGN;
+    em.slots = calloc(em.capacity ? em.capacity : 1, sizeof(*em.slots));
+    em.slots_found = calloc(em.capacity ? em.capacity : 1, sizeof(*em.slots_found));
+    em.names_found = calloc(em.capacity ? em.capacity : 1, sizeof(*em.names_found));
     em.lock = xSemaphoreCreateMutex();
-    if (!em.slots || !em.lock) return ESP_ERR_NO_MEM;
+    if (!em.slots || !em.slots_found || !em.names_found || !em.lock) return ESP_ERR_NO_MEM;
     em.cfg = *cfg;
     if (!em.cfg.default_stack_bytes) em.cfg.default_stack_bytes = 8192;
-    for (size_t i = 0; i < cfg->slot_count; i++) {
-        em.slots[i].st.last_result = INT32_MIN;
-        xip_dmod_header h;
-        em.slots[i].st.installed = xip_read_header((int)i, &h) == ESP_OK && h.magic == XIP_DMOD_MAGIC;
-    }
+    scan();
     em.inited = true;
-    ESP_LOGI(TAG, "%u slots in \"%s\" (0x%x bytes at 0x%x)", (unsigned)cfg->slot_count, cfg->partition,
+    ESP_LOGI(TAG, "%u modules in \"%s\" (0x%x bytes at 0x%x)", (unsigned)em.found, cfg->partition,
              (unsigned)em.part->size, (unsigned)em.part->address);
+    for (size_t i = 0; i < em.found; i++)
+        ESP_LOGI(TAG, "  %s: component %u at 0x%x", em.slots_found[i].name, (unsigned)em.slots_found[i].tag, (unsigned)em.slots_found[i].offset);
     return ESP_OK;
+}
+
+int xip_loader_rescan(void)
+{
+    if (!em.inited) return XIP_ERR_ARG;
+    for (size_t i = 0; i < em.found; i++) if (em.slots[i].st.running) return XIP_LOADER_ERR_RUNNING;
+    scan();
+    return (int)em.found;
 }
 
 int xip_loader_find(const char *name)
 {
     if (!em.inited || !name) return -1;
-    for (size_t i = 0; i < em.cfg.slot_count; i++) if (!strcmp(em.cfg.slots[i].name, name)) return (int)i;
+    for (size_t i = 0; i < em.found; i++) if (!strcmp(em.slots_found[i].name, name)) return (int)i;
     return -1;
 }
 
-size_t xip_loader_slot_count(void) { return em.inited ? em.cfg.slot_count : 0; }
+size_t xip_loader_slot_count(void) { return em.inited ? em.found : 0; }
 
 const xip_slot_t *xip_loader_slot(int slot)
 {
-    return em.inited && slot >= 0 && (size_t)slot < em.cfg.slot_count ? &em.cfg.slots[slot] : NULL;
+    return em.inited && slot >= 0 && (size_t)slot < em.found ? &em.slots_found[slot] : NULL;
+}
+
+/* An integer of the manifest (key 9: the datagram port the module is bound to; key 10: its stream port, which listens on TCP). 0: none. */
+static uint32_t manifest_port(int slot, const xip_dmod_header *h, uint64_t key)
+{
+    if (!h->manifest_size || h->manifest_size > 4096) return 0;
+    uint8_t *m = malloc(h->manifest_size);
+    if (!m) return 0;
+    int64_t port = 0;
+    if (esp_partition_read(em.part, em.slots_found[slot].offset + h->manifest_offset, m, h->manifest_size) != ESP_OK ||
+        xip_cbor_get_int(m, h->manifest_size, key, &port) != 0 || port < 0 || port > UINT32_MAX)
+        port = 0;
+    free(m);
+    return (uint32_t)port;
 }
 
 int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
@@ -247,7 +308,7 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
     st->st.last_check = xip_read_header(slot, &h) == ESP_OK ? xip_dmod_check(&h, &rules) : EMD_BAD_MAGIC;
     st->st.installed = st->st.last_check != EMD_BAD_MAGIC;
     if (st->st.last_check != EMD_OK) {
-        ESP_LOGW(TAG, "%s: image rejected: %s", em.cfg.slots[slot].name,
+        ESP_LOGW(TAG, "%s: image rejected: %s", em.slots_found[slot].name,
                  xip_dmod_reason(st->st.last_check));
         return XIP_LOADER_ERR_IMAGE;
     }
@@ -265,10 +326,11 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
     if (map_image(slot, &h, st, &base) != ESP_OK) return XIP_LOADER_ERR_MAP;
     const xip_instance_config_t ic = {.handler = (xip_handle_fn)((const uint8_t *)base + h.entry_offset),
                                          .state_bytes = h.state_bytes, .done = instance_done,
-                                         .done_ctx = (void *)(intptr_t)slot, .component = em.cfg.slots[slot].tag};
-    ESP_LOGI(TAG, "%s: handler %p, image %u bytes, state %u", em.cfg.slots[slot].name, (void *)ic.handler,
+                                         .done_ctx = (void *)(intptr_t)slot, .component = h.tag,
+                                         .port = manifest_port(slot, &h, 9), .stream = manifest_port(slot, &h, 10)};
+    ESP_LOGI(TAG, "%s: handler %p, image %u bytes, state %u", em.slots_found[slot].name, (void *)ic.handler,
              (unsigned)h.image_size, (unsigned)h.state_bytes);
-    xip_instance_t *inst = xip_instance_create(em.cfg.slots[slot].name, &ic);
+    xip_instance_t *inst = xip_instance_create(em.slots_found[slot].name, &ic);
     if (!inst) { unmap_image(st); return XIP_LOADER_ERR_NOMEM; }
     xSemaphoreTake(em.lock, portMAX_DELAY);
     st->inst = inst;
@@ -364,7 +426,7 @@ int xip_loader_manifest(int slot, uint8_t *out, size_t capacity)
     if (xip_dmod_check(&h, &rules) != EMD_OK) return XIP_LOADER_ERR_IMAGE;     /* the offsets are only trusted after the check */
     if (!h.manifest_size) return 0;
     if (h.manifest_size > capacity) return XIP_ERR_SIZE;
-    if (esp_partition_read(em.part, em.cfg.slots[slot].offset + h.manifest_offset, out, h.manifest_size) != ESP_OK) return XIP_ERR_IO;
+    if (esp_partition_read(em.part, em.slots_found[slot].offset + h.manifest_offset, out, h.manifest_size) != ESP_OK) return XIP_ERR_IO;
     return (int)h.manifest_size;
 }
 
@@ -381,7 +443,7 @@ int xip_loader_autostart(void)
         ESP_LOGD(TAG, "autostart: slot %d manifest %d", (int)i, n);
         if (n <= 0 || xip_cbor_get_str(m, (size_t)n, 6, XIP_CBOR_TEXT, &request, &rn) != 0) continue;
         int rc = xip_loader_start((int)i, request, rn);
-        ESP_LOGW(TAG, "autostart %s: %d", em.cfg.slots[i].name, rc);
+        ESP_LOGW(TAG, "autostart %s: %d", em.slots_found[i].name, rc);
         if (rc == 0) started++;
     }
     free(m);
@@ -395,7 +457,7 @@ int xip_loader_manifest_named(const uint8_t *name, size_t n, uint8_t *out, size_
 }
 
 /* CBOR: an array with a map per slot ({1: name, 2: tag, 3: installed, 4: running, 5: version, 6: last result, 7: runs,
- * 8: ms of the last run, 9: stack high-water mark, 10: result of the last image check}; `slot` of mod_console/API.md) */
+ * 8: ms of the last run, 9: stack high-water mark, 10: result of the last image check}; `slot` of mod_con/API.md) */
 int xip_loader_modules_info(uint8_t *out, size_t cap)
 {
     xip_cbor_w w;

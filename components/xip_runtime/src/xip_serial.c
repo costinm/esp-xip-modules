@@ -40,7 +40,6 @@
 
 static const char *TAG = "serial";
 
-#define LINE_MAX_LEN 160
 #define UART_BAUD 115200
 #define USB_WAKE_MS 250
 #define USB_WRITE_MS 200
@@ -143,9 +142,11 @@ int xip_serial_write(const void *data, size_t len)
 }
 
 /* ---- lines ---- */
+#define LINE_MAX_LEN 160
 typedef struct { char text[LINE_MAX_LEN]; size_t len; } line_t;
 
-/* One byte: CR or LF ends a line (a CRLF pair makes an empty second line, which is not delivered); backspace edits. */
+/* One byte of the default decoder: CR or LF ends a line (a CRLF pair makes an empty second line, which is not delivered); backspace edits.
+ * A finished line is a frame for the console port (the TCP console cuts its own lines: mod_con). */
 static void feed(line_t *l, uint8_t c)
 {
     if (c == '\r' || c == '\n') {
@@ -161,12 +162,28 @@ static void feed(line_t *l, uint8_t c)
     }
 }
 
+static const xip_serial_codec_t *codec;
+void xip_serial_set_codec(const xip_serial_codec_t *c) { codec = c; }
+
+/* A chunk the driver read: the codec's, or the default line editor (frames for the console port). */
+static void chunk(line_t *l, const uint8_t *buf, int n)
+{
+    if (codec && codec->on_bytes) { codec->on_bytes(buf, (size_t)n); return; }
+    for (int i = 0; i < n; i++) feed(l, buf[i]);
+}
+
+int xip_serial_write_frame(uint32_t port, const void *data, size_t len)
+{
+    if (codec && codec->tx) return codec->tx(port, data, len);
+    return xip_serial_write(data, len);
+}
+
 static void drain(line_t *l)
 {
     uint8_t buf[64];
     int n;
     while ((n = read_bytes(buf, sizeof(buf), 0)) > 0)
-        for (int i = 0; i < n; i++) feed(l, buf[i]);
+        chunk(l, buf, n);
 }
 
 static void serial_task(void *arg)
@@ -177,7 +194,7 @@ static void serial_task(void *arg)
     while (!s.stop) {
         if (s.usb) {
             int n = read_bytes(buf, sizeof(buf), pdMS_TO_TICKS(USB_WAKE_MS));
-            for (int i = 0; i < n; i++) feed(&line, buf[i]);
+            if (n > 0) chunk(&line, buf, n);
             continue;
         }
         uart_event_t ev;
@@ -187,6 +204,7 @@ static void serial_task(void *arg)
             uart_flush_input(UART_NUM_0);
             xQueueReset(s.events);
             line.len = 0;
+            if (codec && codec->on_reset) codec->on_reset();
             continue;
         }
         drain(&line);       /* after every wake, not only UART_DATA */

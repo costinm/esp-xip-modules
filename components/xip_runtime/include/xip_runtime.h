@@ -23,15 +23,6 @@ extern "C" {
 typedef struct { uint8_t ssid[32]; uint8_t ssid_len; uint8_t bssid[6]; int8_t rssi; uint8_t channel; uint8_t auth; } xip_ap_t;
 
 typedef struct {
-    /* emit(): called on the worker task. */
-    int (*emit)(void *ctx, const char *module, uint16_t event_id, uint8_t value_type,
-                const uint8_t *value, size_t len);
-    void *emit_ctx;
-    /* call_service(): called on the worker task; returns a result for the module. */
-    int (*call_service)(void *ctx, const char *module, uint16_t tag, const uint8_t *request,
-                        size_t request_len, uint8_t *response, size_t response_capacity,
-                        size_t *response_len, uint32_t timeout_ms);
-    void *service_ctx;
     /* the wifi component and the module calls of include/xip.h. NULL: not offered; the optional
      * xip_wifi component implements simple STA hooks in C, and the Rust host has its own STA hooks.
      * xip_loader implements the module ones; all are called on the
@@ -77,8 +68,7 @@ typedef struct {
     int (*wifi_monitor)(const xip_wifi_monitor *monitor);
 } xip_host_hooks_t;
 
-/* For an application that cannot build the hook table (Rust): events only, plus the network calls when given. */
-typedef int (*xip_host_emit_fn)(const char *module, uint16_t event_id, uint8_t value_type, const uint8_t *value, size_t len);
+/* For an application that cannot build the hook table (Rust): the Wi-Fi, settings and module-control calls when given. */
 typedef struct {
     int (*wifi_set)(const xip_wifi_intent *intent, uint32_t *generation);
     int (*wifi_get)(xip_wifi_intent *intent, uint32_t *generation);
@@ -104,7 +94,7 @@ typedef struct {
     int (*wifi_tuning_get)(xip_wifi_tuning *tuning);
     int (*wifi_monitor)(const xip_wifi_monitor *monitor);
 } xip_host_ext_t;
-esp_err_t xip_host_init_simple(xip_host_emit_fn emit, const xip_host_ext_t *ext);
+esp_err_t xip_host_init_simple(const xip_host_ext_t *ext);
 
 /* Once, before the first instance. NVS must be initialised by the application (settings). Starts the worker. */
 esp_err_t xip_host_init(const xip_host_hooks_t *hooks);
@@ -177,7 +167,9 @@ typedef struct {
     uint32_t state_bytes;          /* zeroed state block passed to every call (<= 4096) */
     xip_done_fn done;
     void *done_ctx;
-    int component;                 /* the address of the module for the ABI's call(): its slot tag; 0 = not addressable */
+    int component;                 /* the address of the module for the ABI's call(): its tag; 0 = not addressable */
+    uint32_t port;                 /* manifest key 9: the datagram port whose packets it receives and answers (XIP_PORT_CONSOLE: the serial line); 0 = none */
+    uint32_t stream;               /* manifest key 10: the stream port: TCP port XIP_PORT_NET + stream, connections arrive as socket events; 0 = none */
 } xip_instance_config_t;
 
 /* `name` (copied, <= 15 bytes) is used in logs and as the settings namespace "em_<name>". The instance is idle until
@@ -192,7 +184,7 @@ int xip_instance_stop(xip_instance_t *inst);
 /* Queue a request (copied) for (component, method); one is held per instance: XIP_ERR_BUSY while the previous has
  * not been handled, XIP_ERR_SIZE when larger than CONFIG_XIP_REQUEST_MAX. Any task. */
 int xip_instance_post(xip_instance_t *inst, int component, int method, const uint8_t *data, size_t len);
-/* Same, and wait for the module's respond() (at most CONFIG_XIP_RESPONSE_MAX bytes; none = length 0). */
+/* Same, and wait for the module's answer (a message to the application with the request id; at most CONFIG_XIP_RESPONSE_MAX bytes; none = length 0). */
 /* Send the module a message the way a module would: copied into a pool packet and delivered as a call with call.pkt,
  * call.from = ADDR_MAIN. XIP_ERR_BUSY when its inbox is full or the pool is out of packets. Any task. */
 int xip_instance_send(xip_instance_t *inst, int component, int method, uint64_t id, const uint8_t *data, size_t len);
@@ -210,18 +202,39 @@ int xip_serial_start(xip_serial_line_fn on_line, void *ctx);
 void xip_serial_stop(void);
 /* Write text; returns the bytes taken, or a negative XIP_ERR_*. */
 int xip_serial_write(const void *data, size_t len);
+
+/* The serial line carries ports (include/xip.h, XIP_PORT_*). By default it is what the console uses: text lines are frames for
+ * XIP_PORT_CONSOLE and a frame sent to a port is written as text. An application can install a codec that does more (the Rust runtime's
+ * PPP framing: records that carry their port in the first byte, text lines still for the console). `on_bytes` gets every chunk the driver
+ * reads (reader task) and cuts frames with xip_serial_rx_begin / commit; `on_reset` drops a partial frame when the input was flushed;
+ * `tx` writes one frame for a port. */
+typedef struct {
+    void (*on_bytes)(const uint8_t *data, size_t len);
+    void (*on_reset)(void);
+    int (*tx)(uint32_t port, const uint8_t *data, size_t len);
+} xip_serial_codec_t;
+void xip_serial_set_codec(const xip_serial_codec_t *codec);
+/* Write one frame for `port` with the codec, or as plain text without one. */
+int xip_serial_write_frame(uint32_t port, const void *data, size_t len);
+/* Receive a frame for `port` without a copy: begin returns 0 and a pool packet to fill (capacity XIP_PKT_MAX), 1 when no module has the port
+ * (skip the frame), or an error (XIP_ERR_NOMEM: the pool is empty). Then commit (the frame is `len` bytes) or abort. The token of the frame is its port. */
+int xip_serial_rx_begin(uint32_t port, xip_link_rx_buf *buf);
+void xip_serial_rx_commit(uint32_t port, const xip_link_rx_buf *buf, size_t len);
+void xip_serial_rx_abort(const xip_link_rx_buf *buf);
+/* The same for any link: `link` is its address and `token` the id of the far end (a connection, a port). */
+int xip_port_rx_begin(uint32_t port, xip_link_rx_buf *buf);
+void xip_port_rx_commit(int link, uint32_t port, const xip_link_rx_buf *buf, size_t len, uint64_t token);
+void xip_port_rx_abort(const xip_link_rx_buf *buf);
+
 /* For whoever owns light sleep (the sleepy runtime): a computer is attached on USB-Serial/JTAG (which also charges the device,
  * so a sleep policy can stay awake), and the receive interrupt/wakeup to re-arm after a light-sleep return (ESP-IDF can
  * leave it disabled after a GPIO wake). The reader itself wakes every 250 ms on USB and sleeps on the event queue on UART0. */
 bool xip_serial_usb_active(void);
 
-/* The XIP_FEAT_* bits a module sees in the host table (what the hooks installed at init make real). The loader checks an
- * image's required features against this, so a module that needs SERIAL or PACKETS is refused at install, not at start. */
-uint32_t xip_host_features(void);
 
 /* Send ESP-IDF log lines to the ROM console. For an application that has no C library stdout: Rust std on ESP-IDF 6.0 with its
- * own `app_main` (crates/xip-runtime-esp/example) never registers the console, so every ESP_LOG line is lost. Cheap, no allocation;
- * the one place text is formatted outside mod_console, because a log line is the only way those components report. */
+ * own `app_main` (main-rs) never registers the console, so every ESP_LOG line is lost. Cheap, no allocation;
+ * the one place text is formatted outside mod_con, because a log line is the only way those components report. */
 void xip_log_to_rom(void);
 void xip_serial_rearm(void);
 
