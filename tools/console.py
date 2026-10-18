@@ -101,7 +101,9 @@ def probe(path, seconds=10.0):
     `seconds`. Returns a dict (port, mac when the port name has one, answer, modules) or None when nothing answers."""
     try:
         c = Console(path).open()
-    except Exception:
+    except ImportError:
+        raise SystemExit("pyserial is required (pip install pyserial; the ESP-IDF python environment has it)")
+    except Exception:       # busy, no permission, gone
         return None
     try:
         end = time.time() + seconds
