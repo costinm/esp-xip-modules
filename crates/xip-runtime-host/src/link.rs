@@ -266,11 +266,17 @@ fn link_tx(sh: &Shared, dst: u32, slot: i32, start: u16, len: u16, token: u64, s
             ERR_BUSY
         }
         Target::Native(mode) => {
-            let frame = unsafe { std::slice::from_raw_parts(sh.pool.slot(slot).add(start as usize), len as usize) }.to_vec();
+            let bytes = unsafe { std::slice::from_raw_parts(sh.pool.slot(slot).add(start as usize), len as usize) };
+            if let Some(rc) = crate::network::udp_tx(sh, dst, bytes, token) {
+                if rc == 0 { complete(sh, slot, 0); } else { unpend(sh); }
+                return rc;
+            }
+            let frame = bytes.to_vec();
             {
                 let mut links = sh.links.borrow_mut();
                 let l = links.at(dst).unwrap();
                 l.native_tx.push((token, frame));
+                sh.notify.notify_one();
                 if mode == NativeTx::Async {
                     l.inflight.push_back(slot);
                 }
@@ -663,4 +669,18 @@ impl Runtime {
     pub fn packets_in_use(&self) -> u16 {
         self.sh.pool.slots() - self.sh.pool.available()
     }
+}
+
+// Datagram endpoints own native links; reuse only retired datagram entries.
+pub(crate) fn add_datagram_link(sh: &Shared) -> Result<u32, i32> {
+    let mut links = sh.links.borrow_mut();
+    let at = if let Some(i) = links.list.iter().position(|l| l.provider == LINK_NONE && l.name.starts_with("udp:")) { i }
+        else { if links.list.len() >= LINKS_MAX { return Err(ERR_NOMEM); } let i = links.list.len(); links.list.push(Entry::default()); i };
+    links.list[at] = Entry { name: format!("udp:{at}"), provider: LINK_NATIVE, mtu: PKT_MAX, state: LINK_UP, mode: NativeTx::Done, ..Default::default() };
+    Ok(addr_of(at))
+}
+pub(crate) fn remove_datagram_link(sh: &Shared, addr: u32) {
+    let mut links = sh.links.borrow_mut();
+    if let Some(l) = links.at(addr) { l.provider = LINK_NONE; l.state = LINK_DOWN; l.subs.clear(); l.routes.clear(); }
+    for l in &mut links.list { l.routes.retain(|r| r.egress != addr); }
 }

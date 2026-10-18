@@ -297,3 +297,11 @@ fn a_method_of_a_host_component_is_called_through_its_table() {
     k.check_line("wifi.state", "error: not a call the console can make");
     assert!(k.failures.is_empty(), "{:?}", k.failures);
 }
+
+#[test]
+fn module_scalar_busy_reply_is_rendered_as_error() {
+    let mut k = Console::new();
+    k.check_render(&[0x24], 2, 1, "error: busy\n");
+    k.check_render(&[0x20], 2, 1, "error: module -1\n");
+    assert!(k.failures.is_empty(), "{:?}", k.failures);
+}

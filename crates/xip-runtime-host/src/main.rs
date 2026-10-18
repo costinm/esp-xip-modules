@@ -1,81 +1,49 @@
-//! `xip-host`: run modules on the development machine, the host twin of `main/` and `main-rs/`.
-//!
-//!   xip-host [--ms N] PATH.so:COMPONENT[:console] ...
-//!
-//! Loads each module (built by `scripts/build-host-modules.sh`: `target/host-modules/mod_con.so`), gives it its component number, starts it, and
-//! runs the event loop in real time. A module marked `console` is bound to the console port (datagram port 1): the lines typed on stdin are
-//! frames of the `serial` link and what the modules send back to it is printed on stdout. Alarms, packets and messages work as on a device;
-//! the host calls (wifi, gpio, ...) are the fixtures of the library.
-//!
-//! TODO: feature parity with the Rust runtime (`xip-runtime-esp`): a module should be testable functionally on the host, with the same behaviour
-//! as on a device. Reuse the code of `xip-runtime-esp` (the PPP decoder, the wifi store, the ESP-NOW frame codec, the loader logic) and replace only what
-//! touches hardware: tokio or fakes for sockets and timers, stubbed, faked or pcap-driven backends for the radios (Wi-Fi, ESP-NOW, LoRa), UART, gpio and flash.
-//!
-//! TODO: sockets and datagram listeners (the manifest's stream and datagram ports on TCP and UDP of this machine), the Rust receive path
-//! shared with `xip-runtime-esp`, and `.dmod` images instead of shared objects.
+//! Run host modules with their declared TCP/UDP ports and an optional start request.
 use std::io::{BufRead, Write};
-use std::sync::mpsc;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use xip_runtime_host::{NativeTx, Runtime};
 
-fn main() {
-    let mut tick = 10u32;
-    let mut specs = Vec::new();
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        if a == "--ms" {
-            tick = args.next().and_then(|v| v.parse().ok()).unwrap_or(10);
-        } else {
-            specs.push(a);
-        }
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut specs: Vec<_> = std::env::args().skip(1).collect();
+    if specs.iter().any(|s| s == "--help" || s == "-h") {
+        println!("usage: xip-host [PATH.so[=START] ...]\nDefault: console + async test echo on loopback TCP/UDP 5226 and 5228");
+        return Ok(());
     }
     if specs.is_empty() {
-        eprintln!("usage: xip-host [--ms N] PATH.so:COMPONENT[:console] ...");
-        std::process::exit(2);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/host-modules");
+        specs = vec![root.join("mod_con.so").display().to_string(), format!("{}=async", root.join("mod_rtest.so").display())];
     }
     let rt = Runtime::default();
     rt.add_native_link("serial", 256, NativeTx::Done);
     let mut modules = Vec::new();
     for spec in &specs {
-        let mut parts = spec.split(':');
-        let path = parts.next().unwrap_or_default();
-        let Some(component) = parts.next().and_then(|c| c.parse::<i32>().ok()) else {
-            eprintln!("{spec}: expected PATH:COMPONENT");
-            std::process::exit(2);
-        };
-        let console = parts.next() == Some("console");
-        let m = match rt.add_module(path, 256) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("{path}: {e}");
-                std::process::exit(1);
-            }
-        };
-        m.set_component(component);
-        if console {
-            m.bind_port(xip_abi::PORT_CONSOLE);
-        }
-        m.start(b"");
-        modules.push(m);
+        let (path, request) = spec.split_once('=').unwrap_or((spec, ""));
+        let m = rt.load_module(path).map_err(std::io::Error::other)?;
+        let ports = m.listen_network(IpAddr::V4(Ipv4Addr::LOCALHOST), xip_runtime_host::xip_abi::PORT_NET as u16).await?;
+        eprintln!("{path}: TCP {:?}, UDP {:?}", ports.stream, ports.datagram);
+        m.start(request.as_bytes()); modules.push(m);
     }
-    let (tx, lines) = mpsc::channel::<String>();
+    let (tx, mut lines) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) { if tx.send(line).is_err() { break; } }
     });
-    let mut out = std::io::stdout();
+    let mut stdin_open = true;
     loop {
-        while let Ok(line) = lines.try_recv() {
-            rt.inject_frame("serial", 0, 0, line.as_bytes());
+        for (_, frame) in rt.take_link_tx("serial") { std::io::stdout().write_all(&frame)?; }
+        std::io::stdout().flush()?;
+        // A socket event or timer drives the dispatcher; stdin wakes this select.
+        tokio::select! {
+            _ = rt.step_realtime(Duration::from_secs(86400)) => {},
+            line = lines.recv(), if stdin_open => {
+                if let Some(line) = line { rt.inject_frame("serial", 0, 0, line.as_bytes()); rt.run(0); }
+                else { stdin_open = false; }
+            },
+            _ = tokio::signal::ctrl_c() => { break; },
         }
-        rt.run(tick);
-        for (_token, frame) in rt.take_link_tx("serial") {
-            let _ = out.write_all(&frame);
-        }
-        let _ = out.flush();
-        std::thread::sleep(Duration::from_millis(tick as u64));
     }
+    for m in modules { m.stop(); }
+    rt.run(0);
+    Ok(())
 }

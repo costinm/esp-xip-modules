@@ -213,7 +213,7 @@ unsafe extern "C" fn h_alarm_set(user: *mut c_void, delay: u32, window: u32, int
     let mut st = me.st.borrow_mut();
     for (i, a) in st.alarms.iter_mut().enumerate() {
         if !a.used {
-            *a = Alarm { used: true, waiting_net: false, due: now + delay as u64, fire, interval, window, flags, component, method };
+            *a = Alarm { seq: a.seq.wrapping_add(1), used: true, waiting_net: false, due: now + delay as u64, fire, interval, window, flags, component, method };
             return i as i32;
         }
     }
@@ -338,24 +338,49 @@ unsafe extern "C" fn h_nv(user: *mut c_void, key: *const u8, kn: usize, value: *
 
 unsafe extern "C" fn h_device_info(user: *mut c_void, out: *mut u8, cap: usize) -> i32 {
     let (sh, _me) = cx!(user, "device_info");
-    let s = sh.st.borrow();
     let mut v = cbor(|w| {
         w.map(5).uint(1).map(1).uint(4).text("main").uint(2).map(0).uint(3).map(0).uint(4);
     });
-    v.extend_from_slice(&s.modules_cbor);
+    v.extend_from_slice(&module_info(sh));
     v.extend_from_slice(&cbor(|w| {
         w.uint(5).map(0);
     }));
     put(out, cap, &v)
 }
 
+fn registered(sh: &Shared, name: &[u8]) -> Option<Rc<Inst>> {
+    sh.insts.borrow().iter().find(|m| m.registered.get() && m.name.as_bytes() == name).cloned()
+}
+fn has_registry(sh: &Shared) -> bool { sh.insts.borrow().iter().any(|m| m.registered.get()) }
+fn module_info(sh: &Shared) -> Vec<u8> {
+    if !sh.st.borrow().modules_cbor.is_empty() { return sh.st.borrow().modules_cbor.clone(); }
+    let insts: Vec<_> = sh.insts.borrow().iter().filter(|m| m.registered.get()).cloned().collect();
+    let mut data = vec![0; 64 + insts.len() * 128];
+    let mut w = Writer::new(&mut data); w.array(insts.len());
+    for m in insts {
+        let st = m.st.borrow();
+        w.map(6).uint(1).text(&m.name).uint(2).uint(st.component.unwrap_or(0) as u64)
+            .uint(3).boolean(true).uint(4).boolean(!st.ended && st.calls != 0)
+            .uint(5).uint(0).uint(6).int(if st.result == RET_DONE as i32 { 0 } else { st.result as i64 });
+    }
+    let len = w.finish().map_or(0, |v| v.len()); data.truncate(len); data
+}
 unsafe extern "C" fn h_modules_info(user: *mut c_void, out: *mut u8, cap: usize) -> i32 {
     let (sh, _me) = cx!(user, "modules_info");
-    put(out, cap, &sh.st.borrow().modules_cbor)
+    put(out, cap, &module_info(sh))
 }
 
 unsafe extern "C" fn h_module_start(user: *mut c_void, name: *const u8, n: usize, req: *const u8, rn: usize) -> i32 {
     let (sh, _me) = cx!(user, "module_start");
+    if let Some(m) = registered(sh, sl(name, n)) {
+        let mut st = m.st.borrow_mut();
+        if st.ended { return ERR_UNSUPPORTED; } // native restart/rebind is a later slice
+        if st.calls != 0 || !st.queue.is_empty() { return ERR_BUSY; }
+        if rn > INBOX_DATA { return ERR_SIZE; }
+        st.queue.push_back(QItem { component: 0, method: HOST_START as i32, data: sl(req, rn).to_vec(), ..Default::default() });
+        sh.notify.notify_one(); return 0;
+    }
+    if has_registry(sh) { return ERR_NOTFOUND; }
     if sl(name, n) != b"test" {
         return ERR_NOTFOUND;
     }
@@ -366,6 +391,12 @@ unsafe extern "C" fn h_module_start(user: *mut c_void, name: *const u8, n: usize
 }
 unsafe extern "C" fn h_module_stop(user: *mut c_void, name: *const u8, n: usize) -> i32 {
     let (sh, _me) = cx!(user, "module_stop");
+    if let Some(m) = registered(sh, sl(name, n)) {
+        if m.st.borrow().ended { return ERR_NOTFOUND; }
+        if m.st.borrow().queue.len() >= QUEUE { return ERR_BUSY; }
+        enqueue(&m, 0, HOST_STOP as i32, 0); sh.notify.notify_one(); return 0;
+    }
+    if has_registry(sh) { return ERR_NOTFOUND; }
     if sl(name, n) != b"test" {
         return ERR_NOTFOUND;
     }
@@ -374,6 +405,8 @@ unsafe extern "C" fn h_module_stop(user: *mut c_void, name: *const u8, n: usize)
 }
 unsafe extern "C" fn h_module_manifest(user: *mut c_void, name: *const u8, n: usize, out: *mut u8, cap: usize) -> i32 {
     let (sh, _me) = cx!(user, "module_manifest");
+    if let Some(m) = registered(sh, sl(name, n)) { return put(out, cap, &m.manifest); }
+    if has_registry(sh) { return ERR_NOTFOUND; }
     if sl(name, n) != b"test" {
         return ERR_NOTFOUND;
     }
@@ -540,6 +573,11 @@ pub(crate) fn fill(t: &mut Host, user: *mut c_void) {
     t.size = std::mem::size_of::<Host>() as u32;
     t.user = user;
     t.log = Some(h_log);
+    t.socket_read = Some(crate::network::read);
+    t.socket_write = Some(crate::network::write);
+    t.socket_close = Some(crate::network::close);
+    t.socket_peer = Some(crate::network::peer);
+    t.socket_write_pkt = Some(crate::network::write_pkt);
     t.now_ms = Some(h_now);
     t.get_setting = Some(h_get_setting);
     t.set_setting = Some(h_set_setting);

@@ -2,7 +2,7 @@
 use crate::fixtures::SpiDevice;
 use crate::pool::{Held, Mem, Pool, HELD_BORROWED, HELD_FREE, HELD_OWNED};
 use crate::{hostcalls, HandlerFn, Loaded};
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -24,10 +24,14 @@ pub struct Config {
     pub inbox: usize,
     /// Cap of `mem_alloc` bytes per module (0: none).
     pub mem_quota: u32,
+    /// Peer tokens retained per native UDP endpoint; oldest idle peer is evicted at capacity.
+    pub udp_peer_capacity: usize,
+    /// Drop a UDP peer token after this many monotonic milliseconds without traffic.
+    pub udp_peer_idle_ms: u64,
 }
 impl Default for Config {
     fn default() -> Self {
-        Config { pool_slots: 8, held_quota: 4, inbox: 4, mem_quota: 8192 }
+        Config { pool_slots: 8, held_quota: 4, inbox: 4, mem_quota: 8192, udp_peer_capacity: 64, udp_peer_idle_ms: 60000 }
     }
 }
 
@@ -114,6 +118,7 @@ pub struct RtState {
 
 #[derive(Clone, Default)]
 pub(crate) struct Alarm {
+    pub seq: u64,
     pub used: bool,
     pub waiting_net: bool,
     pub due: u64,
@@ -169,8 +174,11 @@ pub(crate) struct Inst {
     pub id: usize,
     pub name: String,
     pub _ctx: Box<Ctx>,
+    pub notify: Rc<tokio::sync::Notify>,
     pub table: Box<Host>,
     pub handler: HandlerFn,
+    pub manifest: Vec<u8>,
+    pub registered: Cell<bool>,
     pub state_ptr: *mut u8,
     _state: Box<[u128]>,
     _loaded: Option<Loaded>,
@@ -183,6 +191,9 @@ pub(crate) struct Shared {
     pub st: RefCell<RtState>,
     pub insts: RefCell<Vec<Rc<Inst>>>,
     pub links: RefCell<crate::link::Links>,
+    pub network: RefCell<crate::network::Network>,
+    pub notify: Rc<tokio::sync::Notify>,
+    pub realtime: Cell<Option<(tokio::time::Instant, u64)>>,
 }
 
 /// The runtime. Single threaded and deterministic: the application calls [`Runtime::run`] and the modules' handlers run
@@ -195,8 +206,8 @@ pub struct Runtime {
 /// A running (or ended) module instance.
 #[derive(Clone)]
 pub struct Instance {
-    rt: Runtime,
-    me: Rc<Inst>,
+    pub(crate) rt: Runtime,
+    pub(crate) me: Rc<Inst>,
 }
 
 impl Default for Runtime {
@@ -230,7 +241,7 @@ impl Runtime {
         crate::wifi::FIX.with(|f| *f.borrow_mut() = crate::wifi::Fixture::new());
         crate::wifi::TUNING.with(|t| *t.borrow_mut() = xip_abi::WifiTuning::default());
         crate::power::FIX.with(|f| f.borrow_mut().requests.clear());
-        let sh = Rc::new(Shared { pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()) });
+        let sh = Rc::new(Shared { pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None) });
         Runtime { sh }
     }
 
@@ -241,12 +252,29 @@ impl Runtime {
         Ok(self.add_loaded(&name, loaded, state_bytes))
     }
 
+    /// Load native artifact and its generated metadata (component, state, ports).
+    pub fn load_module(&self, path: impl AsRef<std::path::Path>) -> Result<Instance, String> {
+        let loaded = Loaded::open(path.as_ref())?;
+        let metadata = loaded.metadata.as_ref().ok_or("missing module metadata: rebuild host modules")?;
+        let state_bytes = metadata.state_bytes;
+        let component = xip_abi::cbor::get_int(&metadata.manifest, 2).ok().flatten().ok_or("manifest lacks component")? as i32;
+        let name = xip_abi::cbor::get_text(&metadata.manifest, 1).ok().flatten().map(|s| String::from_utf8_lossy(s).into_owned()).unwrap_or_default();
+        let instance = self.add_loaded(&name, loaded, state_bytes);
+        instance.set_component(component);
+        instance.me.registered.set(true);
+        if let Ok(Some(port)) = xip_abi::cbor::get_int(&instance.me.manifest, 9) {
+            if let Ok(port) = u32::try_from(port) { let _ = instance.bind_port(port); }
+        }
+        Ok(instance)
+    }
+
     /// Create an instance around a handler linked into this process.
     pub fn add_handler(&self, name: &str, handler: HandlerFn, state_bytes: usize) -> Instance {
         self.add_loaded(name, Loaded::linked(handler), state_bytes)
     }
 
-    fn add_loaded(&self, name: &str, loaded: Loaded, state_bytes: usize) -> Instance {
+    /// Instantiate a previously loaded native module.
+    pub fn add_loaded(&self, name: &str, loaded: Loaded, state_bytes: usize) -> Instance {
         let sh = &self.sh;
         let id = sh.insts.borrow().len();
         let mut state: Box<[u128]> = vec![0u128; state_bytes.max(1).div_ceil(16)].into_boxed_slice();
@@ -258,8 +286,11 @@ impl Runtime {
             id,
             name: name.to_string(),
             _ctx: ctx,
+            notify: sh.notify.clone(),
             table,
             handler: loaded.handler,
+            manifest: loaded.metadata.as_ref().map(|m| m.manifest.clone()).unwrap_or_default(),
+            registered: Cell::new(false),
             state_ptr,
             _state: state,
             _loaded: Some(loaded),
@@ -382,6 +413,45 @@ impl Runtime {
         drive(&self.sh, pin, level);
     }
 
+    /// Drive calls with Tokio's real clock on the current thread. This future is
+    /// intentionally !Send: handlers and module allocation remain serialized.
+    /// Virtual-time fixtures continue to use `run` directly.
+    pub async fn run_realtime(&self, duration: std::time::Duration) {
+        let end = tokio::time::Instant::now() + duration;
+        self.advance_realtime();
+        while tokio::time::Instant::now() < end {
+            self.step_realtime(end.saturating_duration_since(tokio::time::Instant::now())).await;
+        }
+    }
+
+    fn advance_realtime(&self) {
+        let (start, base) = self.sh.realtime.get().unwrap_or_else(|| {
+            let anchor = (tokio::time::Instant::now(), self.now());
+            self.sh.realtime.set(Some(anchor)); anchor
+        });
+        let target = base.saturating_add(start.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        self.run(target.saturating_sub(self.now()).min(u32::MAX as u64) as u32);
+    }
+
+    /// Wait for one readiness notification, module alarm, or timeout, then run
+    /// queued handlers. Cancellation preserves the real-clock anchor.
+    pub async fn step_realtime(&self, maximum: std::time::Duration) {
+        self.advance_realtime();
+        let next_alarm = self.sh.insts.borrow().iter().filter_map(|me| {
+            let s = me.st.borrow();
+            if s.ended { return None; }
+            s.alarms.iter().filter(|a| a.used && !a.waiting_net).map(|a| a.fire).min()
+        }).min();
+        let delay = next_alarm.map(|due| std::time::Duration::from_millis(due.saturating_sub(self.now())))
+            .unwrap_or(maximum).min(maximum);
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {},
+            _ = core::future::poll_fn(|cx| self.sh.network.borrow_mut().poll(&self.sh, cx)) => {},
+            _ = self.sh.notify.notified() => {},
+        }
+        self.advance_realtime();
+    }
+
     /// Run the instances for `ms` of virtual time: queued calls first, then alarms in time order.
     pub fn run(&self, ms: u32) {
         let sh = &*self.sh;
@@ -429,6 +499,7 @@ pub(crate) fn enqueue(me: &Inst, component: i32, method: i32, value: i32) {
     let mut st = me.st.borrow_mut();
     if st.queue.len() < QUEUE {
         st.queue.push_back(QItem { component, method, value, ..Default::default() });
+        me.notify.notify_one();
     }
 }
 
@@ -528,10 +599,12 @@ fn finish_call(sh: &Shared, me: &Rc<Inst>, component: i32, method: i32, rc: i32)
 
 /// A module that ended gives back what it still holds.
 fn release_all(sh: &Shared, me: &Rc<Inst>) {
+    sh.network.borrow_mut().release(sh, me.id);
     if let Some(component) = me.st.borrow().component {
         crate::link::release(sh, component);
     }
     let mut st = me.st.borrow_mut();
+    for alarm in &mut st.alarms { alarm.used = false; alarm.waiting_net = false; alarm.seq = alarm.seq.wrapping_add(1); }
     st.mem_leaked = st.mem.used;
     for i in 0..st.held.e.len() {
         let e = st.held.e[i];
@@ -686,7 +759,7 @@ fn fire_alarm(sh: &Shared, me: &Rc<Inst>, i: usize) {
     let late = now.saturating_sub(a.due);
     dispatch(sh, me, a.component, a.method, late.min(0x7fff_ffff) as i32, 0, &[]);
     let mut st = me.st.borrow_mut();
-    if st.ended || !st.alarms[i].used {
+    if st.ended || !st.alarms[i].used || st.alarms[i].seq != a.seq {
         return;
     }
     if a.interval == 0 {
@@ -717,10 +790,12 @@ pub(crate) fn deliver(sh: &Shared, t: &Rc<Inst>, slot: i32, start: u16, len: u16
         return ERR_BUSY;
     }
     st.queue.push_back(QItem { component, method, request: 3, pslot: slot, pstart: start, plen: len, from, id, value, lflags, time_us, ..Default::default() });
+    sh.notify.notify_one();
     0
 }
 
 impl Instance {
+    pub fn manifest(&self) -> Vec<u8> { self.me.manifest.clone() }
     pub fn runtime(&self) -> &Runtime {
         &self.rt
     }
@@ -748,11 +823,13 @@ impl Instance {
                 data: request[..request.len().min(INBOX_DATA)].to_vec(),
                 ..Default::default()
             });
+            self.rt.sh.notify.notify_one();
         }
     }
     /// HOST_STOP.
     pub fn stop(&self) {
         enqueue(&self.me, HOST_COMPONENT as i32, HOST_STOP as i32, 0);
+        self.rt.sh.notify.notify_one();
     }
     /// A request, no answer wanted. Delivered by the next [`Instance::run`].
     pub fn post(&self, component: i32, method: i32, data: &[u8]) -> i32 {
@@ -764,6 +841,7 @@ impl Instance {
             return ERR_BUSY;
         }
         st.queue.push_back(QItem { component, method, request: 1, data: data.to_vec(), ..Default::default() });
+        self.rt.sh.notify.notify_one();
         0
     }
     /// A request with an answer: a packet with a fresh id from the application; runs the simulation until it is handled and returns the message the module

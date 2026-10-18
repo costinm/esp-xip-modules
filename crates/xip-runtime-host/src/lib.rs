@@ -13,12 +13,14 @@
 pub mod fixtures;
 pub mod pool;
 mod hostcalls;
+mod network;
 mod runtime;
 mod link;
 mod wifi;
 mod power;
 
 pub use link::NativeTx;
+pub use network::Ports;
 pub use runtime::{Config, Event, Instance, MainMsg, Runtime, Trace, TraceKind};
 pub use xip_abi;
 
@@ -26,9 +28,13 @@ pub use xip_abi;
 pub type HandlerFn = unsafe extern "C" fn(*const xip_abi::Host, *mut u8, *const xip_abi::Call) -> i32;
 
 /// A module loaded from a shared object built for this host (see `scripts/build-host-modules.sh`).
+#[derive(Clone, serde::Deserialize)]
+pub struct ModuleMetadata { pub state_bytes: usize, pub manifest: Vec<u8> }
+
 pub struct Loaded {
     pub handler: HandlerFn,
     _lib: Option<libloading::Library>,
+    metadata: Option<ModuleMetadata>,
 }
 
 impl Loaded {
@@ -45,10 +51,14 @@ impl Loaded {
         let _ = std::fs::remove_file(&copy);
         let lib = lib.map_err(|e| format!("{}: {e}", path.as_ref().display()))?;
         let handler = unsafe { *lib.get::<HandlerFn>(b"xip_handle\0").map_err(|e| format!("xip_handle: {e}"))? };
-        Ok(Loaded { handler, _lib: Some(lib) })
+        let sidecar = path.as_ref().with_extension("json");
+        let metadata = if sidecar.exists() {
+            Some(serde_json::from_slice(&std::fs::read(&sidecar).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?)
+        } else { None };
+        Ok(Loaded { handler, _lib: Some(lib), metadata })
     }
     /// A handler linked into this process.
     pub fn linked(handler: HandlerFn) -> Loaded {
-        Loaded { handler, _lib: None }
+        Loaded { handler, _lib: None, metadata: None }
     }
 }
