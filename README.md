@@ -49,8 +49,8 @@ Build the runtime and example modules:
 scripts/build.sh esp32c6
 ```
 
-Start with [mod_hello](modules/mod_hello) for C or [mod_hw](modules/mod_hw) for Rust.
-[build-mod.sh](scripts/build-mod.sh) builds a module from its directory.
+Start with [mod_hw](modules/mod_hw) (a small module) or [mod_nan](modules/mod_nan) (work in progress).
+`scripts/build.sh` builds the runtime and every module (Rust; C modules were dropped, see git history); `scripts/gen.sh` generates the header, the API files and the console tables.
 The public module interface is `include/xip.h` (generated from the Rust declarations in `crates/xip-abi`, documented there: `cargo doc -p xip-abi`); the CBOR, JSON and text view of the APIs is in [api/](api/).
 
 The runtime starts installed modules that request auto-start. The optional console

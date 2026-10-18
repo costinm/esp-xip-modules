@@ -11,7 +11,6 @@ ABI_VERSION = _CONST["ABI_VERSION"]
 MAGIC = _CONST["DMOD_MAGIC"]
 HEADER_SIZE = _CONST["DMOD_HEADER_SIZE"]
 FLAG_FIXED_VMA = _CONST["DMOD_FLAG_FIXED_VMA"]
-FEATURES = {n[5:]: v for n, v in _CONST.items() if n.startswith("FEAT_")}
 
 # magic u32, abi u16, header_size u16, entry u32, image_size u32, tag u16, reserved u16,
 # code_vma u32, data_vma u32, stack_bytes u32, required_features u32, flags u32, state_bytes u32,

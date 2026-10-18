@@ -14,35 +14,6 @@
 
 static const char *TAG = "main";
 
-/* Both C and Rust runtimes use the product slot table in xip-runtime-esp/src/loader.rs.
- * The build script generates this C initializer from that same source. */
-const xip_slot_t main_slots[] = {
-#include "product-slots.inc"
-};
-
-/* Services modules can call (mod_test uses both). */
-enum { SERVICE_ECHO = 1, SERVICE_UPTIME_MS = 2 };
-
-static int on_service(void *ctx, const char *module, uint16_t tag, const uint8_t *req, size_t req_len,
-                      uint8_t *resp, size_t cap, size_t *resp_len, uint32_t timeout_ms)
-{
-    (void)ctx; (void)module; (void)timeout_ms;
-    if (tag == SERVICE_ECHO) {
-        if (req_len > cap) return XIP_ERR_SIZE;
-        if (req_len) memcpy(resp, req, req_len);
-        *resp_len = req_len;
-        return 0;
-    }
-    if (tag == SERVICE_UPTIME_MS) {
-        uint64_t ms = (uint64_t)(esp_timer_get_time() / 1000);
-        if (cap < sizeof(ms)) return XIP_ERR_SIZE;
-        memcpy(resp, &ms, sizeof(ms));
-        *resp_len = sizeof(ms);
-        return 0;
-    }
-    return XIP_ERR_NOTFOUND;
-}
-
 /* Saved credentials are a boot input in either application partition.
  * This is a volatile request; it never creates a separate profile setting. */
 static void boot_network(const xip_host_hooks_t *hooks)
@@ -80,14 +51,12 @@ void app_main(void)
 
     /* Module lifecycle and desired Wi-Fi state use the same hooks in either partition. */
     xip_host_hooks_t hooks = {
-        .call_service = on_service,
         .modules_info = xip_loader_modules_info, .module_start = xip_loader_start_named,
         .module_stop = xip_loader_stop_named, .module_manifest = xip_loader_manifest_named,
     };
     xip_wifi_install_hooks(&hooks);
     ESP_ERROR_CHECK(xip_host_init(&hooks));
-    const xip_loader_config_t cfg = {.slots = main_slots, .slot_count = sizeof(main_slots) / sizeof(main_slots[0]),
-                                        .partition = "data", .default_stack_bytes = 8192};
+    const xip_loader_config_t cfg = {.partition = "data", .default_stack_bytes = 8192};
     ESP_ERROR_CHECK(xip_loader_init(&cfg));
     /* What runs at boot is what is installed and asks for it in its manifest (the console module, if it is installed). */
     boot_network(&hooks);

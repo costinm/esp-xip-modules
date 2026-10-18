@@ -108,7 +108,7 @@
 // May fire anywhere in `[delay, delay + window]`; the host prefers the next wake window inside that range and fires at the end of the range at the latest.
 #define XIP_ALARM_FLEXIBLE 1
 
-// Do not fire while `connected()` is 0 (JobScheduler's network constraint). The alarm becomes due when connectivity returns and fires in the next wake window.
+// Do not fire while the network is down (`HOST_NETWORK` 0, `wifi.state`; JobScheduler's network constraint). The alarm becomes due when connectivity returns and fires in the next wake window.
 #define XIP_ALARM_CONNECTED 2
 
 // Also deliver `HOST_WAKE` whenever a wake window opens (a module that batches its work on windows).
@@ -129,51 +129,6 @@
 // The first address of a link (`link` component): `ADDR_LINK + n`. Frames arrive `from` it, and `send` to it transmits. It is below 2^31 so that
 // `link.open` can return an address like a result, positive, and an error stays negative. Module addresses (component numbers) are below it.
 #define XIP_ADDR_LINK 1073741824
-
-// `get_setting` / `set_setting`.
-#define XIP_FEAT_SETTINGS 1
-
-// `spi_open` / `spi_transfer` / `spi_close`.
-#define XIP_FEAT_SPI 2
-
-// The `ready_pin` option of `spi_open`.
-#define XIP_FEAT_SPI_READY 4
-
-// `i2c_transfer`.
-#define XIP_FEAT_I2C 8
-
-// `adc_read`.
-#define XIP_FEAT_ADC 16
-
-// `rgbled_write`.
-#define XIP_FEAT_RGBLED 32
-
-// `call_service`.
-#define XIP_FEAT_SERVICE 64
-
-// `ALARM_FLEXIBLE` windows are real (the host has a sleepy mode); otherwise a flexible alarm fires at its delay.
-#define XIP_FEAT_ALARM_FLEX 128
-
-// The Wi-Fi owner: the `wifi` and `wifi-tuning` components, `wifi_info` and `wifi_scan`.
-#define XIP_FEAT_WIFI 256
-
-// `serial_open` / `serial_write` / `serial_close`.
-#define XIP_FEAT_SERIAL 1024
-
-// `modules_info`, `module_start`, `module_stop`, `events_info`, `reset`.
-#define XIP_FEAT_MODULES 4096
-
-// `pkt_*` and `send`, `call.pkt` / `call.from` / `call.id`.
-#define XIP_FEAT_PACKETS 8192
-
-// `mem_alloc` / `mem_free`.
-#define XIP_FEAT_MEMORY 16384
-
-// Nonblocking TCP sockets and packet writes.
-#define XIP_FEAT_SOCKET 32768
-
-// Physical flash erase, pool-packet write and read; image policy belongs to callers.
-#define XIP_FEAT_FLASH 65536
 
 // Readiness callback; the module calls nonblocking `socket_read` or `socket_write`.
 #define XIP_SOCKET_MODE_DIRECT 0
@@ -243,6 +198,23 @@
 // Event: the state or the rate of the link changed.
 #define XIP_LINK_EVENT_STATE 3
 
+// A module's **port** (manifest key 9, an integer): a virtual, numbered place that frames are addressed to, and that is not tied to a link or an encoding.
+// The runtime binds the module to its port when it starts; every link that can deliver frames to a port does (the serial line, later UDP and TCP), and
+// the frame arrives like any link frame: `from` is the link, `id` the token of the far end, so the module answers with `send(from, .., id)` and
+// does not know which link it was. 0: none.
+//
+// * `PORT_CONSOLE` (1): the console. On the serial line these are the text lines a person types (newline delimited), and a record that
+//   starts with the byte 1 in a PPP frame (below).
+// * Ports are **datagram** (manifest key 9, packets and messages: the serial line, UDP later) or **stream** (key 10: TCP, QUIC streams later; a module can
+//   have both, and the two are separate numbers). A stream port listens on TCP port `PORT_NET + stream`: the console is stream 1 (5226), the flasher
+//   stream 2 (5227, the port the DMesh loader uses). Its connections arrive as socket events `(component, 0)` with `value = SOCKET_EVENT_*` and
+//   `id` = the handle, which the module reads and writes with `socket_read` / `socket_write` (the buffering and flow control are the socket's).
+// * Other ports are the first byte of a PPP-framed record on the serial line: `0x7e port bytes... 0x7e`, with `0x7d` escaping (the byte `^ 0x20`).
+//   DMesh's `0xf7` is the port of its QUIC packets.
+#define XIP_PORT_CONSOLE 1
+
+#define XIP_PORT_NET 5225
+
 // Who provides a link ([`LinkInfo::provider`]).
 #define XIP_LINK_NONE 0
 
@@ -282,6 +254,9 @@
 // Awake between the cycles of a request (`awake_ms`).
 #define XIP_POWER_AWAKE 3
 
+// `Hardware::version`.
+#define XIP_HARDWARE_VERSION 1
+
 #define XIP_VERSION 1
 
 #define XIP_ALG_SHA_256 33554441
@@ -304,33 +279,10 @@
 
 #define XIP_ERROR_CORRUPTION_DETECTED -151
 
-// argument of `spi_open`
-typedef struct {
-  // `sizeof(xip_spi_config)`, set by the caller; lets the struct grow.
-  uint32_t size;
-  // SPI controller: 2 or 3 (3 does not exist on ESP32-C6, 2 is used).
-  int32_t bus;
-  int32_t sck;
-  int32_t miso;
-  int32_t mosi;
-  int32_t cs;
-  // Clock; 0 = 1 MHz.
-  uint32_t hz;
-  // SPI mode 0..3.
-  int32_t mode;
-  // Optional busy/ready line (SX126x BUSY), -1 = none. The host waits for `ready_level` before and after each transfer.
-  int32_t ready_pin;
-  // Level that means ready (0 for BUSY).
-  int32_t ready_level;
-  // Longest wait for ready; 0 = 100.
-  uint32_t ready_timeout_ms;
-} xip_spi_config;
-
 // The host table, `xip_host`: every call a module can make, each documented below. The leading `user` argument of every call is `host->user`. Slots are `None` only if a host leaves one empty; slots past `size` do not exist.
 typedef struct {
   uint32_t abi_version;
   uint32_t size;
-  uint32_t features;
   void *user;
   // Write one line to the host's log.
   //
@@ -353,67 +305,6 @@ typedef struct {
   //
   // `uint64_t` — the time.
   uint64_t (*now_ms)(void *user);
-  // Answer the current request.
-  //
-  // TODO: not sure about this. The struct passed to the entrypint can take a return value, but 'data' is wrong - no copy if we can avoid it. Top priority is to port the packet pool from dmesh - so module can send messages. I don't think they need to 'respond', just send (like they do for log).
-  //
-  // The answer to a call with `flags` bit 0. By convention one CBOR item (a map keyed by field tags, like the
-  // request), delivered to whoever posted the request. No answer means an empty one.
-  //
-  // # Returns
-  //
-  // `int` — `OK`, `ERR_BUSY` if already answered, `ERR_ARG` if the call was not a request.
-  //
-  // # Arguments
-  //
-  // * `data` (`const uint8_t *`): The answer (copied).
-  // * `len` (`size_t`): Length.
-  int (*respond)(void *user, const uint8_t *data, size_t len);
-  // Send an event to the application.
-  //
-  // TODO: rename, like log and response it is a case of message send() - with component, method and data, and should use a borrowed packet from the pool for reduced copy. The modules receive and send messages - to other modules or remote.
-  //
-  // The module's output channel besides `respond` and `log`; main receives `(module, event_id, value_type, value)`.
-  //
-  // # Returns
-  //
-  // `int` — `OK`, or an error.
-  //
-  // # Arguments
-  //
-  // * `event_id` (`uint16_t`): Module-defined.
-  // * `value_type` (`uint8_t`): `VALUE_*`.
-  // * `value` (`const uint8_t *`): Payload (copied).
-  // * `len` (`size_t`): Length.
-  int (*emit)(void *user, uint16_t event_id, uint8_t value_type, const uint8_t *value, size_t len);
-  // Call a service of the application by tag.
-  //
-  // TODO: would be great if we can avoid this or discourage it. First because of 'synchronous', also complicates upgrades and other things. If messages can be used - would be great.
-  //
-  // The call is synchronous and must be short; `timeout_ms` bounds it. For anything slow ask the service to
-  // answer later through a request to this module.
-  //
-  // # Returns
-  //
-  // `int` — `OK`, `ERR_NOTFOUND` when nothing answers.
-  //
-  // # Arguments
-  //
-  // * `tag` (`uint16_t`): The service.
-  // * `request` (`const uint8_t *`): Request.
-  // * `request_len` (`size_t`): Length.
-  // * `response` (`uint8_t *`): Buffer for the answer.
-  // * `response_capacity` (`size_t`): Its size.
-  // * `response_len` (`size_t *`): Answer length.
-  // * `timeout_ms` (`uint32_t`): Longest wait.
-  int (*call_service)(void *user,
-                      uint16_t tag,
-                      const uint8_t *request,
-                      size_t request_len,
-                      uint8_t *response,
-                      size_t response_capacity,
-                      size_t *response_len,
-                      uint32_t timeout_ms);
   // Read a persistent setting of this module.
   //
   // Own namespace; the key is up to 15 bytes, the value up to 256.
@@ -454,186 +345,6 @@ typedef struct {
                      size_t key_len,
                      const uint8_t *value,
                      size_t value_len);
-  // Configure a pin.
-  //
-  // Also sets the initial level of an output. The pin belongs to the module until the instance is destroyed.
-  //
-  // # Returns
-  //
-  // `int` — `OK`, `ERR_BUSY` if another module owns it, `ERR_UNSUPPORTED` if main reserved it.
-  //
-  // # Arguments
-  //
-  // * `pin` (`int`): GPIO number.
-  // * `mode` (`int`): `GPIO_*`.
-  // * `pull` (`int`): `GPIO_PULL_*`.
-  // * `level` (`int`): Initial output level.
-  int (*gpio_config)(void *user, int pin, int mode, int pull, int level);
-  // Read a pin.
-  //
-  // # Returns
-  //
-  // `int` — level 0/1, or a negative error.
-  //
-  // # Arguments
-  //
-  // * `pin` (`int`): A pin configured by this module.
-  int (*gpio_read)(void *user, int pin);
-  // Set an output level.
-  //
-  // # Returns
-  //
-  // `int` — `OK` or an error.
-  //
-  // # Arguments
-  //
-  // * `pin` (`int`): A pin configured by this module.
-  // * `level` (`int`): 0 or 1.
-  int (*gpio_write)(void *user, int pin, int level);
-  // Report the edges of a pin.
-  //
-  // An edge becomes a call `(component, method)` with `value` = the pin level. The interrupt itself never runs
-  // module code; edges that arrive while the queue is full are counted and dropped.
-  //
-  // # Returns
-  //
-  // `int` — `OK` or an error.
-  //
-  // # Arguments
-  //
-  // * `pin` (`int`): The pin.
-  // * `edge` (`int`): `IRQ_*`.
-  // * `component` (`int`): Returned in the call.
-  // * `method` (`int`): Returned in the call.
-  int (*irq_register)(void *user, int pin, int edge, int component, int method);
-  // Stop reporting a pin.
-  //
-  // # Returns
-  //
-  // `int` — `OK`, `ERR_NOTFOUND`.
-  //
-  // # Arguments
-  //
-  // * `pin` (`int`): The pin.
-  int (*irq_unregister)(void *user, int pin);
-  // Mask or unmask a registered pin.
-  //
-  // # Returns
-  //
-  // `int` — `OK`, `ERR_NOTFOUND`.
-  //
-  // # Arguments
-  //
-  // * `pin` (`int`): The pin.
-  // * `enabled` (`int`): 1 unmask, 0 mask.
-  int (*irq_enable)(void *user, int pin, int enabled);
-  // Open a full-duplex SPI device.
-  //
-  // The first open of a controller initialises it with the pins of the config; later opens must use the same
-  // pins. A controller that main initialised is shared as is.
-  //
-  // # Returns
-  //
-  // `int` — a handle (>= 0) or a negative error.
-  //
-  // # Arguments
-  //
-  // * `config` (`const xip_spi_config *`): See `spi_config`.
-  int (*spi_open)(void *user, const xip_spi_config *config);
-  // One chip-select cycle.
-  //
-  // `tx` and `rx` are both `len` bytes (`rx` may be NULL). Bounded; waits for `ready_pin` when configured.
-  //
-  // # Returns
-  //
-  // `int` — `OK`, `ERR_BUSY` when `ready_pin` never became ready, `ERR_IO`.
-  //
-  // # Arguments
-  //
-  // * `handle` (`int`): From `spi_open`.
-  // * `tx` (`const uint8_t *`): Bytes to send.
-  // * `rx` (`uint8_t *`): Bytes received, or NULL.
-  // * `len` (`size_t`): Length.
-  int (*spi_transfer)(void *user, int handle, const uint8_t *tx, uint8_t *rx, size_t len);
-  // Release an SPI device.
-  //
-  // Also done when the instance is destroyed.
-  //
-  // # Returns
-  //
-  // `int` — `OK`, `ERR_ARG`.
-  //
-  // # Arguments
-  //
-  // * `handle` (`int`): From `spi_open`.
-  int (*spi_close)(void *user, int handle);
-  // Write then read on an I2C bus.
-  //
-  // Either direction may be empty. The pins are held for the call only.
-  //
-  // # Returns
-  //
-  // `int` — `OK` or an error.
-  //
-  // # Arguments
-  //
-  // * `port` (`int`): Controller.
-  // * `sda` (`int`): Pin.
-  // * `scl` (`int`): Pin.
-  // * `frequency` (`uint32_t`): Hz.
-  // * `address` (`uint8_t`): 7-bit address.
-  // * `tx` (`const uint8_t *`): Bytes to write.
-  // * `tx_len` (`size_t`): Length.
-  // * `rx` (`uint8_t *`): Buffer for the read.
-  // * `rx_len` (`size_t`): Length.
-  // * `timeout_ms` (`uint32_t`): Longest wait.
-  int (*i2c_transfer)(void *user,
-                      int port,
-                      int sda,
-                      int scl,
-                      uint32_t frequency,
-                      uint8_t address,
-                      const uint8_t *tx,
-                      size_t tx_len,
-                      uint8_t *rx,
-                      size_t rx_len,
-                      uint32_t timeout_ms);
-  // One-shot 12-bit reading.
-  //
-  // `unit` and `channel` may be NULL.
-  //
-  // # Returns
-  //
-  // `int` — `OK` or an error.
-  //
-  // # Arguments
-  //
-  // * `pin` (`int`): GPIO number.
-  // * `ref_mv` (`uint32_t`): Reference for the millivolt value.
-  // * `raw` (`int *`): Raw reading.
-  // * `mv` (`uint32_t *`): Millivolts.
-  // * `unit` (`int *`): ADC unit used.
-  // * `channel` (`int *`): ADC channel used.
-  int (*adc_read)(void *user,
-                  int pin,
-                  uint32_t ref_mv,
-                  int *raw,
-                  uint32_t *mv,
-                  int *unit,
-                  int *channel);
-  // Set a WS2812-style LED.
-  //
-  // # Returns
-  //
-  // `int` — `OK` or an error.
-  //
-  // # Arguments
-  //
-  // * `pin` (`int`): The data pin.
-  // * `red` (`uint8_t`): 0..255.
-  // * `green` (`uint8_t`): 0..255.
-  // * `blue` (`uint8_t`): 0..255.
-  int (*rgbled_write)(void *user, int pin, uint8_t red, uint8_t green, uint8_t blue);
   // Call me later, once or periodically.
   //
   // At `delay_ms` from now the host calls the handler with `(component, method)` and `value` = lateness in
@@ -671,66 +382,9 @@ typedef struct {
   //
   // * `alarm` (`int`): An id from `alarm_set`.
   int (*alarm_cancel)(void *user, int alarm);
-  // Does main have a network path.
-  //
-  // Cheap. Use `ALARM_CONNECTED` to defer work until it is true.
-  //
-  // # Returns
-  //
-  // `int` — 1 yes, 0 no.
-  int (*connected)(void *user);
-  // State of the Wi-Fi.
-  //
-  // The CBOR of the `wifi.state` method: the map and its fields are defined in `api/wifi.API.md`; the component modules use
-  // (`state`) is in `crates/xip-abi/src/wifi.rs`.
-  //
-  // # Returns
-  //
-  // `int` — the length of the answer, or a negative error (`ERR_SIZE`: the buffer is too small).
-  //
-  // # Arguments
-  //
-  // * `out` (`uint8_t *`): Buffer.
-  // * `capacity` (`size_t`): Its size.
-  int (*wifi_info)(void *user, uint8_t *out, size_t capacity);
-  // Receive the lines typed on the board's serial port.
-  //
-  // The host owns the port: it picks USB-Serial/JTAG or UART0, runs the driver tuned for the board, edits the line (backspace)
-  // and starts and stops all of it. Each line becomes a packet `(component, method)` to this module (`call.pkt`, `from` = `ADDR_MAIN`, `id` 0), `data` the line without
-  // a newline. Nothing is answered: the module writes what it has to say with `serial_write`, whenever it has it. The port is
-  // released by `serial_close` or when the module ends.
-  //
-  // # Returns
-  //
-  // `int` — `OK`, `ERR_UNSUPPORTED`, `ERR_BUSY` if another module has the port, `ERR_IO` if there is no port.
-  //
-  // # Arguments
-  //
-  // * `component` (`int`): Returned in the call.
-  // * `method` (`int`): Returned in the call.
-  int (*serial_open)(void *user, int component, int method);
-  // Write text to the serial port.
-  //
-  // For output that is not the answer to a line.
-  //
-  // # Returns
-  //
-  // `int` — the bytes taken, or a negative error (`ERR_NOTFOUND` when this module does not have the port).
-  //
-  // # Arguments
-  //
-  // * `data` (`const uint8_t *`): Text.
-  // * `len` (`size_t`): Length.
-  int (*serial_write)(void *user, const uint8_t *data, size_t len);
-  // Give the serial port back.
-  //
-  // # Returns
-  //
-  // `int` — `OK`; the driver is released in the background.
-  int (*serial_close)(void *user);
   // Every module slot.
   //
-  // One CBOR array with a map per slot, keyed as the `slot` record of `modules/mod_console/API.md`: name, tag, installed, running,
+  // One CBOR array with a map per slot, keyed as the `slot` record of `modules/mod_con/API.md`: name, tag, installed, running,
   // version, last result, runs, duration of the last run, stack high-water mark, result of the last image check.
   //
   // # Returns
@@ -772,20 +426,6 @@ typedef struct {
   // * `name` (`const uint8_t *`): Slot name.
   // * `name_len` (`size_t`): Length.
   int (*module_stop)(void *user, const uint8_t *name, size_t name_len);
-  // The last events modules emitted.
-  //
-  // One CBOR array, oldest first, of maps keyed as the `event` record of `modules/mod_console/API.md`: module, event id, and the
-  // value as text (a text value as it is, any other as hex). The host keeps the last 16.
-  //
-  // # Returns
-  //
-  // `int` — the length of the answer.
-  //
-  // # Arguments
-  //
-  // * `out` (`uint8_t *`): Buffer.
-  // * `capacity` (`size_t`): Its size.
-  int (*events_info)(void *user, uint8_t *out, size_t capacity);
   // Restart the device.
   //
   // # Returns
@@ -940,20 +580,6 @@ typedef struct {
                          size_t name_len,
                          uint8_t *out,
                          size_t capacity);
-  // The networks in range.
-  //
-  // Never blocks (first call starts the scan and returns `ERR_BUSY`; poll about once a second). The answer is the CBOR of the
-  // `wifi.scan` method, defined in `api/wifi.API.md`.
-  //
-  // # Returns
-  //
-  // `int` — the length of the answer, `ERR_BUSY` while the scan is running, `ERR_UNSUPPORTED` without Wi-Fi, `ERR_IO` if the driver refused, `ERR_SIZE` when the buffer is too small.
-  //
-  // # Arguments
-  //
-  // * `out` (`uint8_t *`): Buffer.
-  // * `capacity` (`size_t`): Its size.
-  int (*wifi_scan)(void *user, uint8_t *out, size_t capacity);
   // Free memory of the device.
   //
   // RAM is the scarce resource on these chips, so the host reports it to any module that asks (the console's `heap`). One CBOR map of
@@ -1017,27 +643,6 @@ typedef struct {
   //
   // * `kind` (`int`): What to print (above).
   int (*heap_dump)(void *user, int kind);
-  // Register a nonblocking TCP listener.
-  //
-  // The host owns the listener and accepted sockets. It calls `(component, method)` on the module worker for socket events; `call.value` is `SOCKET_EVENT_*` and `call.id` is the opaque socket handle. The first accepted-socket event is `OPEN` with zero data length. A handle belongs to this instance and is closed when it stops. The listener can be closed with `socket_close`. `SOCKET_MODE_DIRECT` reports readiness only. `SOCKET_MODE_BUFFERED` reads into pool packets and reports `DATA`; the module must release or keep each packet. No callback runs on the poll task.
-  //
-  // # Returns
-  //
-  // `int` — `OK`; `ERR_ARG`, `ERR_BUSY`, `ERR_IO`, `ERR_UNSUPPORTED`.
-  //
-  // # Arguments
-  //
-  // * `port` (`uint16_t`): TCP listen port.
-  // * `mode` (`uint32_t`): `SOCKET_MODE_DIRECT` or `SOCKET_MODE_BUFFERED`.
-  // * `component` (`int32_t`): Component of socket events.
-  // * `method` (`int32_t`): Method of socket events.
-  // * `listener` (`uint32_t *`): Receives an opaque listener handle.
-  int (*tcp_accept)(void *user,
-                    uint16_t port,
-                    uint32_t mode,
-                    int32_t component,
-                    int32_t method,
-                    uint32_t *listener);
   // Nonblocking read into module memory or a packet span.
   //
   // Only for direct-mode accepted sockets. One call may read fewer than `len` bytes. The buffer is borrowed for this call only. A packet span may be passed as `out` while the module owns its mutable lease.
@@ -1197,7 +802,7 @@ typedef struct {
   // Device is `{1: uptime_ms, 2: chip, 3: flash_size, 4: active_partition_label,
   // 5: active_partition_address, 6: active_partition_size}`. Chip is an ESP chip model number;
   // partition fields are omitted when the platform cannot identify its running partition.
-  // Wi-Fi, heap and modules reuse `wifi_info`, `heap_info` and `modules_info` records;
+  // Wi-Fi, heap and modules reuse the Wi-Fi state, `heap_info` and `modules_info` records;
   // unavailable Wi-Fi is an empty map and unavailable module enumeration is an empty array.
   // Components is `{component: {method: {1: updated_ms, 2: status_map}}}`.
   // Times are milliseconds since boot. Built-in records are read during the call; contributed
@@ -1285,6 +890,28 @@ typedef struct {
   uint64_t id;
 } xip_call;
 
+// argument of `spi_open`
+typedef struct {
+  // `sizeof(xip_spi_config)`, set by the caller; lets the struct grow.
+  uint32_t size;
+  // SPI controller: 2 or 3 (3 does not exist on ESP32-C6, 2 is used).
+  int32_t bus;
+  int32_t sck;
+  int32_t miso;
+  int32_t mosi;
+  int32_t cs;
+  // Clock; 0 = 1 MHz.
+  uint32_t hz;
+  // SPI mode 0..3.
+  int32_t mode;
+  // Optional busy/ready line (SX126x BUSY), -1 = none. The host waits for `ready_level` before and after each transfer.
+  int32_t ready_pin;
+  // Level that means ready (0 for BUSY).
+  int32_t ready_level;
+  // Longest wait for ready; 0 = 100.
+  uint32_t ready_timeout_ms;
+} xip_spi_config;
+
 // first 64 bytes of a module image
 typedef struct __attribute__((packed)) {
   // `DMOD_MAGIC`.
@@ -1307,7 +934,7 @@ typedef struct __attribute__((packed)) {
   uint32_t data_vma;
   // Stack the deepest handler needs; the worker uses the largest of its modules. 0 = host default.
   uint32_t stack_bytes;
-  // `FEAT_*` the module cannot run without.
+  // Reserved, zero: it was a set of host feature bits. What a module uses from the host is found at run time with `get_component`.
   uint32_t required_features;
   // `DMOD_FLAG_*`.
   uint32_t flags;
@@ -1655,6 +1282,194 @@ typedef struct {
   int (*dump_tasks)(void *ctx);
 } xip_power;
 
+// The `hw` component table.
+typedef struct {
+  // `HARDWARE_VERSION`.
+  uint32_t version;
+  // `sizeof(xip_hardware)`: members past it do not exist.
+  uint32_t size;
+  // Configure a pin.
+  //
+  // Also sets the initial level of an output. The pin belongs to the module until the instance is destroyed.
+  //
+  // # Returns
+  //
+  // `int` — `OK`, `ERR_BUSY` if another module owns it, `ERR_UNSUPPORTED` if main reserved it.
+  //
+  // # Arguments
+  //
+  // * `pin` (`int`): GPIO number.
+  // * `mode` (`int`): `GPIO_*`.
+  // * `pull` (`int`): `GPIO_PULL_*`.
+  // * `level` (`int`): Initial output level.
+  int (*gpio_config)(void *ctx, int pin, int mode, int pull, int level);
+  // Read a pin.
+  //
+  // # Returns
+  //
+  // `int` — level 0/1, or a negative error.
+  //
+  // # Arguments
+  //
+  // * `pin` (`int`): A pin configured by this module.
+  int (*gpio_read)(void *ctx, int pin);
+  // Set an output level.
+  //
+  // # Returns
+  //
+  // `int` — `OK` or an error.
+  //
+  // # Arguments
+  //
+  // * `pin` (`int`): A pin configured by this module.
+  // * `level` (`int`): 0 or 1.
+  int (*gpio_write)(void *ctx, int pin, int level);
+  // Report the edges of a pin.
+  //
+  // An edge becomes a call `(component, method)` with `value` = the pin level. The interrupt itself never runs
+  // module code; edges that arrive while the queue is full are counted and dropped.
+  //
+  // # Returns
+  //
+  // `int` — `OK` or an error.
+  //
+  // # Arguments
+  //
+  // * `pin` (`int`): The pin.
+  // * `edge` (`int`): `IRQ_*`.
+  // * `component` (`int`): Returned in the call.
+  // * `method` (`int`): Returned in the call.
+  int (*irq_register)(void *ctx, int pin, int edge, int component, int method);
+  // Stop reporting a pin.
+  //
+  // # Returns
+  //
+  // `int` — `OK`, `ERR_NOTFOUND`.
+  //
+  // # Arguments
+  //
+  // * `pin` (`int`): The pin.
+  int (*irq_unregister)(void *ctx, int pin);
+  // Mask or unmask a registered pin.
+  //
+  // # Returns
+  //
+  // `int` — `OK`, `ERR_NOTFOUND`.
+  //
+  // # Arguments
+  //
+  // * `pin` (`int`): The pin.
+  // * `enabled` (`int`): 1 unmask, 0 mask.
+  int (*irq_enable)(void *ctx, int pin, int enabled);
+  // Open a full-duplex SPI device.
+  //
+  // The first open of a controller initialises it with the pins of the config; later opens must use the same
+  // pins. A controller that main initialised is shared as is.
+  //
+  // # Returns
+  //
+  // `int` — a handle (>= 0) or a negative error.
+  //
+  // # Arguments
+  //
+  // * `config` (`const xip_spi_config *`): See `spi_config`.
+  int (*spi_open)(void *ctx, const xip_spi_config *config);
+  // One chip-select cycle.
+  //
+  // `tx` and `rx` are both `len` bytes (`rx` may be NULL). Bounded; waits for `ready_pin` when configured.
+  //
+  // # Returns
+  //
+  // `int` — `OK`, `ERR_BUSY` when `ready_pin` never became ready, `ERR_IO`.
+  //
+  // # Arguments
+  //
+  // * `handle` (`int`): From `spi_open`.
+  // * `tx` (`const uint8_t *`): Bytes to send.
+  // * `rx` (`uint8_t *`): Bytes received, or NULL.
+  // * `len` (`size_t`): Length.
+  int (*spi_transfer)(void *ctx, int handle, const uint8_t *tx, uint8_t *rx, size_t len);
+  // Release an SPI device.
+  //
+  // Also done when the instance is destroyed.
+  //
+  // # Returns
+  //
+  // `int` — `OK`, `ERR_ARG`.
+  //
+  // # Arguments
+  //
+  // * `handle` (`int`): From `spi_open`.
+  int (*spi_close)(void *ctx, int handle);
+  // Write then read on an I2C bus.
+  //
+  // Either direction may be empty. The pins are held for the call only.
+  //
+  // # Returns
+  //
+  // `int` — `OK` or an error.
+  //
+  // # Arguments
+  //
+  // * `port` (`int`): Controller.
+  // * `sda` (`int`): Pin.
+  // * `scl` (`int`): Pin.
+  // * `frequency` (`uint32_t`): Hz.
+  // * `address` (`uint8_t`): 7-bit address.
+  // * `tx` (`const uint8_t *`): Bytes to write.
+  // * `tx_len` (`size_t`): Length.
+  // * `rx` (`uint8_t *`): Buffer for the read.
+  // * `rx_len` (`size_t`): Length.
+  // * `timeout_ms` (`uint32_t`): Longest wait.
+  int (*i2c_transfer)(void *ctx,
+                      int port,
+                      int sda,
+                      int scl,
+                      uint32_t frequency,
+                      uint8_t address,
+                      const uint8_t *tx,
+                      size_t tx_len,
+                      uint8_t *rx,
+                      size_t rx_len,
+                      uint32_t timeout_ms);
+  // One-shot 12-bit reading.
+  //
+  // `unit` and `channel` may be NULL.
+  //
+  // # Returns
+  //
+  // `int` — `OK` or an error.
+  //
+  // # Arguments
+  //
+  // * `pin` (`int`): GPIO number.
+  // * `ref_mv` (`uint32_t`): Reference for the millivolt value.
+  // * `raw` (`int *`): Raw reading.
+  // * `mv` (`uint32_t *`): Millivolts.
+  // * `unit` (`int *`): ADC unit used.
+  // * `channel` (`int *`): ADC channel used.
+  int (*adc_read)(void *ctx,
+                  int pin,
+                  uint32_t ref_mv,
+                  int *raw,
+                  uint32_t *mv,
+                  int *unit,
+                  int *channel);
+  // Set a WS2812-style LED.
+  //
+  // # Returns
+  //
+  // `int` — `OK` or an error.
+  //
+  // # Arguments
+  //
+  // * `pin` (`int`): The data pin.
+  // * `red` (`uint8_t`): 0..255.
+  // * `green` (`uint8_t`): 0..255.
+  // * `blue` (`uint8_t`): 0..255.
+  int (*rgbled_write)(void *ctx, int pin, uint8_t red, uint8_t green, uint8_t blue);
+} xip_hardware;
+
 _Static_assert(sizeof(xip_spi_config) == 44, "xip_spi_config layout");
 _Static_assert(sizeof(xip_dmod_header) == 64, "xip_dmod_header layout");
 _Static_assert(sizeof(xip_wifi_intent) == 212, "xip_wifi_intent layout");
@@ -1667,7 +1482,7 @@ _Static_assert(sizeof(xip_power_sleep) == 12, "xip_power_sleep layout");
 _Static_assert(sizeof(xip_power_info) == 76, "xip_power_info layout");
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(sizeof(xip_call) == 48, "xip_call layout");
-_Static_assert(sizeof(xip_host) == 244, "xip_host layout");
+_Static_assert(sizeof(xip_host) == 148, "xip_host layout");
 #endif
 
 /* Non-zero when the host's table includes this call (older hosts are shorter). */

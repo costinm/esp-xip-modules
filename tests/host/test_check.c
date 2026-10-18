@@ -19,7 +19,7 @@ static xip_dmod_header good(void)
 
 static void test_dmod(void)
 {
-    xip_slot_rules_t pic = {.tag = 2, .slot_offset = 0x10000, .slot_size = 0x10000, .host_features = 0xff, .max_stack_bytes = 65536};
+    xip_slot_rules_t pic = {.slot_offset = 0x10000, .slot_size = 0x10000, .max_stack_bytes = 65536};
     xip_slot_rules_t fixed = pic;
     fixed.fixed_vma = true; fixed.code_base = 0x40300000; fixed.data_base = 0x3f700000;
 
@@ -42,8 +42,8 @@ static void test_dmod(void)
     h = good(); h.entry_offset = 0x10; CHECK(xip_dmod_check(&h, &pic) == EMD_BAD_ENTRY);
     h = good(); h.entry_offset = 0x200; CHECK(xip_dmod_check(&h, &pic) == EMD_BAD_ENTRY);
     h = good(); h.entry_offset = 0x45; CHECK(xip_dmod_check(&h, &pic) == EMD_BAD_ENTRY);
-    h = good(); h.tag = 3; CHECK(xip_dmod_check(&h, &pic) == EMD_WRONG_TAG);
-    h = good(); h.required_features = 0x1000; CHECK(xip_dmod_check(&h, &pic) == EMD_MISSING_FEATURE);
+    h = good(); h.tag = 0; CHECK(xip_dmod_check(&h, &pic) == EMD_BAD_HEADER);          /* the component number is the image's own */
+    h = good(); h.required_features = 0x1000; CHECK(xip_dmod_check(&h, &pic) == EMD_OK);  /* reserved: images from before components still load */
     h = good(); h.flags = XIP_DMOD_FLAG_FIXED_VMA; CHECK(xip_dmod_check(&h, &pic) == EMD_BAD_PLACEMENT);
     h = good(); h.code_vma = 1; CHECK(xip_dmod_check(&h, &pic) == EMD_BAD_PLACEMENT);
 
@@ -67,8 +67,8 @@ static void test_package(const char *path, int cpu, uint32_t slot_offset)
     uint16_t blocks;
     memcpy(&blocks, pkg + 65 + 64 + 18, 2);
     const uint8_t *image = pkg + 345 + (size_t)blocks * 8;
-    /* the image inside is a module for slot tag 2 and passes the device's header check */
-    xip_slot_rules_t rules = {.tag = 2, .slot_offset = slot_offset, .slot_size = 0x10000, .host_features = 0xff,
+    /* the image inside passes the device's header check where it was found */
+    xip_slot_rules_t rules = {.slot_offset = slot_offset, .slot_size = 0x10000,
                                  .max_stack_bytes = 65536, .fixed_vma = cpu != 13,
                                  .code_base = cpu == 9 ? 0x43000000 : 0x40300000, .data_base = cpu == 9 ? 0x3d000000 : 0x3f700000};
     CHECK(xip_dmod_check((const xip_dmod_header *)image, &rules) == EMD_OK);

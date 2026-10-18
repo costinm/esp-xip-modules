@@ -46,18 +46,16 @@ class Dmod(unittest.TestCase):
 
 
 class Slots(unittest.TestCase):
-    def test_shared_product_slots_preserve_the_installed_layout(self):
-        s = mkmod.slots()
-        self.assertEqual(s["console"], (20, 0x50000, 0x10000))
-        self.assertEqual(s["test"], (2, 0x40000, 0x10000))
-        self.assertEqual(s, mkmod.slots(os.path.join(ROOT, "main", "main.c")))
-        tags = [t for t, _, _ in s.values()]
-        self.assertEqual(len(set(tags)), len(tags))
-        spans = sorted((o, o + z) for _, o, z in s.values())
-        for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
-            self.assertLessEqual(a1, b0)
-        for _, o, z in s.values():
-            self.assertEqual((o % 0x10000, z % 0x10000), (0, 0))
+    def test_a_module_without_an_api_gets_its_name_and_number(self):
+        m, _ = cbor_decode(mkmod.manifest_with(b"", name="nan", tag=46))
+        self.assertEqual((m[1], m[2]), ("nan", 46))
+        with self.assertRaises(SystemExit):
+            mkmod.manifest_with(b"")        # nothing to name it by
+
+    def test_the_identity_of_a_generated_manifest(self):
+        name, tag = mkmod.manifest_identity(bytes.fromhex(Manifest.DEMO))
+        m, _ = cbor_decode(bytes.fromhex(Manifest.DEMO))
+        self.assertEqual((name, tag), (m[1], m[2]))
 
     def test_chip_windows_match_the_loader(self):
         loader = read("components", "xip_loader", "src", "loader.c")
@@ -182,7 +180,7 @@ class DeviceScript(unittest.TestCase):
         sign.keygen(key)
         mods = os.path.join(d, "esp32c6", "modules")
         os.makedirs(mods)
-        open(os.path.join(mods, "mod_test.dmod"), "wb").write(dmod.pack(b"\0" * 4000, 0x44, 2))
+        open(os.path.join(mods, "mod_rtest.dmod"), "wb").write(dmod.pack(b"\0" * 4000, 0x44, 2))
         device = FakeDevice(sign.public_key(key), wf.CHIPS["esp32c6"])
         board = dict(name="fake", chip="esp32c6", host="x", key=key)
         device_test.run_board(board, d, t=device, sleep=lambda s: None)
@@ -192,65 +190,6 @@ class DeviceScript(unittest.TestCase):
         bad.upload = lambda body, name=None: "OK 1"
         with self.assertRaises(device_test.Failed):
             device_test.run_board(board, d, t=bad, sleep=lambda s: None)
-
-
-@unittest.skipUnless(shutil.which("xtensa-esp32-elf-gcc") or shutil.which("riscv32-esp-elf-gcc"), "needs the ESP toolchains (. ./env.sh)")
-class Build(unittest.TestCase):
-    """The modules really build, and what comes out is what the loader accepts."""
-
-    def build(self, chip, slot, src):
-        tool = mkmod.CHIPS[chip]["prefix"] + "-gcc"
-        if not shutil.which(tool):
-            self.skipTest(tool)
-        out = os.path.join(tempfile.mkdtemp(), "m.dmod")
-        return mkmod.build(chip, slot, [os.path.join(ROOT, "modules", src)], out)
-
-    def test_all_chips(self):
-        for chip in mkmod.CHIPS:
-            for slot, src in (("hw", "mod_hello/mod_hello.c"), ("test", "mod_test/mod_test.c")):
-                with self.subTest(chip=chip, slot=slot):
-                    image = self.build(chip, slot, src)
-                    h = dmod.unpack(image)
-                    cfg = mkmod.CHIPS[chip]
-                    tag, offset, size = mkmod.slots()[slot]
-                    self.assertEqual(h["tag"], tag)
-                    self.assertLessEqual(len(image), size)
-                    self.assertEqual(h["flags"] & 1, 1 if cfg["fixed"] else 0)
-                    self.assertEqual(h["code_vma"], cfg["code_base"] + offset if cfg["fixed"] else 0)
-
-    def test_the_package_passes_the_device_checks(self):
-        exe = os.path.join(tempfile.mkdtemp(), "test_check")
-        subprocess.run(["gcc", "-Wall", "-Wextra", "-fsanitize=address,undefined", "-I", "include", "-I", "components/xip_loader/include",
-                        "-I", "tests/host", "-o", exe, "tests/host/test_check.c",
-                        "components/xip_loader/src/xip_check.c"], cwd=ROOT, check=True)
-        key = os.path.join(tempfile.mkdtemp(), "k.pem")
-        sign.keygen(key)
-        for chip, cpu in (("esp32c6", 13), ("esp32s3", 9), ("esp32", 0)):
-            if not shutil.which(mkmod.CHIPS[chip]["prefix"] + "-gcc"):
-                continue
-            image = self.build(chip, "test", "mod_test/mod_test.c")
-            path = os.path.join(tempfile.mkdtemp(), "t.wlpkg")
-            open(path, "wb").write(sign.make_package(key, chip, 1, "test", image, "module"))
-            r = subprocess.run([exe, path, "test", str(cpu), hex(mkmod.slots()["test"][1])], capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, chip + "\n" + r.stdout)
-
-    def test_a_module_with_state_is_rejected(self):
-        src = os.path.join(tempfile.mkdtemp(), "bad.c")
-        open(src, "w").write('#include "xip_module.h"\nstatic volatile int counter;\n'
-                             'XIP_HANDLER(bad)(const xip_host *h, void *s, const xip_call *c) { (void)h; (void)s; (void)c; return ++counter; }\n')
-        chip = "esp32c6" if shutil.which("riscv32-esp-elf-gcc") else "esp32"
-        with self.assertRaises(SystemExit) as cm:
-            mkmod.build(chip, "lora", [src], os.path.join(tempfile.mkdtemp(), "x.dmod"))
-        self.assertIn(".bss", str(cm.exception))
-
-    def test_a_module_needing_libc_is_rejected(self):
-        src = os.path.join(tempfile.mkdtemp(), "bad.c")
-        open(src, "w").write('#include "xip_module.h"\nextern int puts(const char *);\n'
-                             'XIP_HANDLER(bad)(const xip_host *h, void *s, const xip_call *c) { (void)h; (void)s; (void)c; return puts("x"); }\n')
-        chip = "esp32c6" if shutil.which("riscv32-esp-elf-gcc") else "esp32"
-        with self.assertRaises(SystemExit) as cm:
-            mkmod.build(chip, "lora", [src], os.path.join(tempfile.mkdtemp(), "x.dmod"))
-        self.assertIn("puts", str(cm.exception))
 
 
 def cbor_decode(data, pos=0):
@@ -294,7 +233,6 @@ class Manifest(unittest.TestCase):
         m, _ = cbor_decode(mkmod.manifest_with(base, autostart="serve"))
         self.assertEqual(m[6], "serve")
         self.assertEqual(m[4][0][0], "Row")
-        self.assertEqual(mkmod.manifest_with(b""), b"")
 
     def test_flash_slot_declaration_is_in_manifest(self):
         base = bytes.fromhex(self.DEMO)
@@ -320,21 +258,12 @@ class Manifest(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.splitext(api)[0] + ".manifest"), api)
 
     def test_a_built_module_carries_its_manifest(self):
-        image_path = os.path.join(ROOT, "target", "out", "esp32c6", "modules", "mod_test.dmod")
+        image_path = os.path.join(ROOT, "target", "out", "esp32c6", "modules", "mod_rtest.dmod")
         if not os.path.exists(image_path):
             self.skipTest("no built image (scripts/build.sh)")
         m, _ = cbor_decode(dmod.manifest_of(open(image_path, "rb").read()))
         self.assertEqual((m[1], m[2]), ("test", 2))
         self.assertIn("echo", [x[2] for x in m[3]])
-
-
-class SlotTable(unittest.TestCase):
-    def test_a_rust_slot_table_is_read_like_the_c_one(self):
-        path = os.path.join(tempfile.mkdtemp(), "slots.rs")
-        with open(path, "w") as f:
-            f.write('static S: [Slot; 2] = [slot!("lora", 43, 0x00000, 0x10000), slot!("hw", 45, 0x10000, 0x10000)];\n')
-        self.assertEqual(mkmod.slots(path), {"lora": (43, 0, 0x10000), "hw": (45, 0x10000, 0x10000)})
-        self.assertIn("test", mkmod.slots())      # shared product table
 
 
 class UpdateNetwork(unittest.TestCase):

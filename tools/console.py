@@ -6,11 +6,11 @@
 
 Resetting the board, including the five quick resets that start the loader, is esp-wifi-loader's reset.py.
 
-Commands (`help` on the board lists them): status, start, stop, events, wifi, loader, help, reset, COMPONENT.METHOD key=value. The port comes from tests/device.toml.
+Commands (`help` on the board lists them): status, start, stop, wifi, loader, help, reset, COMPONENT.METHOD key=value. The port comes from tests/device.toml.
 
 Opening the port does not reset the board (the USB-Serial/JTAG block resets the chip only when DTR goes low while RTS
-is high; this tool leaves the lines alone). What modules log() and emit() appears as lines like
-  W (1234) xip: test: mod_test log
+is high; this tool leaves the lines alone). What modules log() appears as lines like
+  W (1234) xip: test: mod_rtest log
   W (1250) main: test event 0x7eff: pass=28 fail=0
 """
 import argparse

@@ -29,18 +29,17 @@
             };
             nativeBuildInputs = [ pkgs.makeWrapper ];
             installPhase = ''
-              mkdir -p $out/share/esp-xip-modules/{scripts,modules,crates} $out/bin
-              cp scripts/build-mod.sh $out/share/esp-xip-modules/scripts/
-              cp -r tools include abi $out/share/esp-xip-modules/
+              mkdir -p $out/share/esp-xip-modules/{modules,crates} $out/bin
+              cp -r tools include $out/share/esp-xip-modules/
               cp -r modules/common $out/share/esp-xip-modules/modules/
               cp -r crates/xip-abi $out/share/esp-xip-modules/crates/
               mkdir -p $out/share/esp-xip-modules/main
               cp main/main.c $out/share/esp-xip-modules/main/
               mkdir -p $out/share/esp-xip-modules/crates/xip-runtime-esp/src
               cp crates/xip-runtime-esp/src/loader.rs $out/share/esp-xip-modules/crates/xip-runtime-esp/src/
-              makeWrapper $out/share/esp-xip-modules/scripts/build-mod.sh $out/bin/build-mod.sh \
-                --set XIP_TOOL_ROOT $out/share/esp-xip-modules \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.python3 pkgs.bash pkgs.coreutils ]}
+              makeWrapper ${pkgs.python3}/bin/python3 $out/bin/build-mod \
+                --add-flags $out/share/esp-xip-modules/tools/build_mod.py \
+                --set XIP_TOOL_ROOT $out/share/esp-xip-modules
             '';
           };
           # Host tools only. ESP-IDF and its cross toolchains (and the esp Rust toolchain) are fetched by

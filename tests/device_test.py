@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The bench procedure of docs/testing.md as a script: runs mod_test on real boards.
+"""The bench procedure of docs/testing.md as a script: runs mod_rtest on real boards.
 
   tests/device_test.py [--config tests/device.toml] [--board NAME] [--out target/out]
 
@@ -71,7 +71,7 @@ def slot_line(t, name="test"):
 
 
 def last_summary(text):
-    """The final summary event (0x7eff = 32511) of the latest mod_test run in the console's `events` ring."""
+    """The final summary event (0x7eff = 32511) of the latest mod_rtest run in the console's `events` ring."""
     lines = [l for l in text.splitlines() if " id=32511 " in l]
     return lines[-1] if lines else ""
 
@@ -92,7 +92,7 @@ def run_board(board, out, t=None, sleep=time.sleep):
 
 def _run_board(board, out, t, sleep):
     chip, key = board["chip"], os.path.expanduser(board["key"])
-    image = os.path.join(out, chip, "modules", "mod_test.dmod")
+    image = os.path.join(out, chip, "modules", "mod_rtest.dmod")
     version = int(time.strftime("%y%m%d%H%M", time.gmtime()))   # the scheme of scripts/publish-release.sh
     pkg = sign.make_package(key, chip, version, "test", open(image, "rb").read(), "module")
     from wl_format import transport_header
@@ -110,7 +110,7 @@ def _run_board(board, out, t, sleep):
     check(t.control("start test").startswith("ok"), "start test")
     sleep(3)
     status_line = slot_line(t)
-    check("last=0" in status_line and f"runs={runs_before + 1} " in status_line, f"flashed mod_test passed ({status_line})")
+    check("last=0" in status_line and f"runs={runs_before + 1} " in status_line, f"flashed mod_rtest passed ({status_line})")
     check("fail=0" in last_summary(t.control("events")), "flashed run reports fail=0")
 
     check(t.control("start test alarm").startswith("ok"), "start test alarm")

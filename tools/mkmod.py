@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Build a module image (DMOD) from C sources (or a Rust bin with --cargo): compile, link, check, pack.
+"""Build a module image (DMOD) from a Rust bin (--cargo): link, check, pack. (C modules were dropped; the last tree that had them is in git history.)
 
-  mkmod.py --chip esp32c6 --slot test --out target/modules/esp32c6/mod_test.dmod modules/mod_test/mod_test.c
-  mkmod.py --chip esp32 --list-slots
+  mkmod.py --chip esp32c6 --out target/modules/esp32c6/mod_rtest.dmod --cargo modules/mod_rtest/Cargo.toml:mod_rtest:flat-image
 
 The toolchain comes from the PATH (an ESP-IDF shell: `. ./env.sh`). Checks that a module must pass
 before it is worth signing: no relocations, no undefined symbols, no .data/.bss (the image is read-only
@@ -23,38 +22,11 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
 # Where each chip runs modules. Must match components/xip_loader/src/loader.c (tests/test_tools.py checks).
 CHIPS = {
-    "esp32":   dict(prefix="xtensa-esp32-elf", fixed=True, code_base=0x40300000, data_base=0x3F700000,
-                    arch=["-mtext-section-literals"], rust_target="xtensa-esp32-espidf"),
-    "esp32s3": dict(prefix="xtensa-esp32s3-elf", fixed=True, code_base=0x43000000, data_base=0x3D000000,
-                    arch=["-mtext-section-literals"], rust_target="xtensa-esp32s3-espidf"),
+    "esp32":   dict(prefix="xtensa-esp32-elf", fixed=True, code_base=0x40300000, data_base=0x3F700000, rust_target="xtensa-esp32-espidf"),
+    "esp32s3": dict(prefix="xtensa-esp32s3-elf", fixed=True, code_base=0x43000000, data_base=0x3D000000, rust_target="xtensa-esp32s3-espidf"),
     "esp32c6": dict(prefix="riscv32-esp-elf", fixed=False, code_base=0, data_base=0,
-                    arch=["-march=rv32imac_zicsr_zifencei", "-mabi=ilp32", "-fPIE", "-mno-relax"],
                     rust_target="riscv32imac-unknown-none-elf"),
 }
-CFLAGS = ["-std=gnu11", "-Os", "-Wall", "-Wextra", "-Werror", "-ffreestanding", "-fno-builtin", "-nostdlib",
-          "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-unwind-tables", "-ffunction-sections",
-          "-fdata-sections", "-fno-common", "-fno-jump-tables", "-fvisibility=hidden",
-          "-fno-tree-loop-distribute-patterns"]
-
-
-def slots(path=os.path.join(ROOT, "crates", "xip-runtime-esp", "src", "loader.rs")):
-    """The product slot table shared by the C and Rust examples: {name: (tag, offset, size)}. A C main lists {"name", tag, offset, size} in main_slots[];
-    a Rust one lists slot!("name", tag, offset, size) (xip-runtime-esp), anywhere in the file."""
-    with open(path) as source:
-        text = source.read()
-    # Compatibility with callers selecting the C example explicitly. Its C
-    # initializer is now generated from the shared product table.
-    if (os.path.realpath(path) == os.path.realpath(os.path.join(ROOT, "main", "main.c"))
-            and '#include "product-slots.inc"' in text):
-        return slots()
-    if "main_slots[]" in text:
-        block = text[text.index("main_slots[]"):]
-        block = block[:block.index("};")]
-        pattern = r'\{\s*"(\w+)"\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\}'
-    else:
-        block = text
-        pattern = r'slot!\(\s*"(\w+)"\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)'
-    return {m[0]: (int(m[1], 0), int(m[2], 0), int(m[3], 0)) for m in re.findall(pattern, block)}
 
 
 def _cbor_head(major, n):
@@ -82,20 +54,61 @@ def cbor(obj):
     raise TypeError(obj)
 
 
-def manifest_with(base, autostart=None, flash_slots=()):
+def _cbor_item(data, pos):
+    """Just enough CBOR to read a manifest's name and component number back: (value, next position)."""
+    major, info = data[pos] >> 5, data[pos] & 31
+    pos += 1
+    n = info
+    if info == 24:
+        n, pos = data[pos], pos + 1
+    elif info == 25:
+        n, pos = int.from_bytes(data[pos:pos + 2], "big"), pos + 2
+    elif info == 26:
+        n, pos = int.from_bytes(data[pos:pos + 4], "big"), pos + 4
+    if major == 0:
+        return n, pos
+    if major == 3:
+        return data[pos:pos + n].decode(), pos + n
+    if major == 4:
+        out = []
+        for _ in range(n):
+            v, pos = _cbor_item(data, pos)
+            out.append(v)
+        return out, pos
+    if major == 5:
+        out = {}
+        for _ in range(n):
+            k, pos = _cbor_item(data, pos)
+            out[k], pos = _cbor_item(data, pos)
+        return out, pos
+    if major == 7:
+        return n == 21, pos
+    raise ValueError(major)
+
+
+def manifest_identity(base):
+    """(name, component number) of a generated manifest: keys 1 and 2."""
+    m, _ = _cbor_item(base, 0)
+    return m.get(1), m.get(2)
+
+
+def manifest_with(base, autostart=None, flash_slots=(), name=None, tag=None, port=0, stream=0):
     """The manifest of a module (include/xip.h, module_manifest): the catalog of its API.md in compact CBOR, which the
     console needs instead of IDs compiled into it, as `mesh-api-gen --out-manifest` writes it (`scripts/gen.sh`), plus
     what only this build knows:
 
       6: start request     (the module starts at boot: text, may be empty)
       7: flash slot indices (flash writes are declared)
+      9: port              (an integer: the datagram port whose packets the module receives and answers; the runtime binds it at start. 1: the console)
+      10: stream port      (an integer: TCP port PORT_NET + n; connections arrive as socket events the module reads and writes)
 
-    `base` is the generated map (keys 1..5); b"" (no API.md) stays b"" unless one of the two is asked for.
+    `base` is the generated map (keys 1..5: name, component number, methods, records, ...). A module without an API.md has none: its manifest is
+    then `{1: name, 2: component number}` from `name` and `tag`, because the loader finds a module by scanning and reads its name from here.
     """
     if not base:
-        if autostart is not None or flash_slots:
-            sys.exit("--autostart and --flash-slots require an API.md next to the sources")
-        return b""
+        if name is None or tag is None:
+            sys.exit("a module without an API.md needs --name and --tag")
+        base = cbor({1: name, 2: tag})
     count = base[0] - 0xa0
     if base[0] & 0xe0 != 0xa0 or count > 21:
         raise ValueError("a manifest is a small definite-length map")
@@ -106,21 +119,27 @@ def manifest_with(base, autostart=None, flash_slots=()):
     if flash_slots:
         extra += cbor(7) + cbor(sorted(set(flash_slots)))
         count += 1
+    if port:
+        extra += cbor(9) + cbor(port)
+        count += 1
+    if stream:
+        extra += cbor(10) + cbor(stream)
+        count += 1
     return bytes([0xa0 + count]) + base[1:] + extra
 
 
-def manifest_beside(api_path, autostart=None, flash_slots=()):
+def manifest_beside(api_path, autostart=None, flash_slots=(), port=0, stream=0):
     """The manifest of the module whose API.md is `api_path`: the checked-in file beside it, `API.manifest`."""
     path = os.path.splitext(api_path)[0] + ".manifest"
     if not os.path.exists(path):
         sys.exit(f"{path} is missing: run scripts/gen.sh (it needs mesh-api-gen from ssh-mesh)")
     with open(path, "rb") as f:
-        return manifest_with(f.read(), autostart, flash_slots)
+        return manifest_with(f.read(), autostart, flash_slots, port=port, stream=stream)
 
 
 def api_beside(sources, cargo):
-    """The API.md next to the module's sources (or its Cargo.toml)."""
-    first = cargo[0] if cargo else (sources[0] if sources else None)
+    """The API.md next to the module's Cargo.toml."""
+    first = cargo[0] if cargo else None
     path = os.path.join(os.path.dirname(os.path.abspath(first)), "API.md") if first else None
     return path if path and os.path.exists(path) else None
 
@@ -182,40 +201,21 @@ def cargo_link(cfg, cargo, window, link_script, tmp):
     return link
 
 
-def build(chip, slot, sources, out, stack=8192, features=0, state=0, defines=(), keep_elf=None, cargo=None, slot_file=None,
-          autostart=None, flash_slots=()):
+MAX_IMAGE = 0x10000   # one flash page for now (the loader scans in pages and an image may span several; the build lays out one each)
+
+
+def build(chip, out, name=None, tag=None, offset=0, stack=8192, state=0, keep_elf=None, cargo=None,
+          autostart=None, flash_slots=(), port=0, stream=0):
+    """`offset` matters on the chips that run a module at a fixed address (Xtensa): the image is linked for code_base + offset and must be
+    installed at that offset of the module partition (the loader checks); elsewhere it is position independent and goes anywhere on a page."""
     cfg = CHIPS[chip]
-    layout = slots(slot_file) if slot_file else slots()
-    tag, offset, slot_size = layout[slot]
-    if flash_slots:
-        if not features & dmod.FEATURES["FLASH"]:
-            sys.exit("--flash-slots requires --features FLASH")
-        if any(index < 0 or index >= len(layout) or list(layout)[index] == slot for index in flash_slots):
-            sys.exit("--flash-slots must name existing slots other than the module's own slot")
     tool = cfg["prefix"] + "-"
     window = (cfg["code_base"] + offset) if cfg["fixed"] else 0          # image start
     data_window = (cfg["data_base"] + offset) if cfg["fixed"] else 0
     link_script = os.path.join(ROOT, "modules", "common", "link-fixed.x" if cfg["fixed"] else "link.x")
     with tempfile.TemporaryDirectory() as tmp:
-        objs = []
-        for src in ([] if cargo else list(sources) + [os.path.join(ROOT, "modules", "common", "xip_rt.c")]):
-            obj = os.path.join(tmp, os.path.basename(src) + ".o")
-            run([tool + "gcc", *CFLAGS, *cfg["arch"], *[f"-D{d}" for d in defines],
-                 "-I", os.path.join(ROOT, "include"), "-I", os.path.join(ROOT, "modules", "common"),
-                 "-c", src, "-o", obj])
-            objs.append(obj)
         elf = os.path.join(tmp, "module.elf")
-
-        def link_c(data_vma):
-            args = [tool + "gcc", *cfg["arch"], "-nostdlib", "-static", "-Wl,--gc-sections", "-Wl,--no-relax",
-                    "-Wl,-z,norelro", "-Wl,--build-id=none", "-Wl,-e,xip_handle", "-Wl,-u,xip_handle",
-                    f"-Wl,-T,{link_script}", f"-Wl,--defsym=MODULE_VMA={window + dmod.HEADER_SIZE}"]
-            if cfg["fixed"]:
-                args.append(f"-Wl,--defsym=MODULE_DATA_VMA={data_vma}")
-            run(args + objs + ["-o", elf])
-            return elf
-
-        link = cargo_link(cfg, cargo, window, link_script, tmp) if cargo else link_c
+        link = cargo_link(cfg, cargo, window, link_script, tmp)
 
         link(data_window + dmod.HEADER_SIZE)
         if cfg["fixed"]:
@@ -244,62 +244,58 @@ def build(chip, slot, sources, out, stack=8192, features=0, state=0, defines=(),
             if "Entry point address" in line:
                 entry = int(line.split()[-1], 16)
         code = open(raw, "rb").read()
-        api = api_beside(sources, cargo)
-        manifest = manifest_beside(api, autostart, flash_slots) if api else manifest_with(b"", autostart, flash_slots)
-        if (autostart is not None or flash_slots) and not api:
-            sys.exit("--autostart and --flash-slots require an API.md next to the sources")
+        api = api_beside(None, cargo)
+        if api:
+            manifest = manifest_beside(api, autostart, flash_slots, port, stream)
+            api_name, api_tag = manifest_identity(open(os.path.splitext(api)[0] + ".manifest", "rb").read())
+            name, tag = name or api_name, tag or api_tag
+            if tag != api_tag:
+                sys.exit(f"--tag {tag} is not the component number {api_tag} of its API.md")
+        else:
+            manifest = manifest_with(b"", autostart, flash_slots, name, tag, port, stream)
+        if not tag or not name:
+            sys.exit("a module needs a name and a component number (its API.md, or --name and --tag)")
         image = dmod.pack(code, entry - window, tag, code_vma=window, data_vma=data_window, stack_bytes=stack,
-                          required_features=features, fixed_vma=cfg["fixed"], state_bytes=state, manifest=manifest)
-    if len(image) > slot_size:
-        sys.exit(f"image is {len(image)} bytes, slot '{slot}' holds {slot_size}")
+                          fixed_vma=cfg["fixed"], state_bytes=state, manifest=manifest)
+    if len(image) > MAX_IMAGE:
+        sys.exit(f"image is {len(image)} bytes, the limit is {MAX_IMAGE}")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     with open(out, "wb") as f:
         f.write(image)
-    print(f"{out}: {len(image)} bytes, slot {slot} (tag {tag}), entry +0x{entry - window:x}")
+    print(f"{out}: {len(image)} bytes, module {name} (component {tag}), offset 0x{offset:x}, entry +0x{entry - window:x}")
     return image
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--chip", required=True, choices=sorted(CHIPS))
-    ap.add_argument("--slot", help="module slot of main (see --list-slots)")
-    ap.add_argument("--out")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--name", help="the module's name (default: from its API.md)")
+    ap.add_argument("--tag", type=int, help="the module's component number (default: from its API.md)")
+    ap.add_argument("--offset", type=lambda v: int(v, 0), default=0,
+                    help="Xtensa: the offset in the module partition the image will be installed at (a multiple of 0x10000); it is linked for it")
     ap.add_argument("--stack", type=int, default=8192, help="stack the deepest handler needs, bytes")
     ap.add_argument("--state", type=int, default=0, help="size of the zeroed state block passed to every call, bytes (<= 4096)")
-    ap.add_argument("--features", default="0", help="XIP_FEAT_* bits the module needs, e.g. SPI,SETTINGS")
-    ap.add_argument("--slots", metavar="FILE",
-                    help="C or Rust product slot table (default: crates/xip-runtime-esp/src/loader.rs)")
-    ap.add_argument("--list-slots", action="store_true")
     ap.add_argument("--autostart", nargs="?", const="", default=None, metavar="REQUEST",
                     help="start this module at boot (recorded in its manifest) with REQUEST as its start request")
+    ap.add_argument("--port", type=int, default=0, help="the port the module receives frames from and answers on (manifest key 9; 1: the console)")
+    ap.add_argument("--stream", type=int, default=0, help="the stream port: TCP port PORT_NET + N, connections arrive as socket events (manifest key 10)")
     ap.add_argument("--flash-slots", default="", metavar="INDICES",
-                    help="comma-separated module slot indices this image may erase/write (signed manifest key 7)")
+                    help="comma-separated indices this image may erase/write (manifest key 7)")
     ap.add_argument("--elf", help="also keep the linked ELF here (objdump -d)")
-    ap.add_argument("--cargo", metavar="MANIFEST:BIN[:FEATURES]",
-                    help="build a Rust module: the bin BIN of the crate at MANIFEST (e.g. fw/mod_lora/Cargo.toml:mod_lora:flat-image)")
-    ap.add_argument("sources", nargs="*")
+    ap.add_argument("--cargo", required=True, metavar="MANIFEST:BIN[:FEATURES]",
+                    help="the Rust module to build: the bin BIN of the crate at MANIFEST (e.g. modules/mod_lora/Cargo.toml:mod_lora:flat-image)")
     a = ap.parse_args()
-    if a.list_slots:
-        for name, (tag, off, size) in (slots(a.slots) if a.slots else slots()).items():
-            print(f"{name}: tag {tag} offset 0x{off:x} size 0x{size:x}")
-        return
-    cargo = None
-    if a.cargo:
-        parts = a.cargo.split(":")
-        if len(parts) < 2:
-            ap.error("--cargo wants MANIFEST:BIN[:FEATURES]")
-        cargo = (os.path.abspath(parts[0]), parts[1], parts[2] if len(parts) > 2 else "")
-    if not (a.slot and a.out and (a.sources or cargo)):
-        ap.error("--slot, --out and at least one source (or --cargo) are required")
-    feat = 0
-    for item in a.features.split(","):
-        feat |= dmod.FEATURES[item.upper()] if item.upper() in dmod.FEATURES else int(item, 0)
+    parts = a.cargo.split(":")
+    if len(parts) < 2:
+        ap.error("--cargo wants MANIFEST:BIN[:FEATURES]")
+    cargo = (os.path.abspath(parts[0]), parts[1], parts[2] if len(parts) > 2 else "")
     try:
         flash_slots = tuple(int(item, 0) for item in a.flash_slots.split(",") if item)
     except ValueError:
         ap.error("--flash-slots requires comma-separated integer indices")
-    build(a.chip, a.slot, a.sources, a.out, a.stack, feat, a.state, keep_elf=a.elf, cargo=cargo, slot_file=a.slots,
-          autostart=a.autostart, flash_slots=flash_slots)
+    build(a.chip, a.out, a.name, a.tag, a.offset, a.stack, a.state, keep_elf=a.elf,
+          cargo=cargo, autostart=a.autostart, flash_slots=flash_slots, port=a.port, stream=a.stream)
 
 
 if __name__ == "__main__":
