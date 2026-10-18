@@ -1,0 +1,40 @@
+[package]
+name = "esp-mod-flash"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+# component 44 (no API.md: no console methods); stream port 2 = TCP 5227 (PORT_NET + 2), open from boot
+mkmod = "--name flash --tag 44 --stack 12288 --state 128 --stream 2 --autostart"
+
+[workspace]
+
+[dependencies]
+xip-abi = { path = "../../crates/xip-abi" }
+
+[dev-dependencies]
+xip-abi = { path = "../../crates/xip-abi", features = ["rustcrypto"] }
+sha2 = { version = "0.10", default-features = false }
+p256 = { version = "0.13", features = ["ecdsa"] }
+
+[features]
+flat-image = ["xip-abi/global-alloc"]
+esp32 = []
+esp32s3 = []
+esp32c6 = []
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "mod_flash"
+required-features = ["flat-image"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = "symbols"

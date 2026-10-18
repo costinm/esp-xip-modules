@@ -1,0 +1,35 @@
+menu "Stage2"
+
+    config WL_BOOT_BUTTON_GPIO
+        int "Entry button GPIO (-1 disables)"
+        default -1
+        help
+            Held at its active level for about 300 ms after reset, this pin
+            selects the loader. Do not use a strapping pin (GPIO0 on ESP32,
+            GPIO9 on ESP32-C6): it would start ROM download mode instead.
+
+    config WL_BOOT_BUTTON_ACTIVE_LOW
+        bool "Entry button is active low (pulled up internally)"
+        default y
+
+    config WL_BOOT_QUICK_RESETS
+        int "Quick resets that select the loader"
+        default 5
+
+    config WL_BOOT_QUICK_WINDOW_TICKS
+        int "Quick reset window, RTC slow-clock ticks (about 5 s)"
+        default 1000000
+
+    config WL_BOOT_TRIAL_PASS_TICKS
+        int "A flash-mode trial passes when the next reset comes after this long (about 30 s)"
+        default 6000000
+
+    config WL_BOOT_ABNORMAL_RESETS
+        int "Watchdog / brown-out resets that select the loader"
+        default 5
+
+    config WL_BOOT_ABNORMAL_WINDOW_TICKS
+        int "Abnormal reset window, RTC slow-clock ticks (about 60 s)"
+        default 12000000
+
+endmenu
