@@ -2,6 +2,7 @@
 # Tests that need no board. CI runs the same.
 #   scripts/test-host.sh [all|abi|c|rust|python]     (default: all)
 # `c` and `python` need gcc; the module build tests also need the ESP toolchains (. ./env.sh).
+# It also checks that what scripts/gen.sh writes is what is committed (the cross-version test of the generated files).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -11,7 +12,10 @@ mkdir -p target
 export ESP_WIFI_LOADER_DIR="${ESP_WIFI_LOADER_DIR:-$ROOT/../esp-wifi-loader}"
 if [[ $what == abi || $what == all ]]; then
     python3 tests/test_dependencies.py
-    scripts/gen.sh --check
+    # regenerate and compare: a stale generated file is reported (and left regenerated)
+    sums() { sha256sum include/xip.h api/generated/* modules/*/API.manifest modules/mod_con/src/tables.rs; }
+    before=$(sums); scripts/gen.sh
+    [[ "$before" == "$(sums)" ]] || { echo "scripts/gen.sh changed generated files: commit them (a new runtime) or revert" >&2; exit 1; }
 fi
 if [[ $what == c || $what == all ]]; then
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_info_cache tests/host/test_info_cache.c -lpthread
@@ -39,11 +43,9 @@ if [[ $what == rust || $what == all ]]; then
     for crate in crates/xip-abi crates/xip-runtime-esp modules/mod_lora modules/mod_hw; do
         cargo test --quiet --manifest-path "$crate/Cargo.toml"
     done
-    # the host-runtime runs the modules (C and Rust, built for this machine) against the host table: virtual time, fixtures
+    # the host-runtime runs the modules (built for this machine) against the host table: virtual time, fixtures
     scripts/build-host-modules.sh >/dev/null
     cargo test --quiet --manifest-path crates/xip-runtime-host/Cargo.toml
-    # the same console cases against the Rust console (mod_con)
-    XIP_CONSOLE=mod_con cargo test --quiet --manifest-path crates/xip-runtime-host/Cargo.toml --test console
 fi
 if [[ $what == python || $what == all ]]; then
     python3 tests/test_tools.py      # tools, ABI generator, module build (needs the toolchains for that part)
