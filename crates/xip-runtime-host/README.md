@@ -35,3 +35,8 @@ assert!(m.ended() && m.find_event(0x7eff, "fail=0").is_some());
 
 Not here yet: sockets and flash (they answer `ERR_UNSUPPORTED`), real-time operation with
 a worker thread, loading a `.dmod` image (the host cannot run RISC-V or Xtensa code; the same sources are built natively).
+
+## Running modules: `xip-host`
+
+`cargo run --bin xip-host -- target/host-modules/mod_con.so:20:console target/host-modules/mod_rtest.so:2` (after `scripts/build-host-modules.sh`) loads the modules, starts them and runs
+in real time; the lines typed on stdin go to the console module as frames of the `serial` link and its answers are printed. No sockets or UDP yet. TODO (`src/main.rs`): feature parity with the Rust runtime, reusing `xip-runtime-esp` code, with tokio or fakes for the hardware, wifi and radios (stubbed, faked or pcap-driven).

@@ -1,7 +1,6 @@
-//! The Rust twin of `main/main.c`: start the host and the loader over a slot table and start the installed modules that ask
+//! The Rust main, twin of the C `main/main.c`: start the host and the loader over the module partition (it scans for modules) and, last, start the installed modules that ask
 //! to run at boot (a console module, if installed). Everything else is in the C components and in `xip-runtime-esp`.
-use xip_runtime_esp::{init, Features};
-use xip_runtime_esp::MODULE_SLOTS;
+use xip_runtime_esp::{autostart, init, Features};
 
 
 fn main() {
@@ -35,7 +34,9 @@ pub extern "C" fn app_main() {
     }
     mark(b"xip-main: nvs ok\n\0");
     // the host keeps the last events modules emit; this application needs no handler
-    assert_eq!(init(&MODULE_SLOTS, "data\0", Features { modules: true, no_autostart: false, nv: None, pool: None, wifi: None }, None), 0, "host and loader");
+    assert_eq!(init("data\0", Features { modules: true, nv: None, pool: None, wifi: None }, None), 0, "host and loader");
+    // last: what is installed and asks to run at boot (a console), now that the host and the loader are up
+    autostart();
     mark(b"xip-main: running\n\0");
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));

@@ -1,5 +1,5 @@
 //! The Rust side of an esp-xip-modules application (the C side is `components/xip_runtime`, `xip_loader`): start the host
-//! and the loader over a slot table, start, stop and call modules, receive their events.
+//! and the loader over the module partition, start, stop and call modules, receive their events.
 //!
 //! Generic host facilities include module lifecycle, packet-backed socket
 //! readiness, settings, the `wifi` components with a simple station owner, and ESP Wi-Fi initialization.
@@ -30,8 +30,9 @@ mod module_poll_esp;
 #[cfg(target_os = "espidf")]
 pub mod wifi_esp;
 
+pub mod uart_frames;
 pub use wifi::WifiOwner;
-pub use loader::{call, find, init, manifest, request_raw, slot_count, start, status, stop, stop_all, EventHandler, Features, PoolOps, Slot, SlotStatus, MODULE_SLOTS};
+pub use loader::{autostart, call, find, init, manifest, request_raw, slot_count, start, status, stop, stop_all, EventHandler, Features, PoolOps, SlotStatus};
 
 /// Read host status without depending on a console module.
 #[cfg(target_os = "espidf")]
@@ -52,13 +53,6 @@ pub fn info_publish(component: i32, method: i32, map: &[u8]) -> Result<(), i32> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_slot_macro_makes_a_nul_terminated_name() {
-        static SLOTS: [Slot; 2] = [slot!("lora", 43, 0x00000, 0x10000), slot!("hw", 45, 0x10000, 0x10000)];
-        let name = unsafe { core::slice::from_raw_parts(SLOTS[0].name_ptr(), 5) };
-        assert_eq!(name, b"lora\0");
-    }
 
     #[test]
     fn without_a_device_a_call_fails() {

@@ -12,3 +12,7 @@ publish = false
 [dependencies]
 xip-abi = { path = "../xip-abi" }
 libloading = "0.8"
+
+[[bin]]
+name = "xip-host"
+path = "src/main.rs"

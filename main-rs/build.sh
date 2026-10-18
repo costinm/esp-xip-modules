@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build the Rust example main for one chip with the ESP Rust toolchain selected by this repository's env.sh.
-#   build.sh [esp32c6|esp32|esp32s3]        default esp32c6; ELF and .bin under target/example/<target>/release/
+# Build the Rust main for one chip with the ESP Rust toolchain selected by this repository's env.sh.
+#   build.sh [esp32c6|esp32|esp32s3]        default esp32c6; ELF and .bin under target/main-rs/<target>/release/
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-XIP_REPO="$(cd "$HERE/../../.." && pwd)"
+XIP_REPO="$(cd "$HERE/.." && pwd)"
 . "$XIP_REPO/env.sh" >/dev/null
 [ -n "${XIP_RUST_ESP_BIN:-}" ] && [ -x "$XIP_RUST_ESP_BIN/cargo" ] || {
     echo "ESP Rust toolchain unavailable; set XIP_ESP_ROOT to an installation with rustup/toolchains/esp" >&2; exit 1;
@@ -20,9 +20,9 @@ if [ -z "${LIBCLANG_PATH:-}" ] || [ ! -e "$LIBCLANG_PATH/libclang.so" ]; then
     exit 1
 fi
 # Reuse the selected SDK tool installation; embuild must not bootstrap another
-# SDK Python environment inside the example source tree.
+# SDK Python environment inside the source tree.
 export ESP_IDF_TOOLS_INSTALL_DIR=fromenv
-export CARGO_TARGET_DIR="${XIP_EXAMPLE_TARGET_DIR:-$XIP_REPO/target/example}"
+export CARGO_TARGET_DIR="${XIP_MAIN_RS_TARGET_DIR:-$XIP_REPO/target/main-rs}"
 case "${1:-esp32c6}" in
     esp32c6) target=riscv32imac-esp-espidf ;;
     esp32) target=xtensa-esp32-espidf ;;

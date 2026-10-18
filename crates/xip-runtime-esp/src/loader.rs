@@ -1,47 +1,4 @@
-//! The slot table, the loader and the events (C: `components/xip_runtime`, `xip_loader`).
-
-/// One module slot: `xip_slot_t`. Build the table with [`slot!`](crate::slot) so `tools/mkmod.py --slots` can read it.
-#[repr(C)]
-pub struct Slot {
-    name: *const u8,
-    tag: u16,
-    offset: u32,
-    size: u32,
-}
-
-// The name is a string literal.
-unsafe impl Sync for Slot {}
-
-/// Six-page module layout preset. The runtime owns names, tags,
-/// offsets and the state-log slot order; applications select this preset.
-pub static MODULE_SLOTS: [Slot; 6] = [
-    crate::slot!("lora", 43, 0x00000, 0x10000),
-    crate::slot!("flash", 44, 0x10000, 0x10000),
-    crate::slot!("hw", 45, 0x20000, 0x10000),
-    crate::slot!("hello", 46, 0x30000, 0x10000),
-    crate::slot!("test", 2, 0x40000, 0x10000),
-    crate::slot!("console", 20, 0x50000, 0x10000),
-];
-
-impl Slot {
-    /// `name` must end with NUL; use the macro.
-    pub const fn new(name: *const u8, tag: u16, offset: u32, size: u32) -> Self {
-        Slot { name, tag, offset, size }
-    }
-
-    pub fn name_ptr(&self) -> *const u8 { self.name }
-    pub fn offset(&self) -> u32 { self.offset }
-    pub fn size(&self) -> u32 { self.size }
-}
-
-/// `slot!("lora", 43, 0x00000, 0x10000)`: name, tag (the component number of the module), offset in the module
-/// partition, size (multiples of 64 KiB).
-#[macro_export]
-macro_rules! slot {
-    ($name:literal, $tag:expr, $offset:expr, $size:expr) => {
-        $crate::Slot::new(concat!($name, "\0").as_ptr(), $tag, $offset, $size)
-    };
-}
+//! The loader (C: `components/xip_runtime`, `xip_loader`): it scans the module partition for images; there is no slot table.
 
 /// `xip_slot_status_t`.
 #[repr(C)]
@@ -58,7 +15,7 @@ pub struct SlotStatus {
     pub needs_reboot: bool,
 }
 
-/// An event a module emitted: `(module, event id, value type, value)`; called on the host worker, return 0.
+/// Kept so existing callers compile: modules no longer `emit` (they send messages, which a routing component will carry), so this is never called.
 pub type EventHandler = fn(&str, u16, u8, &[u8]) -> i32;
 
 /// The application's packet pool as the host uses it (`xip_pool_ops`): a slot is an index; `acquire` returns one with a single
@@ -83,9 +40,6 @@ unsafe impl Sync for PoolOps {}
 pub struct Features {
     /// `status`, `start`, `stop` of module slots for the console module (links `xip_loader`'s by-name calls).
     pub modules: bool,
-    /// Do not start the installed modules whose manifest asks for it (a console) when the host starts: the application
-    /// owns the serial port in this boot (DMesh in `uart.mode=ppp`) and starts them itself, or never.
-    pub no_autostart: bool,
     /// The application's own device settings (`nv`, include/xip.h): called with a name, a value or NULL to read, and a buffer; returns
     /// the length read, 0 written, or -1 bad argument, -3 storage, -4 unknown, -5 buffer too small.
     pub nv: Option<unsafe extern "C" fn(*const core::ffi::c_char, usize, *const u8, usize, *mut u8, usize) -> i32>,
@@ -99,9 +53,8 @@ pub struct Features {
 #[cfg(target_os = "espidf")]
 mod imp {
     use super::*;
-    use core::ffi::{c_char, CStr};
+    use core::ffi::c_char;
 
-    static mut HANDLER: Option<EventHandler> = None;
 
     /// `xip_host_ext_t`.
     #[repr(C)]
@@ -127,14 +80,12 @@ mod imp {
     /// `xip_loader_config_t`.
     #[repr(C)]
     struct LoaderConfig {
-        slots: *const Slot,
-        slot_count: usize,
         partition: *const u8,
         default_stack_bytes: u32,
     }
 
     extern "C" {
-        fn xip_host_init_simple(emit: extern "C" fn(*const c_char, u16, u8, *const u8, usize) -> i32, ext: *const HostExt) -> i32;
+        fn xip_host_init_simple(ext: *const HostExt) -> i32;
         fn xip_loader_init(config: *const LoaderConfig) -> i32;
         fn xip_loader_autostart() -> i32;
         fn xip_loader_find(name: *const u8) -> i32;
@@ -150,17 +101,7 @@ mod imp {
         fn xip_loader_manifest_named(name: *const u8, name_len: usize, out: *mut u8, capacity: usize) -> i32;
     }
 
-    extern "C" fn on_emit(module: *const c_char, id: u16, vtype: u8, value: *const u8, len: usize) -> i32 {
-        let Some(handler) = (unsafe { HANDLER }) else { return 0 };
-        if module.is_null() || (value.is_null() && len != 0) {
-            return -1;
-        }
-        let module = unsafe { CStr::from_ptr(module) }.to_str().unwrap_or("");
-        let value = if len == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(value, len) } };
-        handler(module, id, vtype, value)
-    }
-
-    pub fn init(slots: &'static [Slot], partition: &'static str, features: Features, on_event: Option<EventHandler>) -> i32 {
+    pub fn init(partition: &'static str, features: Features, on_event: Option<EventHandler>) -> i32 {
         debug_assert!(partition.ends_with('\0'));
         crate::module_poll_esp::install();
         extern "C" {
@@ -202,20 +143,18 @@ mod imp {
             ext.module_manifest = Some(xip_loader_manifest_named);
         }
         unsafe {
-            HANDLER = on_event;
-            let rc = xip_host_init_simple(on_emit, &ext);
+            let _ = on_event;
+            crate::uart_frames::install(); // the serial line carries ports in PPP records, text lines are the console
+            let rc = xip_host_init_simple(&ext);
             if rc != 0 {
                 return rc;
             }
-            let rc = xip_loader_init(&LoaderConfig { slots: slots.as_ptr(), slot_count: slots.len(), partition: partition.as_ptr(),
+            let rc = xip_loader_init(&LoaderConfig { partition: partition.as_ptr(),
                                                         default_stack_bytes: 8192 });
-            if rc == 0 && features.modules && !features.no_autostart {
-                // the installed modules whose manifest asks to run at boot (a console module, if there is one)
-                xip_loader_autostart();
-            }
             rc
         }
     }
+    pub fn autostart() -> i32 { unsafe { xip_loader_autostart() } }
     pub fn find(name: &str) -> Option<usize> {
         let mut c = [0u8; 24];
         if name.len() >= c.len() {
@@ -255,7 +194,8 @@ mod imp {
 mod imp {
     use super::*;
 
-    pub fn init(_: &'static [Slot], _: &'static str, _: Features, _: Option<EventHandler>) -> i32 { -1 }
+    pub fn init(_: &'static str, _: Features, _: Option<EventHandler>) -> i32 { -1 }
+    pub fn autostart() -> i32 { -1 }
     pub fn find(_: &str) -> Option<usize> { None }
     pub fn slot_count() -> usize { 0 }
     pub fn status(_: usize) -> SlotStatus { SlotStatus::default() }
@@ -265,11 +205,14 @@ mod imp {
     pub fn manifest(_: &str, _: &mut [u8]) -> Result<usize, i32> { Err(-1) }
 }
 
-/// Start the host (its worker task) and the loader over `slots` in the data partition `partition` (NUL-terminated name,
-/// e.g. `"data\0"`); `on_event` receives what modules emit. NVS must be initialised. 0 or an `esp_err_t`.
-pub fn init(slots: &'static [Slot], partition: &'static str, features: Features, on_event: Option<EventHandler>) -> i32 {
-    imp::init(slots, partition, features, on_event)
+/// Start the host (its worker task) and the loader over the data partition `partition` (NUL-terminated name,
+/// e.g. `"data\0"`); `on_event` is unused (modules send messages now). NVS must be initialised. 0 or an `esp_err_t`.
+pub fn init(partition: &'static str, features: Features, on_event: Option<EventHandler>) -> i32 {
+    imp::init(partition, features, on_event)
 }
+/// Start the installed modules whose manifest asks to run at boot (a console). The application calls it last, once everything a
+/// module may use is up; an application that owns the serial port itself (DMesh in `uart.mode=ppp`) does not call it. Few modules should ask.
+pub fn autostart() -> i32 { imp::autostart() }
 /// The slot of a module name.
 pub fn find(name: &str) -> Option<usize> { imp::find(name) }
 pub fn slot_count() -> usize { imp::slot_count() }
