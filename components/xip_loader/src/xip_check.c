@@ -20,11 +20,14 @@ xip_dmod_result_t xip_dmod_check(const xip_dmod_header *h, const xip_slot_rules_
     if (h->entry_offset < XIP_DMOD_HEADER_SIZE || h->entry_offset >= h->image_size || (h->entry_offset & 1))
         return EMD_BAD_ENTRY;
     if (h->tag == 0) return EMD_BAD_HEADER;       /* the component number is the image's own; a module without one is not a module */
+    if (!r->static_base || h->static_addr < r->static_base ||
+        h->static_addr - r->static_base >= XIP_DMOD_STATIC_SLOTS * XIP_DMOD_STATIC_SLOT_BYTES ||
+        (h->static_addr - r->static_base) % XIP_DMOD_STATIC_SLOT_BYTES) return EMD_BAD_PLACEMENT;
     if (r->fixed_vma) {
         /* Linked for one address: it must be the address this slot is mapped at. */
-        if (h->flags != XIP_DMOD_FLAG_FIXED_VMA || h->code_vma != r->code_base + r->slot_offset ||
+        if (h->flags != (XIP_DMOD_FLAG_FIXED_VMA | XIP_DMOD_FLAG_STATIC_RAM) || h->code_vma != r->code_base + r->slot_offset ||
             h->data_vma != r->data_base + r->slot_offset) return EMD_BAD_PLACEMENT;
-    } else if (h->flags != 0 || h->code_vma != 0 || h->data_vma != 0) {
+    } else if (h->flags != XIP_DMOD_FLAG_STATIC_RAM || h->code_vma != 0 || h->data_vma != 0) {
         return EMD_BAD_PLACEMENT;
     }
     return EMD_OK;

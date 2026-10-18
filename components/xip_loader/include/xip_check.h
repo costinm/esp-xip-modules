@@ -3,7 +3,7 @@
  * the host tests (tests/host) exactly as on the device.
  *
  *  - xip_dmod_check: the 64-byte image header (include/xip.h) against the place it was found at
- * The signed package around an image is esp-wifi-loader's business (docs/protocol.md). */
+ * The package around an image on the upload port is modules/mod_flash's business. */
 #pragma once
 
 #include <stdbool.h>
@@ -31,6 +31,7 @@ typedef struct {
     uint32_t slot_size;      /* the room from there to the next image or the end of the partition */
     uint32_t max_stack_bytes;
     bool fixed_vma;          /* this chip runs modules at a fixed address (Xtensa) */
+    uint32_t static_base;    /* platform's reserved module-context RAM arena */
     uint32_t code_base, data_base; /* fixed_vma: window origins; image VMA = base + slot_offset */
 } xip_slot_rules_t;
 

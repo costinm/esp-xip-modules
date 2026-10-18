@@ -17,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "internal.h"
+#include "xip_module_ram.h"
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32
 #include "esp_cache.h"
 #include "hal/mmu_hal.h"
@@ -52,11 +53,17 @@ xip_loader_t em;
 #endif
 
 
+static xip_slot_rules_t rules_for(uint32_t offset, uint32_t size)
+{
+    return (xip_slot_rules_t){.slot_offset = offset, .slot_size = size, .max_stack_bytes = CONFIG_XIP_WORKER_STACK,
+                                 .fixed_vma = XIP_FIXED, .code_base = XIP_CODE_BASE, .data_base = XIP_DATA_BASE,
+                                 .static_base = XIP_MODULE_RAM_BASE};
+}
+
 xip_slot_rules_t xip_rules(int slot)
 {
     const xip_slot_t *s = &em.slots_found[slot];
-    return (xip_slot_rules_t){.slot_offset = s->offset, .slot_size = s->size, .max_stack_bytes = CONFIG_XIP_WORKER_STACK,
-                                 .fixed_vma = XIP_FIXED, .code_base = XIP_CODE_BASE, .data_base = XIP_DATA_BASE};
+    return rules_for(s->offset, s->size);
 }
 
 esp_err_t xip_read_header(int slot, xip_dmod_header *h)
@@ -175,6 +182,7 @@ static void instance_done(void *ctx, int result, const xip_stats_t *stats)
     unmap_image(st);
     xSemaphoreTake(em.lock, portMAX_DELAY);
     st->inst = NULL;                         /* from here no stop or post can reach it */
+    st->starting = false;
     xSemaphoreGive(em.lock);
     st->st.stack_high_water_bytes = xip_host_stack_high_water();
     st->st.last_result = result;
@@ -220,15 +228,24 @@ static void scan(void)
             offset += XIP_SLOT_ALIGN;
             continue;
         }
+        xip_slot_rules_t rules = rules_for(offset, size);
+        xip_dmod_result_t check = xip_dmod_check(&h, &rules);
+        if (check != EMD_OK) {
+            ESP_LOGW(TAG, "image at 0x%x rejected: %s", (unsigned)offset, xip_dmod_reason(check));
+            offset += size;
+            continue;
+        }
         char *name = em.names_found[em.found];
         name_of(offset, &h, name, sizeof(em.names_found[0]));
         bool taken = false;
-        for (size_t i = 0; i < em.found; i++) taken |= !strcmp(em.slots_found[i].name, name);
+        for (size_t i = 0; i < em.found; i++)
+            taken |= !strcmp(em.slots_found[i].name, name) || em.slots[i].static_addr == h.static_addr;
         if (taken) {
-            ESP_LOGW(TAG, "two modules are called %s: the one at 0x%x is ignored", name, (unsigned)offset);
+            ESP_LOGW(TAG, "duplicate name or module RAM cell for %s: image at 0x%x is ignored", name, (unsigned)offset);
         } else {
             em.slots_found[em.found] = (xip_slot_t){.name = name, .tag = h.tag, .offset = offset, .size = size};
             memset(&em.slots[em.found], 0, sizeof(em.slots[em.found]));
+            em.slots[em.found].static_addr = h.static_addr;
             em.slots[em.found].st.last_result = INT32_MIN;
             em.slots[em.found].st.installed = true;
             em.found++;
@@ -251,6 +268,7 @@ esp_err_t xip_loader_init(const xip_loader_config_t *cfg)
     if (!em.slots || !em.slots_found || !em.names_found || !em.lock) return ESP_ERR_NO_MEM;
     em.cfg = *cfg;
     if (!em.cfg.default_stack_bytes) em.cfg.default_stack_bytes = 8192;
+    xip_module_ram_init();
     scan();
     em.inited = true;
     ESP_LOGI(TAG, "%u modules in \"%s\" (0x%x bytes at 0x%x)", (unsigned)em.found, cfg->partition,
@@ -263,7 +281,7 @@ esp_err_t xip_loader_init(const xip_loader_config_t *cfg)
 int xip_loader_rescan(void)
 {
     if (!em.inited) return XIP_ERR_ARG;
-    for (size_t i = 0; i < em.found; i++) if (em.slots[i].st.running) return XIP_LOADER_ERR_RUNNING;
+    for (size_t i = 0; i < em.found; i++) if (em.slots[i].st.running || em.slots[i].starting) return XIP_LOADER_ERR_RUNNING;
     scan();
     return (int)em.found;
 }
@@ -301,7 +319,7 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
     if (!xip_loader_slot(slot)) return XIP_LOADER_ERR_SLOT;
     if (request_len && !request) return XIP_ERR_ARG;
     xip_slot_state_t *st = &em.slots[slot];
-    if (st->st.running) return XIP_LOADER_ERR_RUNNING;
+    if (st->st.running || st->starting) return XIP_LOADER_ERR_RUNNING;
 
     xip_dmod_header h;
     xip_slot_rules_t rules = xip_rules(slot);
@@ -318,12 +336,35 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
         if (!copy) return XIP_LOADER_ERR_NOMEM;
         memcpy(copy, request, request_len);
     }
+    xSemaphoreTake(em.lock, portMAX_DELAY);
+    bool conflict = st->st.running || st->starting;
+    for (size_t i = 0; i < em.found; i++) {
+        if ((int)i != slot && em.slots[i].static_addr == h.static_addr) conflict = true;
+    }
+    if (conflict) {
+        xSemaphoreGive(em.lock);
+        free(copy);
+        return XIP_LOADER_ERR_RUNNING;
+    }
+    st->starting = true;
+    st->static_addr = h.static_addr;
+    xSemaphoreGive(em.lock);
+    // The claim excludes every running or starting instance before any bytes
+    // are cleared. PIC relocation never changes the cell's identity.
+    if (!xip_module_ram_clear(h.static_addr)) {
+        xSemaphoreTake(em.lock, portMAX_DELAY); st->starting = false; xSemaphoreGive(em.lock);
+        free(copy);
+        return XIP_LOADER_ERR_IMAGE;
+    }
     free(st->request);
     st->request = copy;
     st->request_len = request_len;
 
     const void *base;
-    if (map_image(slot, &h, st, &base) != ESP_OK) return XIP_LOADER_ERR_MAP;
+    if (map_image(slot, &h, st, &base) != ESP_OK) {
+        xSemaphoreTake(em.lock, portMAX_DELAY); st->starting = false; xSemaphoreGive(em.lock);
+        return XIP_LOADER_ERR_MAP;
+    }
     const xip_instance_config_t ic = {.handler = (xip_handle_fn)((const uint8_t *)base + h.entry_offset),
                                          .state_bytes = h.state_bytes, .done = instance_done,
                                          .done_ctx = (void *)(intptr_t)slot, .component = h.tag,
@@ -331,12 +372,17 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
     ESP_LOGI(TAG, "%s: handler %p, image %u bytes, state %u", em.slots_found[slot].name, (void *)ic.handler,
              (unsigned)h.image_size, (unsigned)h.state_bytes);
     xip_instance_t *inst = xip_instance_create(em.slots_found[slot].name, &ic);
-    if (!inst) { unmap_image(st); return XIP_LOADER_ERR_NOMEM; }
+    if (!inst) {
+        unmap_image(st);
+        xSemaphoreTake(em.lock, portMAX_DELAY); st->starting = false; xSemaphoreGive(em.lock);
+        return XIP_LOADER_ERR_NOMEM;
+    }
     xSemaphoreTake(em.lock, portMAX_DELAY);
     st->inst = inst;
+    st->starting = false;
+    st->st.running = true;
     xSemaphoreGive(em.lock);
     st->started_us = esp_timer_get_time();
-    st->st.running = true;
     int rc = xip_instance_start(inst, st->request, st->request_len);
     if (rc) {   /* the instance never ran: release it by stopping (the worker calls instance_done) */
         (void)xip_instance_stop(inst);

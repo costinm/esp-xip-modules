@@ -1,0 +1,16 @@
+/* Fixed module context cells: independent of flash mapping and SDK TLS. */
+MEMORY
+{
+  xip_module_ram_seg (rw) : ORIGIN = @XIP_MODULE_RAM_BASE@, LENGTH = @XIP_MODULE_RAM_BYTES@
+}
+SECTIONS
+{
+  .xip_module_ram (NOLOAD) :
+  {
+    _xip_module_ram_start = ABSOLUTE(.);
+    . += @XIP_MODULE_RAM_BYTES@;
+    _xip_module_ram_end = ABSOLUTE(.);
+  } > xip_module_ram_seg
+}
+ASSERT(_heap_start <= @XIP_MODULE_RAM_BASE@, "Main static RAM overlaps module RAM arena");
+@XIP_MODULE_RAM_IRAM_ASSERT@
