@@ -33,10 +33,6 @@
               cp -r tools include $out/share/esp-xip-modules/
               cp -r modules/common $out/share/esp-xip-modules/modules/
               cp -r crates/xip-abi $out/share/esp-xip-modules/crates/
-              mkdir -p $out/share/esp-xip-modules/main
-              cp main/main.c $out/share/esp-xip-modules/main/
-              mkdir -p $out/share/esp-xip-modules/crates/xip-runtime-esp/src
-              cp crates/xip-runtime-esp/src/loader.rs $out/share/esp-xip-modules/crates/xip-runtime-esp/src/
               makeWrapper ${pkgs.python3}/bin/python3 $out/bin/build-mod \
                 --add-flags $out/share/esp-xip-modules/tools/build_mod.py \
                 --set XIP_TOOL_ROOT $out/share/esp-xip-modules

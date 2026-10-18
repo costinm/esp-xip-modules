@@ -3,7 +3,7 @@ name = "xip-runtime-esp"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Rust side of an esp-xip-modules application: run, stop and call the modules of a slot table; the pieces DMesh and the example main share"
+description = "Rust side of an esp-xip-modules application: start the host and the loader over the module partition, run, stop and call modules; the pieces DMesh and `main-rs` share"
 publish = false
 
 # Built by the application that uses it (ESP-IDF, or a PC for the tests); not part of a Cargo workspace.

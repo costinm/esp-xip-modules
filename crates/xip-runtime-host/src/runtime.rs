@@ -101,7 +101,7 @@ pub struct RtState {
     pub started: String,
     pub start_request: String,
     pub stopped: String,
-    /// What `modules_info`, `events_info` and `module_manifest("test")` return.
+    /// What `modules_info` and `module_manifest("test")` return.
     pub modules_cbor: Vec<u8>,
     pub manifest: Vec<u8>,
     pub(crate) nv_value: String,
@@ -367,7 +367,7 @@ impl Runtime {
         crate::wifi::TUNING.with(|t| *t.borrow())
     }
 
-    /// Script what `wifi.state` and `wifi_info` report, instead of the default (a station intent joins at once).
+    /// Script what `wifi.state` reports, instead of the default (a station intent joins at once).
     pub fn set_wifi_state(&self, state: xip_abi::WifiState) {
         crate::wifi::FIX.with(|f| { let mut f = f.borrow_mut(); f.state = state; f.scripted = true; });
     }

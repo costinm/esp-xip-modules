@@ -346,23 +346,6 @@ void xip_port_rx_commit(int link, uint32_t port, const xip_link_rx_buf *buf, siz
 }
 
 void xip_port_rx_abort(const xip_link_rx_buf *buf) { drop_slot(buf->slot); }
-void xip_rx_retain(int slot) { xip_pool_retain(pool_get(), slot); }
-void xip_rx_release(int slot) { drop_slot(slot); }
-uint32_t xip_rx_refs(int slot) { return xip_pool_refs(pool_get(), slot); }
-
-/* An event of a far end (kind XIP_LINK_EVENT_*, `token` its id) for the module bound to `port`. */
-void xip_port_event(int link, uint32_t port, uint32_t kind, uint64_t token)
-{
-    int component = 0;
-    portENTER_CRITICAL(&registry_lock);
-    for (int i = 0; i < XIP_PORTS_MAX && !component; i++) if (ports[i].port == port) component = ports[i].component;
-    portEXIT_CRITICAL(&registry_lock);
-    struct xip_instance *t = component ? by_component(component, NULL) : NULL;
-    if (!t) return;
-    xip_event_t ev = {.kind = XIP_EV_LINK, .inst = t->id, .component = component, .method = 0, .value = 0, .id = token, .from = (uint32_t)link,
-                      .flags = XIP_CALL_LINK | XIP_CALL_LINK_EVENT | (kind << 8)};
-    (void)xQueueSend(worker_queue, &ev, 0);
-}
 
 int xip_serial_rx_begin(uint32_t port, xip_link_rx_buf *buf) { return xip_port_rx_begin(port, buf); }
 void xip_serial_rx_commit(uint32_t port, const xip_link_rx_buf *buf, size_t len) { xip_port_rx_commit(serial_link, port, buf, len, port); }

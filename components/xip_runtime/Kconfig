@@ -7,7 +7,7 @@ menu "esp-xip-modules host"
             Size of the per-module inbox (xip_instance_post / xip_instance_request).
 
     config XIP_RESPONSE_MAX
-        int "Largest answer a module can give with respond()"
+        int "Largest answer a module can give with reply()"
         default 1024
 
     config XIP_WORKER_STACK

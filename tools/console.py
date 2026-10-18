@@ -1,29 +1,37 @@
 #!/usr/bin/env python3
-"""The board's serial console, from the computer: read what modules say, send them commands, reset the board.
+"""The board's serial console, from the computer: find the connected boards, read what modules say, send them commands.
 
-  tools/console.py [BOARD] monitor [--seconds N]        print the console (Ctrl-C to stop); opening it does not reset the board
-  tools/console.py [BOARD] send "status"                one command line, then print the answer (--wait seconds)
+  tools/console.py list                                 find the connected boards and ask each for its `status`
+  tools/console.py [--port PATH] monitor [--seconds N]  print the console (Ctrl-C to stop); opening it does not reset the board
+  tools/console.py [--port PATH] send "status"          one command line, then print the answer (--wait seconds)
+
+There is no list of lab boards: whatever is connected now is discovered (/dev/serial/by-id, else ttyACM/ttyUSB), by asking the console. A sleepy
+device answers late (or drops the first bytes while it wakes), so the probe sends a newline and `status` again for up to --probe seconds.
+Without --port the only board that answers is used (or $XIP_PORT); with several, `list` shows them and --port picks. Tests that need a device
+borrow whatever fits (chip, modules installed) from discover(); a lock file under target/ for borrow/release comes later, and with secrets the console
+over USB is the way to unlock or reset a test device.
 
 Resetting the board, including the five quick resets that start the loader, is esp-wifi-loader's reset.py.
 
-Commands (`help` on the board lists them): status, start, stop, wifi, loader, help, reset, COMPONENT.METHOD key=value. The port comes from tests/device.toml.
+Commands (`help` on the board lists them): status, start, stop, wifi, help, reset, nv, heap, COMPONENT.METHOD key=value.
 
 Opening the port does not reset the board (the USB-Serial/JTAG block resets the chip only when DTR goes low while RTS
 is high; this tool leaves the lines alone). What modules log() appears as lines like
   W (1234) xip: test: mod_rtest log
-  W (1250) main: test event 0x7eff: pass=28 fail=0
 """
 import argparse
+import glob
 import os
 import re
 import sys
 import time
-import tomllib
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
 
 LOG_LINE = re.compile(r"^\x1b?\[?[0-9;]*m?[IWEDV] \(\d+\) ")      # ESP-IDF log lines: "W (1234) tag: text"
+MODULE = re.compile(r'\{1:"([^"]+)",2:(\d+),3:(true|false),4:(true|false)')   # a module record of `status`: name, component, installed, running
+MAC = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
 
 
 class Console:
@@ -82,26 +90,65 @@ class Console:
         return "".join(l + "\n" for l in lines)
 
 
-def board_port(config, name):
-    cfg = tomllib.load(open(config, "rb"))
-    boards = [b for b in cfg["board"] if not name or b["name"] == name]
-    if not boards:
-        raise SystemExit(f"no such board in {config}")
+def ports():
+    """The serial ports that may be a board, stable names first."""
+    found = sorted(glob.glob("/dev/serial/by-id/*"))
+    return found or sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"))
+
+
+def probe(path, seconds=10.0):
+    """Ask the console of the board on `path` for its status. A sleepy device answers late: a newline wakes it and the command is repeated until
+    `seconds`. Returns a dict (port, mac when the port name has one, answer, modules) or None when nothing answers."""
+    try:
+        c = Console(path).open()
+    except Exception:
+        return None
+    try:
+        end = time.time() + seconds
+        while time.time() < end:
+            answer = c.command("status", timeout=min(3.0, max(0.5, end - time.time())))
+            if answer != "no reply":
+                mac = MAC.search(path)
+                return {"port": path, "mac": mac.group(1).lower() if mac else None, "answer": answer.strip(),
+                        "modules": [{"name": n, "component": int(t), "installed": i == "true", "running": r == "true"}
+                                    for n, t, i, r in MODULE.findall(answer)]}
+            c.send("")
+    finally:
+        c.close()
+    return None
+
+
+def discover(seconds=10.0):
+    """Every connected board that answers on its console."""
+    return [d for d in (probe(p, seconds) for p in ports()) if d]
+
+
+def pick(port=None, seconds=10.0):
+    """The port to use: the given one, $XIP_PORT, or the only board that answers."""
+    port = port or os.environ.get("XIP_PORT")
+    if port:
+        return port
+    boards = discover(seconds)
+    if len(boards) != 1:
+        raise SystemExit("%s; use --port (tools/console.py list)" % ("no board answers" if not boards else "several boards answer"))
     return boards[0]["port"]
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("board", nargs="?", help="board name in tests/device.toml (default: the first)")
-    ap.add_argument("cmd", choices=["monitor", "send"])
+    ap.add_argument("cmd", choices=["list", "monitor", "send"])
     ap.add_argument("text", nargs="?", help="the command line for `send`")
-    ap.add_argument("--config", default=os.path.join(ROOT, "tests", "device.toml"))
+    ap.add_argument("--port", help="serial device (default: the only board that answers, or $XIP_PORT)")
     ap.add_argument("--seconds", type=float, default=None)
     ap.add_argument("--wait", type=float, default=2.0, help="seconds to listen after `send`")
+    ap.add_argument("--probe", type=float, default=10.0, help="seconds to wait for a sleepy board to answer when discovering")
     a = ap.parse_args(argv)
-    if a.board in ("monitor", "send"):      # `console.py monitor` without a board name
-        a.text, a.cmd, a.board = (a.cmd if a.cmd not in ("monitor", "send") else a.text), a.board, None
-    c = Console(board_port(a.config, a.board)).open()
+    if a.cmd == "list":
+        for d in discover(a.probe):
+            mods = " ".join(f"{m['name']}{'*' if m['running'] else ''}" for m in d["modules"] if m["installed"])
+            print(f"{d['port']}  mac={d['mac'] or '-'}  modules: {mods or '-'}")
+        return 0
+    c = Console(pick(a.port, a.probe)).open()
     try:
         if a.cmd == "monitor":
             end = time.time() + a.seconds if a.seconds else None
@@ -117,6 +164,7 @@ def main(argv=None):
         pass
     finally:
         c.close()
+    return 0
 
 
 if __name__ == "__main__":

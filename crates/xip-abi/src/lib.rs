@@ -26,7 +26,7 @@
 //!   module picks them when it registers an alarm or an interrupt, main picks them when it posts a request. A
 //!   module dispatches on them; component 0 is the host's own (`HOST`).
 //! * `call->data` / `call->len` is the payload (a request, usually one CBOR map keyed by field tags) and is valid
-//!   during the call only. A handler answers a request with `respond`.
+//!   during the call only. A handler answers a request with `Hw::reply`.
 //! * Time budget: a handler returns within `CONFIG_XIP_HANDLER_MS` (default 20 ms). `spi_transfer`,
 //!   `i2c_transfer` and `adc_read` are bounded and synchronous. Anything longer (a radio transmission, a settle
 //!   time) is started, and its end is an `alarm` or an
@@ -464,7 +464,7 @@ impl<'a> CallView<'a> {
         Some(CallView { component: c.component, method: c.method, value: c.value, flags: c.flags, data, pkt, from, id })
     }
 
-    /// The call is a request that expects [`Hw::respond`].
+    /// The call is a request that expects an answer ([`Hw::reply`]).
     pub fn wants_response(&self) -> bool {
         self.flags & 1 != 0
     }

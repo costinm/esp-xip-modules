@@ -486,8 +486,7 @@ typedef struct {
   // The packet moves: **the handle is consumed on success and on failure**, so there is never a doubt who owns it. The first
   // `len` bytes of the payload window are the message. The receiver gets a call `(component, method)` with `call.pkt`,
   // `call.from` = this module's component and `call.id` = `id`. A non-zero `id` asks for an answer, and the receiver sees
-  // `flags` bit 0: it answers with a `send` to that `from` with the same `id` (or with `respond`, which the host turns into the
-  // same message). The answer is an ordinary message, and so is every other one the module sends the asker: any number of them,
+  // `flags` bit 0: it answers with a `send` to that `from` with the same `id`. The answer is an ordinary message, and so is every other one the module sends the asker: any number of them,
   // any time, the same `id` or another. Nobody waits for an answer, and a module with nothing to say says nothing.
   //
   // # Returns
@@ -873,7 +872,7 @@ typedef struct {
   int32_t method;
   // IRQ: the pin level. Alarm: how late it fired, in ms (saturated). `HOST_NETWORK`: 1 or 0. Request: 0. A frame of a link: its signal (`link` component).
   int32_t value;
-  // Bit 0: the call is a request that expects an answer (`respond`, or `send` to `from` with the same `id`). Bit 1 (`CALL_LINK`): a frame of a link, `from` is its address and `id` an address token, not a request. Bit 2 (`CALL_LINK_EVENT`): an event of a link, its kind in bits 8..15.
+  // Bit 0: the call is a request that expects an answer (`send` to `from` with the same `id`, `Hw::reply`). Bit 1 (`CALL_LINK`): a frame of a link, `from` is its address and `id` an address token, not a request. Bit 2 (`CALL_LINK_EVENT`): an event of a link, its kind in bits 8..15.
   uint32_t flags;
   // Payload, valid during the call only.
   const uint8_t *data;

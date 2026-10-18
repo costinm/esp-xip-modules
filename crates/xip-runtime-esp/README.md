@@ -15,7 +15,7 @@ let n = xip_runtime::call("lora", b"idle", 43, method, &request, &mut answer)?; 
 
 The C it needs is in `components/` (`xip_runtime` and `xip_loader`): give the build those directories as extra component dirs.
 
-The Rust host owns the shared lwIP poller and the `MODULE_SLOTS` layout preset. Socket and flash ABI calls are declared but their event bridge is still pending; signed upload policy belongs in an optional no-std `mod_flash` module.
+The Rust host owns the shared lwIP poller (the socket events of the manifest's stream ports); flash ABI calls are declared but their event bridge is still pending; signed upload policy belongs in an optional no-std `mod_flash` module.
 
 ## Wi-Fi
 

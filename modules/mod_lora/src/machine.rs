@@ -85,7 +85,7 @@ pub struct Radio {
     cur: [u8; MAX_PAYLOAD],
 }
 
-/// What a call answers: the value the host's `respond` carries, if the call was a request.
+/// What a call answers: the value a reply carries, if the call was a request.
 pub type Answer = Option<i32>;
 
 impl Radio {

@@ -107,91 +107,6 @@ class Signing(unittest.TestCase):
         self.assertEqual(wf.unpack_header(wf.split_package(main)[2])["target"], 1)
 
 
-class FakeDevice:
-    """Just enough of a main for tests/device_test.py: the control commands of docs/protocol.md and the checks of
-    the upload service (key, version, chip)."""
-
-    def __init__(self, trust_pub, cpu):
-        self.trust, self.cpu = trust_pub, cpu
-        self.version, self.installed, self.running, self.runs, self.mode = 0, False, False, 0, ""
-        self.events = ""
-        self.sent = []
-
-    def control(self, line, timeout=15):
-        cmd, _, rest = line.partition(" ")
-        if cmd == "status":
-            return (f"name=hello tag=1 installed=false running=false version=0 last=0 runs=0 ms=0 stack_free=0 check=0\n"
-                    f"name=test tag=2 installed={str(self.installed).lower()} running={str(self.running).lower()} "
-                    f"version={self.version} last=0 runs={self.runs} ms=3 stack_free=2000 check=0\n")
-        if cmd == "wifi":
-            return {"start": "state=joining\n", "stop": "state=off\n"}.get(rest, "state=up ssid=\"DIRECT-ef-flash\" ip=192.168.49.9 connected=1 rssi=-40 saved_ssid=\"(flash network)\" psk=unset\n")
-        if cmd == "loader":
-            return "ok\n"
-        if cmd == "events":
-            return self.events
-        if cmd == "start" and self.installed:
-            self.running = rest.startswith("test serve")
-            if rest.startswith("test alarm"):
-                self.events += "module=test id=32511 pass=3 fail=0\nmodule=test id=32270 oneshot ok\nmodule=test id=32271 periodic ok\nmodule=test id=32272 periodic-cancel ok\n"
-            self.mode = rest
-            if not self.running:
-                self.runs += 1
-                self.events += "module=test id=32511 pass=30 fail=0\n"
-            return "ok\n"
-        if cmd == "test.echo":
-            self.events += "module=test id=32528 " + rest + "\n"
-            return f"value={rest}\n"
-        if cmd == "stop":
-            self.running = False
-            return "ok\n"
-        return "error: unknown method\n"
-
-    def upload(self, body, name=None):
-        pub, _, hdr, _, image = wf.split_package(body[16:])
-        h = wf.unpack_header(hdr)
-        if pub != self.trust:
-            return "ERR 8 key-mismatch"
-        if h["version"] < self.version:
-            return "ERR 9 rollback"
-        if h["cpu"] != self.cpu:
-            return "ERR 10 wrong-chip-or-target"
-        self.version, self.installed = h["version"], True
-        return "OK %d" % len(image)
-
-
-class LabConfig(unittest.TestCase):
-    """tests/device.toml is read by esp-wifi-loader's provision.py and by device_test.py: every board is complete."""
-
-    def test_the_lab_config_is_complete(self):
-        import tomllib
-        cfg = tomllib.load(open(os.path.join(ROOT, "tests", "device.toml"), "rb"))
-        for b in cfg["board"]:
-            for key in ("name", "chip", "mac", "port", "phone", "kind", "host", "key"):
-                self.assertIn(key, b, b["name"])
-            self.assertIn(b["chip"], wf.CHIPS)
-            self.assertRegex(b["mac"], r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
-
-
-class DeviceScript(unittest.TestCase):
-    def test_the_bench_procedure_runs_against_a_device_that_behaves(self):
-        import device_test
-        d = tempfile.mkdtemp()
-        key = os.path.join(d, "k.pem")
-        sign.keygen(key)
-        mods = os.path.join(d, "esp32c6", "modules")
-        os.makedirs(mods)
-        open(os.path.join(mods, "mod_rtest.dmod"), "wb").write(dmod.pack(b"\0" * 4000, 0x44, 2))
-        device = FakeDevice(sign.public_key(key), wf.CHIPS["esp32c6"])
-        board = dict(name="fake", chip="esp32c6", host="x", key=key)
-        device_test.run_board(board, d, t=device, sleep=lambda s: None)
-        self.assertFalse(device.running)         # the procedure ends with `stop`
-        # a device that accepts a wrong key must fail the procedure
-        bad = FakeDevice(sign.public_key(key), wf.CHIPS["esp32c6"])
-        bad.upload = lambda body, name=None: "OK 1"
-        with self.assertRaises(device_test.Failed):
-            device_test.run_board(board, d, t=bad, sleep=lambda s: None)
-
-
 def cbor_decode(data, pos=0):
     """Just enough CBOR to read a manifest back: (value, next position)."""
     major, info = data[pos] >> 5, data[pos] & 31
@@ -266,22 +181,6 @@ class Manifest(unittest.TestCase):
         self.assertIn("echo", [x[2] for x in m[3]])
 
 
-class UpdateNetwork(unittest.TestCase):
-    """The bench delegates uploads to its configured loader endpoint."""
-    def test_upload_uses_loader_without_main_installer_commands(self):
-        import device_test
-        t = device_test.Transport("192.0.2.1", None, "unused")
-        t.control = lambda *args: self.fail("upload must not start firmware services")
-        original = device_test.upload.send
-        sent = []
-        device_test.upload.send = lambda host, port, body: sent.append((host, port, body)) or "OK"
-        try:
-            self.assertEqual(t.upload(b"h" * 16 + b"image", "test"), "OK")
-        finally:
-            device_test.upload.send = original
-        self.assertEqual(sent, [("192.0.2.1", 5227, b"image")])
-
-
 class ConsoleAnswer(unittest.TestCase):
     """tools/console.py: the answer to a command is what is not an ESP-IDF log line."""
 
@@ -303,6 +202,27 @@ class ConsoleAnswer(unittest.TestCase):
         self.assertEqual(c.ser.sent, b"status\n")
         c.ser = Ser([])
         self.assertEqual(c.command("status", timeout=0.2, idle=0.01), "no reply")
+
+    def test_a_board_is_discovered_by_asking_its_console(self):
+        import console
+
+        class Ser:
+            sent = b""
+            chunks = [b"", b"", b'{1:{4:"main"},4:[{1:"console",2:20,3:true,4:true},{1:"test",2:2,3:true,4:false}]}\r\n']
+
+            def reset_input_buffer(self): pass
+            def write(self, b): self.sent += b
+            def read(self, n): return self.chunks.pop(0) if self.chunks else b""
+            def close(self): pass
+
+        original = console.Console._open_serial
+        console.Console._open_serial = staticmethod(lambda path: Ser())
+        try:
+            d = console.probe("/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:AC:5A:20-if00", seconds=3)
+        finally:
+            console.Console._open_serial = original
+        self.assertEqual(d["mac"], "10:bd:a3:ac:5a:20")
+        self.assertEqual([(m["name"], m["running"]) for m in d["modules"]], [("console", True), ("test", False)])
 
 
 if __name__ == "__main__":

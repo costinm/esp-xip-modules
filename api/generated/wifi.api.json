@@ -108,7 +108,7 @@
     {
       "access": "authenticated",
       "component": "wifi",
-      "doc": "Everything is absent while the radio is off. This is the CBOR form of the `wifi_info` host call.",
+      "doc": "Everything is absent while the radio is off. This is the CBOR form of `wifi.state`.",
       "index": 3,
       "method": "state",
       "name": "wifi.state",

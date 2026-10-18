@@ -87,7 +87,7 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len);
  * not running). */
 int xip_loader_stop(int slot, uint32_t timeout_ms);   /* timeout 0: only queue the stop */
 /* Hand a request for (component, method) to the running module (its inbox holds one), or do that and wait for its
- * respond(). */
+ * reply (a message to the application). */
 int xip_loader_post(int slot, int component, int method, const uint8_t *data, size_t len);
 int xip_loader_request(int slot, int component, int method, const uint8_t *data, size_t len,
                           uint8_t *response, size_t capacity, size_t *response_len, uint32_t timeout_ms);

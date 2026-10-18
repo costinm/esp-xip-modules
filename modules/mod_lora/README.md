@@ -59,7 +59,7 @@ DMesh's `fw/main/src/modules.rs` routes event 10 of the `lora` module to the tra
 ## Installing
 
 The module is signed (esp-xip-modules `sign.py`) and uploaded to a running `main`; see the esp-xip-modules
-`docs/getting-started.md`. On a DMesh Main the slot is `lora` (tag 43); on an esp-xip-modules `main` it is the `lora` slot of `main/main.c`. A bench run, with results, is in
+`docs/getting-started.md`. On a DMesh Main the module is `lora` (component 43); on an esp-xip-modules `main` it is the `lora` slot of `main/main.c`. A bench run, with results, is in
 [notes/ai/2026-10-11-mod-lora-on-esp-modules.md](../../notes/ai/2026-10-11-mod-lora-on-esp-modules.md).
 
 ## Hardware notes

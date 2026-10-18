@@ -81,5 +81,5 @@ The answers the console prints as lists, one record per line (`device_info` modu
 | Tag | Field | Type | Description |
 |---:|---|---|---|
 | 1 | `module` | `string` | |
-| 2 | `id` | `uint` | The `event_id` of `emit`. |
+| 2 | `id` | `uint` | The event id (`Hw::event`). |
 | 3 | `text` | `string` | The text, or the bytes as hex. |

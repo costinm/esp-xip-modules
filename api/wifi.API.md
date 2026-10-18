@@ -44,7 +44,7 @@ names). To change only the channel, `get`, edit and `set`. Returns once the stat
 
 ## 3. `state` — What is true now
 
-Everything is absent while the radio is off. This is the CBOR form of the `wifi_info` host call.
+Everything is absent while the radio is off. This is the CBOR form of `wifi.state`.
 
 **Access:** authenticated
 

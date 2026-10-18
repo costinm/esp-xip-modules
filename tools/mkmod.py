@@ -5,7 +5,7 @@
 
 The toolchain comes from the PATH (an ESP-IDF shell: `. ./env.sh`). Checks that a module must pass
 before it is worth signing: no relocations, no undefined symbols, no .data/.bss (the image is read-only
-flash), and it fits its slot. docs/writing-modules.md explains why.
+flash), and it fits its page. docs/writing-modules.md explains why.
 """
 import argparse
 import os
@@ -163,7 +163,7 @@ def cargo_link(cfg, cargo, window, link_script, tmp):
     """Return link(data_vma) -> elf for a Rust module: `cargo rustc` of the bin with the module linker script.
 
     cargo = (manifest, bin, features). Needs the Rust toolchain with the ESP targets on the PATH (rust-src for
-    -Zbuild-std). Xtensa Rust cannot produce PIC: it is linked at the slot's fixed address (like C).
+    -Zbuild-std). Xtensa Rust cannot produce PIC: it is linked at the page's fixed address (like C).
     """
     manifest, binname, features = cargo
     features = ",".join(filter(None, [features, "xip-abi/global-alloc", "xip-abi/allocator-api"]))

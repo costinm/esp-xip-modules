@@ -6,7 +6,7 @@ too; measurements are also emitted as events (value type CBOR array).
 
 Settings the module reads when a request omits a field: `battery.pin`, `battery.ref_mv`, `battery.divider`
 (decimal, `2.2`) or `battery.divider_x100`, `battery.min_mv`, `battery.max_mv`, `battery.ctrl`, `battery.ctl_lvl`,
-`button.gpio`. The module needs the host features `ADC` and `SETTINGS`.
+`button.gpio`. The module uses the `hw` component (ADC) and the settings.
 
 An error is answered as `{9: code}` (a negative `ERR_*` of the ABI or `-2` bad request, `-4` empty range, `-5`
 control pin).
