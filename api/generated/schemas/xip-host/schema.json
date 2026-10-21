@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "const": "host.heap_info"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 0,
+      "x-method-index": 45
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "host.device_info"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 0,
+      "x-method-index": 60
+    }
+  ]
+}

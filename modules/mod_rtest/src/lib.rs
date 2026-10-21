@@ -2,11 +2,13 @@
 //! both allocators of `xip-abi` (the global one and an explicit one) and checks that a failed allocation is an error, not an abort.
 //!
 //! The start request picks the mode: empty or `selftest` (every check that needs no wiring; finishes with 0 when all pass),
-//! `serve`, `alarm`, `gpio A B`, `spi SCK MISO MOSI CS [BUS]`. Events: `0x7e00 + n` per check, text `"<name> ok"` or
+//! `serve`, `alarm`, `async` (owned event/datagram echo), `async-alarm`,
+//! `async-yield`, `async-pause` (device overflow bench), `gpio A B`, `spi SCK MISO MOSI CS [BUS]`. Events: `0x7e00 + n` per check, text `"<name> ok"` or
 //! `"<name> FAIL <code>"`; `0x7eff` the summary.
 //!
 //! Like every module it never waits and has no writable statics: what it remembers is the state block, and every `Vec` is
-//! freed before the handler returns (a block still held when the module stops is `ERR_LEAK`).
+//! freed before stop (a block still held when the module stops is `ERR_LEAK`).
+//! Async mode intentionally retains owned calls/future allocations between handlers.
 #![no_std]
 #![feature(allocator_api)]
 
@@ -53,6 +55,7 @@ const MODE_SELFTEST: u8 = 0;
 const MODE_SERVE: u8 = 1;
 const MODE_ALARM: u8 = 2;
 const MODE_GPIO: u8 = 3;
+const MODE_ASYNC: u8 = 4;
 
 /// Bytes of state the image asks for (`mkmod` in Cargo.toml). An all-zero `State` is the initial state.
 pub const STATE_BYTES: usize = 64;
@@ -72,6 +75,7 @@ pub struct State {
     calls: u32,
     kept: u32,
     t0: u64,
+    task: xip_abi::task::Task,
 }
 
 /// A line of text built in place: no `format!`, so a check costs no allocation.
@@ -467,6 +471,9 @@ impl State {
 impl Module for State {
     fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
         self.calls += 1;
+        if self.mode == MODE_ASYNC {
+            return self.task.handle(hw, call);
+        }
         if call.component == 0 {
             if call.is_host(HOST_STOP) {
                 hw.event(C_TEST, EV_SUMMARY, b"stopped");
@@ -474,6 +481,119 @@ impl Module for State {
             }
             if !call.is_host(HOST_START) { return xip_abi::RET_CONTINUE as i32; } // NETWORK, WAKE: not used
             let d = call.data;
+            if d.starts_with(b"async") {
+                self.mode = MODE_ASYNC;
+                let alarm = d.starts_with(b"async-alarm");
+                let yielding = d.starts_with(b"async-yield");
+                let pause = d.starts_with(b"async-pause");
+                let context = d.starts_with(b"async-context");
+                return self.task.start(hw, move |ctx| async move {
+                    if context {
+                        // A raw SDK component call between global allocations.
+                        // No wrapper may replace the platform's native TLS context.
+                        let mut before = Vec::<u8>::new();
+                        if before.try_reserve_exact(32).is_err() { return ERR_NOMEM; }
+                        before.extend_from_slice(b"before native call");
+                        let mut digest = [0u8; 32];
+                        let mut len = 0usize;
+                        let rc = match ctx.with_hw(|h| {
+                            let Some(psa) = xip_abi::psa::PsaTable::from_host(*h) else { return xip_abi::ERR_UNSUPPORTED; };
+                            unsafe { (psa.psa_hash_compute)(xip_abi::psa::ALG_SHA_256, b"abc".as_ptr(), 3,
+                                digest.as_mut_ptr(), digest.len(), &mut len) }
+                        }) { Ok(rc) => rc, Err(e) => return e };
+                        if rc != 0 { return rc; }
+                        if len != 32 || digest != [0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,
+                            0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23,0xb0,0x03,0x61,0xa3,
+                            0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad] { return ERR_ARG; }
+                        if let Err(e) = ctx.sleep(1).await { return e; }
+                        let mut after = Vec::<u8>::new();
+                        if after.try_reserve_exact(32).is_err() { return ERR_NOMEM; }
+                        after.extend_from_slice(&before);
+                        if after != b"before native call" { return ERR_ARG; }
+                        return xip_abi::RET_DONE as i32;
+                    }
+                    if yielding {
+                        if let Err(e) = ctx.sleep(0).await { return e; }
+                        let mut yielded = 0;
+                        core::future::poll_fn(|cx| {
+                            if yielded == 2 { core::task::Poll::Ready(()) } else {
+                                yielded += 1; cx.waker().wake_by_ref(); core::task::Poll::Pending
+                            }
+                        }).await;
+                        return xip_abi::RET_DONE as i32;
+                    }
+                    if alarm {
+                        if let Err(e) = ctx.sleep(30).await { return e; }
+                        if let Err(e) = ctx.with_hw(|h| h.event(C_TEST, EV_SUMMARY, b"async alarm ok")) { return e; }
+                        return xip_abi::RET_DONE as i32;
+                    }
+                    // Device bench: leave time to burst requests over UART while
+                    // the task is pending, then exercise queue refusal/recovery.
+                    if pause { if let Err(e) = ctx.sleep(1000).await { return e; } }
+                    let mut conn = 0u32;
+                    let mut pending = Vec::<u8>::new();
+                    let mut sent = 0usize;
+                    loop {
+                        let mut c = ctx.next_call().await;
+                        if c.component == C_TEST && c.method == 0 && c.flags & xip_abi::CALL_LINK == 0 {
+                            let handle = c.id as u32;
+                            if c.value as u32 == xip_abi::SOCKET_EVENT_OPEN {
+                                if conn == 0 { conn = handle; } else { let _ = ctx.with_hw(|h| h.socket_close(handle)); }
+                                continue;
+                            }
+                            if handle != conn { continue; }
+                            if c.value as u32 == xip_abi::SOCKET_EVENT_CLOSED || c.value as u32 == xip_abi::SOCKET_EVENT_EOF {
+                                let _ = ctx.with_hw(|h| h.socket_close(handle));
+                                conn = 0; pending.clear(); sent = 0;
+                                continue;
+                            }
+                            if c.value as u32 != xip_abi::SOCKET_EVENT_READABLE && c.value as u32 != xip_abi::SOCKET_EVENT_WRITABLE { continue; }
+                            loop {
+                                if pending.is_empty() {
+                                    let mut buf = [0u8; 256];
+                                    if pending.try_reserve(256).is_err() { return ERR_NOMEM; }
+                                    let n = match ctx.with_hw(|h| h.socket_read(handle, &mut buf)) { Ok(n) => n, Err(e) => return e };
+                                    if n == ERR_AGAIN { break; }
+                                    if n <= 0 {
+                                        let _ = ctx.with_hw(|h| h.socket_close(handle)); conn = 0; break;
+                                    }
+                                    pending.extend_from_slice(&buf[..n as usize]); sent = 0;
+                                }
+                                let n = match ctx.with_hw(|h| h.socket_write(handle, &pending[sent..])) { Ok(n) => n, Err(e) => return e };
+                                if n == ERR_AGAIN { break; }
+                                if n <= 0 {
+                                    let _ = ctx.with_hw(|h| h.socket_close(handle)); conn = 0; pending.clear(); sent = 0; break;
+                                }
+                                sent += n as usize;
+                                if sent == pending.len() { pending.clear(); sent = 0; break; }
+                            }
+                            continue;
+                        }
+                        // Deliberately cross a handler boundary with the owned payload.
+                        if let Err(e) = ctx.sleep(5).await { return e; }
+                        if c.flags & xip_abi::CALL_LINK != 0 && c.flags & xip_abi::CALL_LINK_EVENT == 0 {
+                            if let Some(packet) = c.packet.as_mut() {
+                                let _ = packet.send(c.from, 0, 0, c.id);
+                            }
+                        } else if c.component == C_TEST && c.method == M_ECHO {
+                            let v = match c.view() { Ok(v) => v, Err(e) => return e };
+                            let wants_response = v.wants_response();
+                            let text = cbor::get_text(v.data, 1).ok().flatten().unwrap_or(&[]);
+                            if let Err(e) = ctx.with_hw(|h| { h.event(C_TEST, EV_ECHO, text); }) { return e; }
+                            if wants_response {
+                                if let Some(packet) = c.packet.as_mut() {
+                                    // Reply with this same CBOR packet even when all
+                                    // owned packet slots are occupied by queued calls.
+                                    let _ = packet.send(c.from, c.component, c.method, c.id);
+                                } else {
+                                    let v = match c.view() { Ok(v) => v, Err(e) => return e };
+                                    if let Err(e) = ctx.with_hw(|h| h.reply(&v, v.data)) { return e; }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
             if d.starts_with(b"serve") {
                 self.mode = MODE_SERVE;
                 hw.log(b"mod_rtest serving");

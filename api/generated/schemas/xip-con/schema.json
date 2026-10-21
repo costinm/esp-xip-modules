@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "line": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        },
+        "method": {
+          "const": "console.parse"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 20,
+      "x-method-index": 1
+    },
+    {
+      "properties": {
+        "component": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "error": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "string"
+        },
+        "method": {
+          "const": "console.render"
+        },
+        "result": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "map"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 20,
+      "x-method-index": 2
+    }
+  ]
+}

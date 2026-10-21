@@ -6,14 +6,9 @@ on:
 jobs:
   host-tests:
     runs-on: ubuntu-latest
-    env: {ESP_WIFI_LOADER_DIR: "${{ github.workspace }}/esp-wifi-loader"}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: costinm/esp-wifi-loader      # owns sign.py, upload.py, provision.py, reset.py ...
-          path: esp-wifi-loader
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends openssl gcc
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc
       - run: scripts/test-host.sh abi
       - run: scripts/test-host.sh c
       - run: scripts/test-host.sh rust
@@ -23,16 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     # Same image as the local Dockerfile (docker.io/espressif/idf:v6.0.2).
     container: espressif/idf:v6.0.2
-    env: {ESP_WIFI_LOADER_DIR: "${{ github.workspace }}/esp-wifi-loader"}
     strategy:
       matrix:
         cpu: [esp32, esp32s3, esp32c6]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: costinm/esp-wifi-loader      # owns sign.py, upload.py, provision.py, reset.py ...
-          path: esp-wifi-loader
       - name: Build
         shell: bash
         run: |
@@ -46,38 +36,3 @@ jobs:
           path: |
             target/out/${{ matrix.cpu }}/main.bin
             target/out/${{ matrix.cpu }}/modules/*.dmod
-  # Signs main and the modules with the repository key and replaces the rolling release `latest`.
-  # Needs keys/modules.pub (committed) and the repository secret XIP_SIGNING_KEY (docs/releasing.md).
-  # The logic is in scripts/publish-release.sh and scripts/publish-latest.sh: run them locally to test.
-  publish:
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-    needs: [firmware]
-    runs-on: ubuntu-latest
-    permissions: {contents: write}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: {path: dl}          # dl/firmware-<cpu>/{main.bin,modules/*.dmod}
-      - uses: actions/checkout@v4
-        with:
-          repository: costinm/esp-wifi-loader
-          path: esp-wifi-loader
-      - name: Is this repository set up for releases?
-        id: ready
-        run: |
-          if [ -f keys/modules.pub ] && [ -n "$KEY" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "no keys/modules.pub or XIP_SIGNING_KEY: skipping the release"; fi
-        env:
-          KEY: ${{ secrets.XIP_SIGNING_KEY }}
-      - name: Sign and collect
-        if: steps.ready.outputs.ok == 'true'
-        env:
-          XIP_SIGNING_KEY: ${{ secrets.XIP_SIGNING_KEY }}
-        run: |
-          sudo apt-get install -y --no-install-recommends openssl
-          for d in dl/firmware-*; do mkdir -p "target/out/${d#dl/firmware-}"; cp -r "$d"/* "target/out/${d#dl/firmware-}/"; done
-          ESP_WIFI_LOADER_DIR="$PWD/esp-wifi-loader" scripts/publish-release.sh
-      - name: Publish the rolling release
-        if: steps.ready.outputs.ok == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: scripts/publish-latest.sh "$version"

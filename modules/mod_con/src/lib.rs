@@ -653,6 +653,10 @@ fn render_map(o: &mut Out, resp: &[CatField], res: Reader) {
     let mut r = res;
     match r.next() {
         Some(Item::Map(0)) => o.s("ok"),
+        Some(item @ Item::Neg(code)) => {
+            if code == (-ERR_BUSY - 1) as u64 { o.s("error: busy"); }
+            else { o.s("error: module "); render_scalar(o, &item, false); }
+        },
         Some(Item::Map(n)) => {
             let mut scalars = 0usize;
             for _ in 0..n {
@@ -1559,6 +1563,7 @@ impl Module for State {
     fn handle(&mut self, hw: &Hw, c: &CallView) -> i32 {
         const CONTINUE: i32 = xip_abi::RET_CONTINUE as i32;
         if c.component == xip_abi::HOST_COMPONENT as i32 {
+            if c.is_host(xip_abi::HOST_STOP) { self.drop_conn(hw); }
             // the port of the manifest binds the lines to this module: nothing to open or close
             return CONTINUE;
         }

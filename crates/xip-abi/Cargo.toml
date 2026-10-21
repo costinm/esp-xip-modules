@@ -13,7 +13,6 @@ global-alloc = []
 # Standard RustCrypto trait adapters backed by the native PSA table.
 rustcrypto = ["dep:digest", "dep:p256"]
 
-[workspace]
 
 [dependencies]
 digest = { version = "0.10", default-features = false, optional = true }

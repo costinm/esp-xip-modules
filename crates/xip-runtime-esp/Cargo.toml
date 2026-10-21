@@ -7,7 +7,6 @@ description = "Rust side of an esp-xip-modules application: start the host and t
 publish = false
 
 # Built by the application that uses it (ESP-IDF, or a PC for the tests); not part of a Cargo workspace.
-[workspace]
 
 [dependencies]
 xip-abi = { path = "../xip-abi" }

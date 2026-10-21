@@ -40,6 +40,10 @@ package goes to the page that already holds it, else to the first page that is n
 the installed one, and never 44 (this module cannot replace itself). Minimum versions are kept in the loader state journal (eight entries:
 the page number). Xtensa images are linked for one page: install a new module there with esptool at its `modules.txt` offset.
 
+The running application is never written: when `device_info` says Main (partition `main`) runs this module, an upload of Main, or raw flash that touches that
+partition, is refused with `ERR 10`. (Erasing the code that executes hung the board in the first hardware test.) Replace Main with the loader or esptool;
+a spare partition would make it possible.
+
 ## Build and test
 
 `scripts/build.sh` builds it with the other modules; `cargo test` in this directory (also run by `scripts/test-host.sh rust`).

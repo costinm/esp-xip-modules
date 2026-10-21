@@ -1,5 +1,6 @@
 """Host tests of the tools and of the pieces that must agree with each other. No board needed."""
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -13,9 +14,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dmod  # noqa: E402
 import mkmod  # noqa: E402
-import loader_tools  # noqa: E402,F401  (esp-wifi-loader's tools)
-import sign  # noqa: E402
-import wl_format as wf  # noqa: E402
+import flash_upload  # noqa: E402
 
 
 def read(*path):
@@ -34,15 +33,38 @@ class Abi(unittest.TestCase):
 class Dmod(unittest.TestCase):
     def test_roundtrip(self):
         image = dmod.pack(b"\x01\x02\x03\x04" * 20, 0x44, 7, code_vma=0x40300000, data_vma=0x3F700000, stack_bytes=8192,
-                          required_features=3, fixed_vma=True)
+                          required_features=3, fixed_vma=True, static_addr=dmod.STATIC_BASES["esp32"])
         h = dmod.unpack(image)
-        self.assertEqual((h["tag"], h["entry_offset"], h["image_size"], h["flags"]), (7, 0x44, 64 + 80, 1))
+        self.assertEqual((h["tag"], h["entry_offset"], h["image_size"], h["flags"]), (7, 0x44, 64 + 80, 3))
         self.assertEqual(len(image) % 4, 0)
 
     def test_rejects_bad_entry(self):
         for entry in (0x10, 0x40 + 100, 0x45):
             with self.assertRaises(ValueError):
-                dmod.pack(b"\0" * 100, entry, 1)
+                dmod.pack(b"\0" * 100, entry, 1, static_addr=dmod.STATIC_BASES["esp32c6"])
+
+    def test_static_ram_cell_is_explicit_and_serialized(self):
+        address = mkmod.static_address("esp32c6", 4 * 65536)
+        image = dmod.pack(b"\0" * 32, 0x44, 2, static_addr=address)
+        header = dmod.unpack(image)
+        self.assertEqual(header["static_addr"], address)
+        self.assertEqual(header["flags"], dmod.FLAG_STATIC_RAM)
+        self.assertEqual(int.from_bytes(image[52:56], "little"), address)
+        self.assertEqual(image[56:64], b"\0" * 8)
+        with self.assertRaises(TypeError):
+            dmod.pack(b"\0" * 32, 0x44, 2)
+        for bad in (0, address + 1, dmod.STATIC_BASES["esp32c6"] - 16,
+                    dmod.STATIC_BASES["esp32c6"] + dmod.STATIC_SLOTS * dmod.STATIC_SLOT_BYTES):
+            with self.assertRaises(ValueError):
+                dmod.pack(b"\0" * 32, 0x44, 2, static_addr=bad)
+
+    def test_platform_cell_derivation_and_slot_limit(self):
+        for chip, base in dmod.STATIC_BASES.items():
+            self.assertEqual(mkmod.static_address(chip, 0), base)
+            self.assertEqual(mkmod.static_address(chip, 15 * 65536), base + 15 * 16)
+            for bad_offset in (-65536, 1, 65535, 16 * 65536):
+                with self.assertRaises(ValueError):
+                    mkmod.static_address(chip, bad_offset)
 
 
 class Slots(unittest.TestCase):
@@ -67,44 +89,37 @@ class Slots(unittest.TestCase):
             self.assertEqual((code, data), (mkmod.CHIPS[chip]["code_base"], mkmod.CHIPS[chip]["data_base"]), chip)
 
 
-class Signing(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.dir = tempfile.mkdtemp()
-        cls.key = os.path.join(cls.dir, "k.pem")
-        sign.keygen(cls.key)
+class Packages(unittest.TestCase):
+    """The package format of the upload port (docs/development.md, "Formats"): key (65) | signature (64) | header (216) | block table | image.
+    The committed vectors were made once by the frozen loader tools; mod_flash's own tests verify and install them."""
+    DATA = os.path.join(ROOT, "tests", "data")
 
-    def test_module_package_layout_and_signature(self):
-        image = dmod.pack(os.urandom(5000), 0x44, 2)
-        pkg = sign.make_package(self.key, "esp32c6", 9, "test", image, "module")
-        pub, sig, hdr, table, body = wf.split_package(pkg)
-        self.assertEqual(body, image)
-        h = wf.unpack_header(hdr)
-        self.assertEqual((h["target"], h["fqdn"], h["version"]), (wf.TARGETS["module"], "test", 9))
-        self.assertEqual(h["image_sha256"], hashlib.sha256(image).digest())
-        if shutil.which("openssl"):
-            self.assertTrue(self.verify(pub, sig, hdr))
-            self.assertFalse(self.verify(pub, sig, hdr[:-1] + b"\x01"))
+    def parts(self, pkg):
+        key, sig, header = pkg[:65], pkg[65:129], pkg[129:345]
+        self.assertEqual(header[:4], b"WLH1")
+        target, version, size, bsize, count = header[6], int.from_bytes(header[8:12], "little"), int.from_bytes(header[12:16], "little"), \
+            int.from_bytes(header[16:18], "little"), int.from_bytes(header[18:20], "little")
+        table = pkg[345:345 + 8 * count]
+        image = pkg[345 + 8 * count:]
+        self.assertEqual((bsize, len(image), count), (4096, size, -(-size // 4096)))
+        self.assertEqual(header[20:52], hashlib.sha256(image).digest())
+        self.assertEqual(header[52:84], hashlib.sha256(table).digest())
+        for i in range(count):
+            self.assertEqual(table[8 * i:8 * i + 8], hashlib.sha256(image[4096 * i:4096 * (i + 1)]).digest()[:8])
+        return key, sig, header[84], header[88:88 + header[84]], target, version, image
 
-    @staticmethod
-    def verify(pub, sig, data):
-        def der(x):
-            b = x.to_bytes(32, "big").lstrip(b"\0") or b"\0"
-            if b[0] & 0x80:
-                b = b"\0" + b
-            return b"\x02" + bytes([len(b)]) + b
-        body = der(int.from_bytes(sig[:32], "big")) + der(int.from_bytes(sig[32:], "big"))
-        with tempfile.TemporaryDirectory() as d:
-            open(f"{d}/k.der", "wb").write(bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200") + pub)
-            open(f"{d}/s.der", "wb").write(b"\x30" + bytes([len(body)]) + body)
-            open(f"{d}/h.bin", "wb").write(hashlib.sha256(data).digest())
-            r = subprocess.run(["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", f"{d}/k.der", "-keyform", "DER",
-                                "-in", f"{d}/h.bin", "-sigfile", f"{d}/s.der"], capture_output=True)
-            return r.returncode == 0
+    def test_vectors_of_the_signed_package(self):
+        key, sig, _, name, target, version, image = self.parts(open(os.path.join(self.DATA, "module-lora-esp32c6.pkg"), "rb").read())
+        self.assertEqual((key[0], name, target), (4, b"lora", 4))
+        self.assertNotEqual(sig, bytes(64))
+        _, _, _, _, target, version, image = self.parts(open(os.path.join(self.DATA, "loader-esp32c6.pkg"), "rb").read())
+        self.assertEqual((target, version, image[0]), (2, 9, 0xe9))
 
-    def test_main_and_module_packages_share_one_format(self):
-        main = sign.make_package(self.key, "esp32c6", 1, "costinm/esp-xip-modules:latest", b"\xe9" + bytes(5000), "main")
-        self.assertEqual(wf.unpack_header(wf.split_package(main)[2])["target"], 1)
+    def test_the_unsigned_package_of_flash_upload_has_the_same_layout(self):
+        image = dmod.pack(os.urandom(5000), 0x44, 2, static_addr=dmod.STATIC_BASES["esp32c6"])
+        key, sig, _, name, target, version, body = self.parts(flash_upload.package(image, 4, b"test", 13, 9)[16:])
+        self.assertEqual((key, sig, name, target, version, body), (bytes(65), bytes(64), b"test", 4, 9, image))
+        self.assertEqual(flash_upload.package(image, 4, b"test", 13, dry=True)[5], 2)
 
 
 def cbor_decode(data, pos=0):
@@ -149,22 +164,16 @@ class Manifest(unittest.TestCase):
         self.assertEqual(m[6], "serve")
         self.assertEqual(m[4][0][0], "Row")
 
-    def test_flash_slot_declaration_is_in_manifest(self):
-        base = bytes.fromhex(self.DEMO)
-        m, _ = cbor_decode(mkmod.manifest_with(base, flash_slots=(3, 1, 3)))
-        self.assertEqual(m[7], [1, 3])
-        self.assertNotIn(7, cbor_decode(mkmod.manifest_with(base))[0])
-
     def test_the_manifest_sits_after_the_code_inside_the_image(self):
         m = mkmod.manifest_with(bytes.fromhex(self.DEMO))
-        image = dmod.pack(b"\x01\x02\x03\x04" * 5, 0x44, 7, manifest=m)
+        image = dmod.pack(b"\x01\x02\x03\x04" * 5, 0x44, 7, manifest=m, static_addr=dmod.STATIC_BASES["esp32c6"])
         h = dmod.unpack(image)
         self.assertEqual(h["manifest_offset"], 64 + 20)
         self.assertEqual(h["manifest_size"], len(m))
         self.assertEqual(h["image_size"], len(image))
         self.assertEqual(dmod.manifest_of(image), m)
         self.assertEqual(len(image) % 4, 0)
-        plain = dmod.unpack(dmod.pack(b"\x01\x02\x03\x04" * 2, 0x44, 7))
+        plain = dmod.unpack(dmod.pack(b"\x01\x02\x03\x04" * 2, 0x44, 7, static_addr=dmod.STATIC_BASES["esp32c6"]))
         self.assertEqual((plain["manifest_offset"], plain["manifest_size"]), (0, 0))
 
     def test_every_module_api_has_its_checked_in_manifest(self):
@@ -179,6 +188,21 @@ class Manifest(unittest.TestCase):
         m, _ = cbor_decode(dmod.manifest_of(open(image_path, "rb").read()))
         self.assertEqual((m[1], m[2]), ("test", 2))
         self.assertIn("echo", [x[2] for x in m[3]])
+
+    def test_native_metadata_matches_the_packed_manifest_and_state(self):
+        image_path = os.path.join(ROOT, "target/out/esp32c6/modules/mod_rtest.dmod")
+        if not os.path.exists(image_path):
+            self.skipTest("no built module image")
+        with tempfile.TemporaryDirectory() as directory:
+            metadata_path = os.path.join(directory, "module.json")
+            subprocess.run([sys.executable, os.path.join(ROOT, "tools/build_mod.py"),
+                            os.path.join(ROOT, "modules/mod_rtest"), "--host-metadata", metadata_path], check=True)
+            with open(metadata_path) as source:
+                metadata = json.load(source)
+        with open(image_path, "rb") as source:
+            image = source.read()
+        self.assertEqual(bytes(metadata["manifest"]), dmod.manifest_of(image))
+        self.assertEqual(metadata["state_bytes"], dmod.unpack(image)["state_bytes"])
 
 
 class ConsoleAnswer(unittest.TestCase):

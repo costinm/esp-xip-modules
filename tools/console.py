@@ -11,7 +11,7 @@ Without --port the only board that answers is used (or $XIP_PORT); with several,
 borrow whatever fits (chip, modules installed) from discover(); a lock file under target/ for borrow/release comes later, and with secrets the console
 over USB is the way to unlock or reset a test device.
 
-Resetting the board, including the five quick resets that start the loader, is esp-wifi-loader's reset.py.
+The five quick resets that start the loader (Stage2) are not done here: press reset five times, or use the loader project's reset tool.
 
 Commands (`help` on the board lists them): status, start, stop, wifi, help, reset, nv, heap, COMPONENT.METHOD key=value.
 
@@ -35,7 +35,7 @@ MAC = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
 
 
 class Console:
-    """Serial command reader; signing/upload tools are independent."""
+    """Serial command reader."""
     def __init__(self, path):
         self.path, self.ser = path, None
 

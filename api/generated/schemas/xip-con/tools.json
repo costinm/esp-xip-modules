@@ -1,0 +1,110 @@
+[
+  {
+    "description": "text line to request",
+    "inputSchema": {
+      "properties": {
+        "line": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "console.parse",
+    "outputSchema": {
+      "properties": {
+        "component": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "fields": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "map"
+        },
+        "local": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "string"
+        },
+        "method": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 20,
+    "x-method-index": 1,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "answer to text",
+    "inputSchema": {
+      "properties": {
+        "component": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "error": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "string"
+        },
+        "method": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "result": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "map"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "console.render",
+    "outputSchema": {
+      "properties": {
+        "text": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 20,
+    "x-method-index": 2,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  }
+]

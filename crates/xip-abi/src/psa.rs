@@ -17,7 +17,7 @@ pub const ERROR_INSUFFICIENT_MEMORY: i32 = -141;
 pub const ERROR_INVALID_SIGNATURE: i32 = -149;
 pub const ERROR_CORRUPTION_DETECTED: i32 = -151;
 
-#[cfg(not(xip_psa_esp32))]
+#[cfg(not(any(xip_psa_esp32, xip_psa_esp32s3)))]
 #[repr(C)]
 pub struct Sha512Context {
     pub total: [u64; 2],
@@ -36,10 +36,13 @@ pub struct Sha256Context {
 #[repr(C)]
 pub struct BuiltinHashContext {
     pub alg: u32,
-    #[cfg(not(xip_psa_esp32))]
+    #[cfg(not(any(xip_psa_esp32, xip_psa_esp32s3)))]
     pub ctx: Sha512Context,
     #[cfg(xip_psa_esp32)]
     pub ctx: Sha256Context,
+    /// ESP32-S3: hardware SHA; what is left of the software contexts (size and alignment from the SDK).
+    #[cfg(xip_psa_esp32s3)]
+    pub ctx: [u8; 84],
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -183,6 +186,12 @@ impl PsaTable {
 #[cfg(xip_psa_esp32)]
 const _: () = {
     assert!(mem::size_of::<HashOperation>() == 116);
+    assert!(mem::align_of::<HashOperation>() == 4);
+    assert!(mem::offset_of!(HashOperation, ctx) == 4);
+};
+#[cfg(xip_psa_esp32s3)]
+const _: () = {
+    assert!(mem::size_of::<HashOperation>() == 92);
     assert!(mem::align_of::<HashOperation>() == 4);
     assert!(mem::offset_of!(HashOperation, ctx) == 4);
 };

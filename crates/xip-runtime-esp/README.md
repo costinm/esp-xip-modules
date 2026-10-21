@@ -12,6 +12,7 @@ let n = xip_runtime::call("lora", b"idle", 43, method, &request, &mut answer)?; 
 * `Features { modules }` chooses whether the module list and lifecycle calls are exposed to modules.
 * Feature `console` adds `console::start()`: the console module (`modules/mod_con`), which owns the serial port.
 * `/main-rs` (repository root) is the Rust main, twin of `main/main.c`; `main-rs/build.sh esp32c6` builds it with the ESP Rust toolchain. It calls `autostart()` last.
+* `/fw/main` is DMesh's Rust main (with `fw/transport` and `fw/ble`); `fw/build.sh esp32c6` builds it (needs the DMesh checkout next to this repository). It calls `init` and `autostart()` early, before the transport starts: its startup differs from `main-rs` (see notes `ai/2026-10-18-dmesh-fw-move.md`).
 
 The C it needs is in `components/` (`xip_runtime` and `xip_loader`): give the build those directories as extra component dirs.
 

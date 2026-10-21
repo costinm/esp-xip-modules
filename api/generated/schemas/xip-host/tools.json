@@ -1,0 +1,115 @@
+[
+  {
+    "description": "Free memory of the device",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "host.heap_info",
+    "outputSchema": {
+      "properties": {
+        "free": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u32"
+        },
+        "free_internal": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "largest": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "largest_internal": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u32"
+        },
+        "lowest_free": {
+          "type": "integer",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "u32"
+        },
+        "total": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "authenticated",
+    "x-component-index": 0,
+    "x-method-index": 45,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Structured device and component status",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "host.device_info",
+    "outputSchema": {
+      "properties": {
+        "components": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "map"
+        },
+        "device": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "Device"
+        },
+        "heap": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "Heap"
+        },
+        "modules": {
+          "type": "array",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "Slot[]"
+        },
+        "wifi": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "WifiStatus"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "authenticated",
+    "x-component-index": 0,
+    "x-method-index": 60,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  }
+]

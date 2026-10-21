@@ -1,0 +1,197 @@
+[
+  {
+    "description": "measure the battery",
+    "inputSchema": {
+      "properties": {
+        "ctrl_level": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "ctrl_pin": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "int"
+        },
+        "divider_x100": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "enabled": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "uint"
+        },
+        "max_mv": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "min_mv": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "pin": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "int"
+        },
+        "ref_mv": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "hw.battery",
+    "outputSchema": {
+      "properties": {
+        "battery_mv": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "channel": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "uint"
+        },
+        "level": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "mv": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "pin": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "raw": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "ref_mv": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "unit": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 45,
+    "x-method-index": 1,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "sample pins on a timer",
+    "inputSchema": {
+      "properties": {
+        "interval_ms": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "pins": {
+          "type": "array",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "array"
+        },
+        "ref_mv": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "samples": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "hw.probe",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 45,
+    "x-method-index": 2,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "report presses",
+    "inputSchema": {
+      "properties": {
+        "enabled": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "pin": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "int"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "hw.button",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 45,
+    "x-method-index": 3,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  }
+]

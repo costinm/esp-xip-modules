@@ -1,0 +1,43 @@
+[package]
+name = "dmesh-rs"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[workspace]
+
+[features]
+default = ["modules", "ble-stack"]
+modules = []
+ble-stack = ["dep:dmesh-ble"]
+rtos-stats = ["dmesh-fw-transport/rtos-stats"]
+udp6-socket = ["dmesh-fw-transport/udp6-socket"]
+tcp-stream = ["dmesh-fw-transport/tcp-stream"]
+
+[dependencies]
+dmesh-ble = { path = "../ble", optional = true }
+dmesh-fw-transport = { path = "../transport" }
+# DMesh libraries: the DMesh repository at a pinned revision.
+dmesh-server = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+quic-lite = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0" }
+# Shared module host and TCP poller (this repository).
+xip-runtime-esp = { path = "../../crates/xip-runtime-esp" }
+esp-idf-sys = { version = "0.37", default-features = false, features = ["std"] }
+
+[build-dependencies]
+embuild = "0.33.3"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+# xip_runtime and xip_loader are the C components of this repository.
+component_dirs = ["../../components", "../ble/native", "native"]
+
+[profile.release]
+codegen-units = 1
+debug = 1
+lto = "fat"
+opt-level = 3
+panic = "abort"
+strip = false
+
+[patch.crates-io]
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys.git", rev = "8369f610a31e9c90a5479ed7f366f983589dfa0a" }

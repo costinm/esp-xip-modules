@@ -1,0 +1,8 @@
+# Main's partition table (4 MiB layout). Stage2 is built from boot/ of this repository (boot/partitions/4mb.csv);
+# keep the offsets of loader and main in sync with it.
+# Name,     Type, SubType, Offset,   Size,      Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+loader,     app,  factory, 0x10000,  0xe0000,
+main,       app,  ota_0,   0xf0000,  0x290000,
+data,       data, fat,     0x380000, 0x80000,

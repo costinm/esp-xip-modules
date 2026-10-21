@@ -1,5 +1,4 @@
-# Same baseline as esp-wifi-loader's Main images (docs/app-integration.md there):
-# the loader's Stage2 boots us in DIO or QIO; the driver must stay DIO.
+# Stage2 (boot/) boots Main in DIO or QIO; the driver must stay DIO.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

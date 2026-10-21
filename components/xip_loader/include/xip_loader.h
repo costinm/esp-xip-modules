@@ -59,9 +59,6 @@ typedef struct {
 /* Once, after xip_host_init(), NVS and the event loop (an upload needs the network). Scans the partition. */
 esp_err_t xip_loader_init(const xip_loader_config_t *config);
 
-/* Scan again (after something was installed or erased). Not while a module runs: XIP_LOADER_ERR_RUNNING. Indices change. */
-int xip_loader_rescan(void);
-
 /* Start every installed module whose manifest asks for it (manifest key 6: its start request; `mkmod.py --autostart`). What
  * runs at boot is therefore decided by what is installed, not by the build. Returns how many were started. */
 int xip_loader_autostart(void);

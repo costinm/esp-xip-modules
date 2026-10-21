@@ -165,6 +165,21 @@
 // Linked at code_vma/data_vma (Xtensa); otherwise position independent (RISC-V).
 #define XIP_DMOD_FLAG_FIXED_VMA 1
 
+// Required: this image uses its declared platform RAM cell for call context.
+#define XIP_DMOD_FLAG_STATIC_RAM 2
+
+// Bytes reserved for each module's call context (currently only a Host pointer).
+#define XIP_DMOD_STATIC_SLOT_BYTES 16
+
+// Cells in the platform's reserved module-context arena.
+#define XIP_DMOD_STATIC_SLOTS 16
+
+#define XIP_DMOD_STATIC_ESP32_BASE 1073598464
+
+#define XIP_DMOD_STATIC_ESP32C6_BASE 1082523648
+
+#define XIP_DMOD_STATIC_ESP32S3_BASE 1070399488
+
 // Version of the [`Wifi`] table.
 #define XIP_WIFI_VERSION 1
 
@@ -483,7 +498,7 @@ typedef struct {
   int (*pkt_free)(void *user, uint32_t pkt);
   // Hand a packet to a module or to the application.
   //
-  // The packet moves: **the handle is consumed on success and on failure**, so there is never a doubt who owns it. The first
+  // For an application or module destination, **the handle is consumed on success and on failure**. For a link destination, `ERR_BUSY` retains the exact held packet for retry; success and every other failure consume it. The first
   // `len` bytes of the payload window are the message. The receiver gets a call `(component, method)` with `call.pkt`,
   // `call.from` = this module's component and `call.id` = `id`. A non-zero `id` asks for an answer, and the receiver sees
   // `flags` bit 0: it answers with a `send` to that `from` with the same `id`. The answer is an ordinary message, and so is every other one the module sends the asker: any number of them,
@@ -497,7 +512,7 @@ typedef struct {
   //
   // * `pkt` (`uint32_t`): A held packet, or the packet of this call.
   // * `len` (`size_t`): Message length, at most `PKT_MAX`.
-  // * `dst` (`uint32_t`): `ADDR_MAIN` or a module's component.
+  // * `dst` (`uint32_t`): `ADDR_MAIN`, a module's component, or a link address (`ADDR_LINK + n`).
   // * `component` (`int`): Returned in the receiver's call.
   // * `method` (`int`): Returned in the receiver's call.
   // * `id` (`uint64_t`): Correlation number, returned in the call.
@@ -561,8 +576,7 @@ typedef struct {
   // component of a module is found by name in `modules_info`, everything below it in the manifest. The module's own code never
   // reads it. (Format: `tools/mkmod.py`, `manifest_of_api`.)
   //
-  // Manifest key 7 is optional legacy `flash_slots` metadata emitted by the packer. It is not a host authorization
-  // boundary. Physical flash HAL calls do not interpret manifests; the control plane and upload module own image policy.
+  // Physical flash HAL calls do not interpret manifests; the control plane and upload module own image policy.
   //
   // # Returns
   //
@@ -943,8 +957,11 @@ typedef struct __attribute__((packed)) {
   uint32_t manifest_offset;
   // Its length.
   uint32_t manifest_size;
+  // Address of this image's reserved platform RAM cell, aligned to DMOD_STATIC_SLOT_BYTES.
+  // Independent of its flash mapping address (PIC images may move).
+  uint32_t static_addr;
   // Zero.
-  uint8_t reserved[12];
+  uint8_t reserved[8];
 } xip_dmod_header;
 
 // What a module wants the radio to do, for `set` and `get`. All fields are plain values. Names and passphrases are byte

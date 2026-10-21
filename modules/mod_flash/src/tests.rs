@@ -33,6 +33,8 @@ struct Fake {
     fail_commit: bool,
     /// the request of `start flash`
     auth: Auth,
+    /// `device_info` says Main (0xf0000) is the running application, as when mod_flash runs inside Main
+    running: bool,
 }
 impl Fake {
     fn new(image: &[u8], target: u8, dry: bool) -> Self {
@@ -87,6 +89,7 @@ impl Fake {
             read_size: 37,
             fail_commit: false,
             auth: Auth::Strict,
+            running: false,
         }
     }
     fn host(&mut self) -> xip_abi::Host {
@@ -107,6 +110,7 @@ impl Fake {
         h.socket_write = Some(socket_write);
         h.module_stop = Some(stop);
         h.modules_info = Some(info);
+        h.device_info = Some(device_info);
         h
     }
 }
@@ -226,6 +230,16 @@ unsafe extern "C" fn socket_write(
     f.out
         .extend_from_slice(core::slice::from_raw_parts(data, n));
     n as i32
+}
+/// The running application: partition `main` at 0xf0000 (key 1 of the device info), as `status` shows it.
+unsafe extern "C" fn device_info(u: *mut core::ffi::c_void, out: *mut u8, n: usize) -> i32 {
+    if !f(u).running {
+        return -1;
+    }
+    let b = core::slice::from_raw_parts_mut(out, n);
+    let mut w = cbor::Writer::new(b);
+    w.map(1).uint(1).map(3).uint(4).text("main").uint(5).uint(0xf0000).uint(6).uint(0x290000);
+    w.finish().unwrap().len() as i32
 }
 unsafe extern "C" fn stop(_: *mut core::ffi::c_void, _: *const u8, _: usize) -> i32 {
     0
@@ -368,6 +382,24 @@ fn malformed_module_header_is_never_made_executable() {
     run(&mut f);
     assert!(f.out.starts_with(b"ERR 4 "));
     assert!(!f.writes.iter().any(|(a, _)| *a == 0x380000));
+}
+#[test]
+fn the_running_application_is_never_erased() {
+    // Main (partition 0xf0000..0x380000) and raw writes that touch it are refused when Main runs this module; elsewhere they are not
+    let mut image = vec![42; 4096 + 333];
+    image[0] = 0xe9;
+    image[12..14].copy_from_slice(&(CPU as u16).to_le_bytes());
+    let mut f = Fake::new(&image, target::MAIN, false);
+    f.running = true;
+    run(&mut f);
+    assert!(f.out.starts_with(b"ERR 10 "), "{:?}", f.out);
+    assert!(f.writes.is_empty());
+    for (address, ok) in [("000ff000", false), ("00001000", true), ("0037f000", false), ("0038f000", true)] {
+        let mut f = Fake::named(&image, target::FLASH, false, address.as_bytes());
+        f.running = true;
+        run(&mut f);
+        assert_eq!(f.out.starts_with(b"OK "), ok, "{address} {:?}", f.out);
+    }
 }
 #[test]
 fn main_image_commits_header_and_version_before_head_and_retains_loader_handoff() {

@@ -2,60 +2,40 @@
 
 https://github.com/costinm/esp-xip-modules
 
-Small, signed programs ("modules") that ESP32 executes in place from flash and upgrades independently.
+Small programs ("modules") that ESP32 chips execute in place from flash and upgrade independently.
 
-This is not an OS - but a library that can be used in other apps (or OSes). Many OSes provide
-loadable ELF apps - run from RAM and specific to the OS. This is XIP, since RAM is too valuable,
-and (mostly) OS-independent. A small benefit is that modules can also be tested on the host.
+This is not an OS: it is a library that applications (or OSes) embed. Many OSes load ELF apps into RAM and tie them to
+that OS. Modules run in place from flash, because RAM is too valuable, and are mostly OS independent. They can also be
+tested on the host.
 
-The runtime exposes hardware and services through function tables. Modules are
-designed for event-driven, non-blocking execution and can also be linked into an
-application as libraries. C and Rust modules are supported on ESP32, ESP32-S3 and
-ESP32-C6.
-
-This repo provides a C 'main' - as a working example and for testing - along with a C runtime implementing the modules ABI.
-
-It also has a Rust 'main' and runtime - with some extended functionality, as a super-set of the C runtime which is intended
-to be minimal.
-
-Both runtimes support C and Rust modules - I suspect Zig and other native languages would also work with some work.
+The runtime gives modules hardware and services through function tables. Modules are event driven and non-blocking,
+written as plain handlers or as `async` functions, and can also be linked into an application as libraries. They run on
+ESP32, ESP32-S3 and ESP32-C6, and on Linux with the host runtime.
 
 ## Goals
 
-- Efficient loadable modules that can be developed and upgraded independent of the main runtime and application.
-- Secure and fast upgrade of modules
-- Encourage efficient code: async/non-blocking, zero copy, separate protocol/encoding from handlers, pay for what is used, etc.
+- Modules that are developed and upgraded independently of the runtime and the application.
+- Secure, fast upgrade of modules.
+- Efficient code: async and non-blocking, zero copy, protocol and encoding separate from handlers, pay for what is used.
 
-Ideally most of the application logic will be developed in modules, with the runtime and core components ugrading
-infrequently and smaller, and the set of modules that a user needs upgraded more frequently and based on what is used.
+Most application logic should live in modules. The runtime and core components change rarely and stay small.
 
-Non goals:
-- Not a OS or 'framework' - just a library providing an API/ABI that can be embedded and used in other projects including OSes
-
-
-## What it is good for
-
-- A device whose behaviour you want to change without rebuilding Main: a radio driver, a sensor, a button policy.
-- Keeping hardware-specific code out of the application: `main` stays small and stable, modules change.
-- Trying a driver on a bench board and then shipping the same source linked into a product.
-- An optional owner-controlled installer can verify signed images before writing them.
+Non-goal: an OS or framework. This is an API/ABI that other projects embed.
 
 ## Using it
 
-Build the runtime and example modules:
-
 ```sh
 . ./env.sh
-scripts/build.sh esp32c6
+scripts/build.sh esp32c6                      # runtime image and all modules, under target/out/esp32c6
+scripts/build-host-modules.sh                 # the same modules for Linux
+cargo run --manifest-path crates/xip-runtime-host/Cargo.toml --bin xip-host
 ```
 
-Start with [mod_hw](modules/mod_hw) (a small module) or [mod_nan](modules/mod_nan) (work in progress).
-`scripts/build.sh` builds the runtime and every module (Rust; C modules were dropped, see git history); `scripts/gen.sh` generates the header, the API files and the console tables.
-The public module interface is `include/xip.h` (generated from the Rust declarations in `crates/xip-abi`, documented there: `cargo doc -p xip-abi`); the CBOR, JSON and text view of the APIs is in [api/](api/).
+`xip-host` runs the console and an echo module on loopback TCP and UDP; see
+[the host runtime](crates/xip-runtime-host/README.md). `scripts/test-host.sh all` runs the tests that need no board.
 
-The runtime starts installed modules that request auto-start. The optional console
-provides device inspection and module control; the optional installer comes from
-[esp-wifi-loader](https://github.com/costinm/esp-wifi-loader).
+The module interface is [include/xip.h](include/xip.h), generated from the Rust declarations in
+[crates/xip-abi](crates/xip-abi/README.md). [modules/mod_flash](modules/mod_flash/README.md) installs images over TCP (development).
 
 ## License
 

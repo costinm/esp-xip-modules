@@ -1,0 +1,473 @@
+[
+  {
+    "description": "The intended state",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "wifi.get",
+    "outputSchema": {
+      "properties": {
+        "ap": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "ap_psk": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "string"
+        },
+        "ap_ssid": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "string"
+        },
+        "bssid": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "bytes"
+        },
+        "channel": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "u8"
+        },
+        "radio": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "sta": {
+          "type": "boolean",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bool"
+        },
+        "sta_psk": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "string"
+        },
+        "sta_ssid": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "authenticated",
+    "x-component-index": 10,
+    "x-method-index": 1,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "State what the radio should do",
+    "inputSchema": {
+      "properties": {
+        "ap": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "ap_psk": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "string"
+        },
+        "ap_ssid": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "string"
+        },
+        "bssid": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "bytes"
+        },
+        "channel": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "u8"
+        },
+        "radio": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "sta": {
+          "type": "boolean",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bool"
+        },
+        "sta_psk": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "string"
+        },
+        "sta_ssid": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "wifi.set",
+    "outputSchema": {
+      "properties": {
+        "generation": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 10,
+    "x-errors": [
+      {
+        "description": "A name or passphrase of the wrong length, a channel above 14, or `sta` with neither `sta_ssid` nor `bssid`.",
+        "name": "invalid_argument"
+      }
+    ],
+    "x-method-index": 2,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "What is true now",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "wifi.state",
+    "outputSchema": {
+      "properties": {
+        "ap_up": {
+          "type": "boolean",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "bool"
+        },
+        "channel": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u8"
+        },
+        "ip": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "string"
+        },
+        "rssi": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "i8"
+        },
+        "ssid": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        },
+        "sta": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "StaState"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "authenticated",
+    "x-component-index": 10,
+    "x-method-index": 3,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "The networks in range",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "wifi.scan",
+    "outputSchema": {
+      "properties": {
+        "networks": {
+          "type": "array",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "Network[]"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "authenticated",
+    "x-component-index": 10,
+    "x-execution": "non-blocking",
+    "x-method-index": 4,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Promiscuous receive, for NAN",
+    "inputSchema": {
+      "properties": {
+        "channel": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u8"
+        },
+        "enable": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "wifi.monitor",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 10,
+    "x-errors": [
+      {
+        "description": "A channel above 13.",
+        "name": "invalid_argument"
+      },
+      {
+        "description": "The radio is off, or this host has no promiscuous receive.",
+        "name": "unavailable"
+      }
+    ],
+    "x-method-index": 7,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "The advanced driver settings",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "wifi.tuning",
+    "outputSchema": {
+      "properties": {
+        "ampdu": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "Switch"
+        },
+        "bssid_check": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "Switch"
+        },
+        "driver_tx": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "Switch"
+        },
+        "rates_11b": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "Switch"
+        },
+        "raw_rx": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "Switch"
+        },
+        "raw_tx_rate": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u8"
+        },
+        "rx_ba": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u16"
+        },
+        "rx_dynamic": {
+          "type": "integer",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "u16"
+        },
+        "rx_static": {
+          "type": "integer",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "u16"
+        },
+        "tx_dynamic": {
+          "type": "integer",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "u16"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "authenticated",
+    "x-component-index": 10,
+    "x-method-index": 5,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Change the advanced driver settings",
+    "inputSchema": {
+      "properties": {
+        "ampdu": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "Switch"
+        },
+        "bssid_check": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "Switch"
+        },
+        "driver_tx": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "Switch"
+        },
+        "rates_11b": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "Switch"
+        },
+        "raw_rx": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "Switch"
+        },
+        "raw_tx_rate": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u8"
+        },
+        "rx_ba": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u16"
+        },
+        "rx_dynamic": {
+          "type": "integer",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "u16"
+        },
+        "rx_static": {
+          "type": "integer",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "u16"
+        },
+        "tx_dynamic": {
+          "type": "integer",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "u16"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "wifi.set_tuning",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 10,
+    "x-errors": [
+      {
+        "description": "A value is out of range.",
+        "name": "invalid_argument"
+      },
+      {
+        "description": "A setting this device does not have and that is not left at the default.",
+        "name": "unavailable"
+      }
+    ],
+    "x-method-index": 6,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  }
+]

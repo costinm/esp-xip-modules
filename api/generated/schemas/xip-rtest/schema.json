@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "const": "test.echo"
+        },
+        "value": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 2,
+      "x-method-index": 1
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "test.pkt_echo"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 2,
+      "x-method-index": 20
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "test.pkt_keep"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 2,
+      "x-method-index": 22
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "test.pkt_drop"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 2,
+      "x-method-index": 23
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "test.mem_leak"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 2,
+      "x-method-index": 24
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "test.info"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 2,
+      "x-method-index": 2
+    }
+  ]
+}

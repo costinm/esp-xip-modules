@@ -1,40 +1,46 @@
 #!/usr/bin/env bash
 # Install ESP-IDF v6.0.2 and the esp32/esp32s3/esp32c6 toolchains under target/,
-# and the host tools into a repo-local Nix profile (flake.nix).
+# and the host tools (flake.nix) as nix out-links under target/nix/ (env.sh puts their bin/ on PATH).
+#   scripts/esp-deps.sh host         only the host tools
+#   scripts/esp-deps.sh dmesh        also the DMesh and ssh-mesh tools (dmesh-cli, lmesh, mesh, ...)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO_ROOT/env.sh"
 ESP_ROOT="$XIP_ESP_ROOT"
-PROFILE="${XIP_NIX_PROFILE:-$REPO_ROOT/target/nix/profile}"
+DEPS="$REPO_ROOT/target/nix/deps"
 IDF_VERSION="v6.0.2"
 JOBS="${ESP_IDF_GIT_JOBS:-8}"
 export NIX_CONFIG="${NIX_CONFIG:-experimental-features = nix-command flakes}"
 export IDF_TOOLS_PATH="$ESP_ROOT/espressif"
-mkdir -p "$ESP_ROOT" "$IDF_TOOLS_PATH" "$(dirname "$PROFILE")"
+mkdir -p "$ESP_ROOT" "$IDF_TOOLS_PATH" "$(dirname "$DEPS")"
 
 if command -v nix >/dev/null 2>&1; then
-    # `path:` includes untracked files, so this works before the first commit.
-    if [[ -e "$PROFILE" ]]; then
-        nix profile upgrade --profile "$PROFILE" deps ||
-            nix profile add --profile "$PROFILE" "path:$REPO_ROOT#deps"
-    else
-        nix profile add --profile "$PROFILE" "path:$REPO_ROOT#deps"
+    # ssh-mesh and DMesh change together with this repository and are hard to coordinate through commits: build from the local checkouts
+    # (DMESH_DIR, SSH_MESH_DIR; defaults /ws/dmesh and /ws/ssh-mesh when present) instead of the locked revisions. XIP_NIX_LOCKED=1 uses the lock.
+    over=()
+    if [[ -z ${XIP_NIX_LOCKED:-} ]]; then
+        [[ -d ${DMESH_DIR:=/ws/dmesh} ]] && over+=(--override-input dmesh "git+file://$(readlink -f "$DMESH_DIR")")
+        [[ -d ${SSH_MESH_DIR:=/ws/ssh-mesh} ]] && over+=(--override-input ssh-mesh "git+file://$(readlink -f "$SSH_MESH_DIR")")
     fi
-    if [[ ! -x "$PROFILE/bin/espup" || ! -x "$PROFILE/bin/ldproxy" ]]; then
-        nix profile add --profile "$PROFILE" "path:$REPO_ROOT#deps"
+    # the flake of this checkout (tracked files; a `path:` reference would copy the whole target/ tree into the store)
+    nix build "${over[@]}" --out-link "$DEPS" "$REPO_ROOT#deps"
+    if [[ ${1:-} == dmesh ]]; then
+        nix build "${over[@]}" --out-link "$REPO_ROOT/target/nix/dmesh" "$REPO_ROOT#dmesh"
+        echo "DMesh tools ready: $REPO_ROOT/target/nix/dmesh/bin (dmesh-cli, lmesh, mesh, ...)"
+        exit 0
     fi
-elif [[ ! -x "$PROFILE/bin/cmake" ]]; then
-    echo "nix is unavailable and $PROFILE has no host tools" >&2
+elif [[ ! -x "$DEPS/bin/cmake" ]]; then
+    echo "nix is unavailable and $DEPS has no host tools" >&2
     exit 127
 fi
-if [[ ! -x "$PROFILE/bin/espup" || ! -x "$PROFILE/bin/ldproxy" ]]; then
-    echo "incomplete host profile: $PROFILE needs espup and ldproxy" >&2
+if [[ ! -x "$DEPS/bin/espup" || ! -x "$DEPS/bin/ldproxy" ]]; then
+    echo "incomplete host tools: $DEPS needs espup and ldproxy" >&2
     exit 1
 fi
-export PATH="$PROFILE/bin:$PATH"
+export PATH="$DEPS/bin:$PATH"
 if [[ ${1:-} == host ]]; then
-    echo "Host profile ready: $PROFILE"
+    echo "Host tools ready: $DEPS"
     exit 0
 fi
 

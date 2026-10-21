@@ -1,5 +1,6 @@
-/* Position independent module (RISC-V): code is linked at the end of the 64-byte image header and
- * contains no absolute addresses, so any mapping address works. */
+/* Position independent module (RISC-V): flash references move with the code,
+ * linked after the 64-byte header. Its allocator cell uses an absolute RAM
+ * address supplied by the packer, independent of the flash mapping. */
 ENTRY(xip_handle)
 
 SECTIONS {

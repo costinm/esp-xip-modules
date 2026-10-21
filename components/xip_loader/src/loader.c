@@ -278,14 +278,6 @@ esp_err_t xip_loader_init(const xip_loader_config_t *cfg)
     return ESP_OK;
 }
 
-int xip_loader_rescan(void)
-{
-    if (!em.inited) return XIP_ERR_ARG;
-    for (size_t i = 0; i < em.found; i++) if (em.slots[i].st.running || em.slots[i].starting) return XIP_LOADER_ERR_RUNNING;
-    scan();
-    return (int)em.found;
-}
-
 int xip_loader_find(const char *name)
 {
     if (!em.inited || !name) return -1;

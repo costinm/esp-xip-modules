@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "const": "wifi.get"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 10,
+      "x-method-index": 1
+    },
+    {
+      "properties": {
+        "ap": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "ap_psk": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "string"
+        },
+        "ap_ssid": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "string"
+        },
+        "bssid": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "bytes"
+        },
+        "channel": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "u8"
+        },
+        "method": {
+          "const": "wifi.set"
+        },
+        "radio": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "sta": {
+          "type": "boolean",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bool"
+        },
+        "sta_psk": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "string"
+        },
+        "sta_ssid": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 10,
+      "x-method-index": 2
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "wifi.state"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 10,
+      "x-method-index": 3
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "wifi.scan"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 10,
+      "x-method-index": 4
+    },
+    {
+      "properties": {
+        "channel": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u8"
+        },
+        "enable": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "method": {
+          "const": "wifi.monitor"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 10,
+      "x-method-index": 7
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "wifi.tuning"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 10,
+      "x-method-index": 5
+    },
+    {
+      "properties": {
+        "ampdu": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "Switch"
+        },
+        "bssid_check": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "Switch"
+        },
+        "driver_tx": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "Switch"
+        },
+        "method": {
+          "const": "wifi.set_tuning"
+        },
+        "rates_11b": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "Switch"
+        },
+        "raw_rx": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "Switch"
+        },
+        "raw_tx_rate": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u8"
+        },
+        "rx_ba": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u16"
+        },
+        "rx_dynamic": {
+          "type": "integer",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "u16"
+        },
+        "rx_static": {
+          "type": "integer",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "u16"
+        },
+        "tx_dynamic": {
+          "type": "integer",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "u16"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 10,
+      "x-method-index": 6
+    }
+  ]
+}

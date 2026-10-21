@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "awake_ms": {
+          "type": "integer",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "u16"
+        },
+        "cycles": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u16"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "power.sleep"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 11,
+      "x-method-index": 1
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "power.info"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 11,
+      "x-method-index": 2
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "power.dump_locks"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 11,
+      "x-method-index": 3
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "power.dump_tasks"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 11,
+      "x-method-index": 4
+    }
+  ]
+}

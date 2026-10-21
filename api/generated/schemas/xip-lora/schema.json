@@ -1,0 +1,1562 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "busy": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "int"
+        },
+        "bw": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "cad": {
+          "type": "string",
+          "x-protobuf-index": 28,
+          "x-protobuf-type": "uint"
+        },
+        "cad_interval": {
+          "type": "string",
+          "x-protobuf-index": 29,
+          "x-protobuf-type": "uint"
+        },
+        "cad_period": {
+          "type": "string",
+          "x-protobuf-index": 32,
+          "x-protobuf-type": "uint"
+        },
+        "cad_rx_ms": {
+          "type": "string",
+          "x-protobuf-index": 30,
+          "x-protobuf-type": "uint"
+        },
+        "chip": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "cr": {
+          "type": "string",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "uint"
+        },
+        "crc": {
+          "type": "string",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "uint"
+        },
+        "cs": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "int"
+        },
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 31,
+          "x-protobuf-type": "bytes"
+        },
+        "dio2": {
+          "type": "string",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "uint"
+        },
+        "freq": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "irq": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "int"
+        },
+        "method": {
+          "const": "lora.probe"
+        },
+        "miso": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "int"
+        },
+        "mosi": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "int"
+        },
+        "pa_dev": {
+          "type": "string",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "uint"
+        },
+        "pa_duty": {
+          "type": "string",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "uint"
+        },
+        "pa_hp": {
+          "type": "string",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "uint"
+        },
+        "pa_lut": {
+          "type": "string",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "uint"
+        },
+        "power": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "preamble": {
+          "type": "string",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "uint"
+        },
+        "pwr": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "int"
+        },
+        "pwrlvl": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "rst": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "int"
+        },
+        "rx_timeout": {
+          "type": "string",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "uint"
+        },
+        "sck": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "int"
+        },
+        "sf": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "spi": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "sx_sync": {
+          "type": "string",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "uint"
+        },
+        "sync": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "tcxo": {
+          "type": "string",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 43,
+      "x-method-index": 1
+    },
+    {
+      "properties": {
+        "busy": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "int"
+        },
+        "bw": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "cad": {
+          "type": "string",
+          "x-protobuf-index": 28,
+          "x-protobuf-type": "uint"
+        },
+        "cad_interval": {
+          "type": "string",
+          "x-protobuf-index": 29,
+          "x-protobuf-type": "uint"
+        },
+        "cad_period": {
+          "type": "string",
+          "x-protobuf-index": 32,
+          "x-protobuf-type": "uint"
+        },
+        "cad_rx_ms": {
+          "type": "string",
+          "x-protobuf-index": 30,
+          "x-protobuf-type": "uint"
+        },
+        "chip": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "cr": {
+          "type": "string",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "uint"
+        },
+        "crc": {
+          "type": "string",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "uint"
+        },
+        "cs": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "int"
+        },
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 31,
+          "x-protobuf-type": "bytes"
+        },
+        "dio2": {
+          "type": "string",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "uint"
+        },
+        "freq": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "irq": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "int"
+        },
+        "method": {
+          "const": "lora.probe127"
+        },
+        "miso": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "int"
+        },
+        "mosi": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "int"
+        },
+        "pa_dev": {
+          "type": "string",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "uint"
+        },
+        "pa_duty": {
+          "type": "string",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "uint"
+        },
+        "pa_hp": {
+          "type": "string",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "uint"
+        },
+        "pa_lut": {
+          "type": "string",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "uint"
+        },
+        "power": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "preamble": {
+          "type": "string",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "uint"
+        },
+        "pwr": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "int"
+        },
+        "pwrlvl": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "rst": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "int"
+        },
+        "rx_timeout": {
+          "type": "string",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "uint"
+        },
+        "sck": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "int"
+        },
+        "sf": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "spi": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "sx_sync": {
+          "type": "string",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "uint"
+        },
+        "sync": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "tcxo": {
+          "type": "string",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 43,
+      "x-method-index": 2
+    },
+    {
+      "properties": {
+        "busy": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "int"
+        },
+        "bw": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "cad": {
+          "type": "string",
+          "x-protobuf-index": 28,
+          "x-protobuf-type": "uint"
+        },
+        "cad_interval": {
+          "type": "string",
+          "x-protobuf-index": 29,
+          "x-protobuf-type": "uint"
+        },
+        "cad_period": {
+          "type": "string",
+          "x-protobuf-index": 32,
+          "x-protobuf-type": "uint"
+        },
+        "cad_rx_ms": {
+          "type": "string",
+          "x-protobuf-index": 30,
+          "x-protobuf-type": "uint"
+        },
+        "chip": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "cr": {
+          "type": "string",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "uint"
+        },
+        "crc": {
+          "type": "string",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "uint"
+        },
+        "cs": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "int"
+        },
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 31,
+          "x-protobuf-type": "bytes"
+        },
+        "dio2": {
+          "type": "string",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "uint"
+        },
+        "freq": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "irq": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "int"
+        },
+        "method": {
+          "const": "lora.probe126"
+        },
+        "miso": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "int"
+        },
+        "mosi": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "int"
+        },
+        "pa_dev": {
+          "type": "string",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "uint"
+        },
+        "pa_duty": {
+          "type": "string",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "uint"
+        },
+        "pa_hp": {
+          "type": "string",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "uint"
+        },
+        "pa_lut": {
+          "type": "string",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "uint"
+        },
+        "power": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "preamble": {
+          "type": "string",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "uint"
+        },
+        "pwr": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "int"
+        },
+        "pwrlvl": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "rst": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "int"
+        },
+        "rx_timeout": {
+          "type": "string",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "uint"
+        },
+        "sck": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "int"
+        },
+        "sf": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "spi": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "sx_sync": {
+          "type": "string",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "uint"
+        },
+        "sync": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "tcxo": {
+          "type": "string",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 43,
+      "x-method-index": 3
+    },
+    {
+      "properties": {
+        "busy": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "int"
+        },
+        "bw": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "cad": {
+          "type": "string",
+          "x-protobuf-index": 28,
+          "x-protobuf-type": "uint"
+        },
+        "cad_interval": {
+          "type": "string",
+          "x-protobuf-index": 29,
+          "x-protobuf-type": "uint"
+        },
+        "cad_period": {
+          "type": "string",
+          "x-protobuf-index": 32,
+          "x-protobuf-type": "uint"
+        },
+        "cad_rx_ms": {
+          "type": "string",
+          "x-protobuf-index": 30,
+          "x-protobuf-type": "uint"
+        },
+        "chip": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "cr": {
+          "type": "string",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "uint"
+        },
+        "crc": {
+          "type": "string",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "uint"
+        },
+        "cs": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "int"
+        },
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 31,
+          "x-protobuf-type": "bytes"
+        },
+        "dio2": {
+          "type": "string",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "uint"
+        },
+        "freq": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "irq": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "int"
+        },
+        "method": {
+          "const": "lora.rx"
+        },
+        "miso": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "int"
+        },
+        "mosi": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "int"
+        },
+        "pa_dev": {
+          "type": "string",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "uint"
+        },
+        "pa_duty": {
+          "type": "string",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "uint"
+        },
+        "pa_hp": {
+          "type": "string",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "uint"
+        },
+        "pa_lut": {
+          "type": "string",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "uint"
+        },
+        "power": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "preamble": {
+          "type": "string",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "uint"
+        },
+        "pwr": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "int"
+        },
+        "pwrlvl": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "rst": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "int"
+        },
+        "rx_timeout": {
+          "type": "string",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "uint"
+        },
+        "sck": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "int"
+        },
+        "sf": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "spi": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "sx_sync": {
+          "type": "string",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "uint"
+        },
+        "sync": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "tcxo": {
+          "type": "string",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 43,
+      "x-method-index": 4
+    },
+    {
+      "properties": {
+        "busy": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "int"
+        },
+        "bw": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "cad": {
+          "type": "string",
+          "x-protobuf-index": 28,
+          "x-protobuf-type": "uint"
+        },
+        "cad_interval": {
+          "type": "string",
+          "x-protobuf-index": 29,
+          "x-protobuf-type": "uint"
+        },
+        "cad_period": {
+          "type": "string",
+          "x-protobuf-index": 32,
+          "x-protobuf-type": "uint"
+        },
+        "cad_rx_ms": {
+          "type": "string",
+          "x-protobuf-index": 30,
+          "x-protobuf-type": "uint"
+        },
+        "chip": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "cr": {
+          "type": "string",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "uint"
+        },
+        "crc": {
+          "type": "string",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "uint"
+        },
+        "cs": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "int"
+        },
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 31,
+          "x-protobuf-type": "bytes"
+        },
+        "dio2": {
+          "type": "string",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "uint"
+        },
+        "freq": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "irq": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "int"
+        },
+        "method": {
+          "const": "lora.tx"
+        },
+        "miso": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "int"
+        },
+        "mosi": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "int"
+        },
+        "pa_dev": {
+          "type": "string",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "uint"
+        },
+        "pa_duty": {
+          "type": "string",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "uint"
+        },
+        "pa_hp": {
+          "type": "string",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "uint"
+        },
+        "pa_lut": {
+          "type": "string",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "uint"
+        },
+        "power": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "preamble": {
+          "type": "string",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "uint"
+        },
+        "pwr": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "int"
+        },
+        "pwrlvl": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "rst": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "int"
+        },
+        "rx_timeout": {
+          "type": "string",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "uint"
+        },
+        "sck": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "int"
+        },
+        "sf": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "spi": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "sx_sync": {
+          "type": "string",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "uint"
+        },
+        "sync": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "tcxo": {
+          "type": "string",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 43,
+      "x-method-index": 5
+    },
+    {
+      "properties": {
+        "busy": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "int"
+        },
+        "bw": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "cad": {
+          "type": "string",
+          "x-protobuf-index": 28,
+          "x-protobuf-type": "uint"
+        },
+        "cad_interval": {
+          "type": "string",
+          "x-protobuf-index": 29,
+          "x-protobuf-type": "uint"
+        },
+        "cad_period": {
+          "type": "string",
+          "x-protobuf-index": 32,
+          "x-protobuf-type": "uint"
+        },
+        "cad_rx_ms": {
+          "type": "string",
+          "x-protobuf-index": 30,
+          "x-protobuf-type": "uint"
+        },
+        "chip": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "cr": {
+          "type": "string",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "uint"
+        },
+        "crc": {
+          "type": "string",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "uint"
+        },
+        "cs": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "int"
+        },
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 31,
+          "x-protobuf-type": "bytes"
+        },
+        "dio2": {
+          "type": "string",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "uint"
+        },
+        "freq": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "irq": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "int"
+        },
+        "method": {
+          "const": "lora.stop"
+        },
+        "miso": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "int"
+        },
+        "mosi": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "int"
+        },
+        "pa_dev": {
+          "type": "string",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "uint"
+        },
+        "pa_duty": {
+          "type": "string",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "uint"
+        },
+        "pa_hp": {
+          "type": "string",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "uint"
+        },
+        "pa_lut": {
+          "type": "string",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "uint"
+        },
+        "power": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "preamble": {
+          "type": "string",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "uint"
+        },
+        "pwr": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "int"
+        },
+        "pwrlvl": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "rst": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "int"
+        },
+        "rx_timeout": {
+          "type": "string",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "uint"
+        },
+        "sck": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "int"
+        },
+        "sf": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "spi": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "sx_sync": {
+          "type": "string",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "uint"
+        },
+        "sync": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "tcxo": {
+          "type": "string",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 43,
+      "x-method-index": 6
+    },
+    {
+      "properties": {
+        "busy": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "int"
+        },
+        "bw": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "cad": {
+          "type": "string",
+          "x-protobuf-index": 28,
+          "x-protobuf-type": "uint"
+        },
+        "cad_interval": {
+          "type": "string",
+          "x-protobuf-index": 29,
+          "x-protobuf-type": "uint"
+        },
+        "cad_period": {
+          "type": "string",
+          "x-protobuf-index": 32,
+          "x-protobuf-type": "uint"
+        },
+        "cad_rx_ms": {
+          "type": "string",
+          "x-protobuf-index": 30,
+          "x-protobuf-type": "uint"
+        },
+        "chip": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "cr": {
+          "type": "string",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "uint"
+        },
+        "crc": {
+          "type": "string",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "uint"
+        },
+        "cs": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "int"
+        },
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 31,
+          "x-protobuf-type": "bytes"
+        },
+        "dio2": {
+          "type": "string",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "uint"
+        },
+        "freq": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "irq": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "int"
+        },
+        "method": {
+          "const": "lora.reconfigure"
+        },
+        "miso": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "int"
+        },
+        "mosi": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "int"
+        },
+        "pa_dev": {
+          "type": "string",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "uint"
+        },
+        "pa_duty": {
+          "type": "string",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "uint"
+        },
+        "pa_hp": {
+          "type": "string",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "uint"
+        },
+        "pa_lut": {
+          "type": "string",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "uint"
+        },
+        "power": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "preamble": {
+          "type": "string",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "uint"
+        },
+        "pwr": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "int"
+        },
+        "pwrlvl": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "rst": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "int"
+        },
+        "rx_timeout": {
+          "type": "string",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "uint"
+        },
+        "sck": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "int"
+        },
+        "sf": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "spi": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "sx_sync": {
+          "type": "string",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "uint"
+        },
+        "sync": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "tcxo": {
+          "type": "string",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 43,
+      "x-method-index": 7
+    },
+    {
+      "properties": {
+        "busy": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "int"
+        },
+        "bw": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "cad": {
+          "type": "string",
+          "x-protobuf-index": 28,
+          "x-protobuf-type": "uint"
+        },
+        "cad_interval": {
+          "type": "string",
+          "x-protobuf-index": 29,
+          "x-protobuf-type": "uint"
+        },
+        "cad_period": {
+          "type": "string",
+          "x-protobuf-index": 32,
+          "x-protobuf-type": "uint"
+        },
+        "cad_rx_ms": {
+          "type": "string",
+          "x-protobuf-index": 30,
+          "x-protobuf-type": "uint"
+        },
+        "chip": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "cr": {
+          "type": "string",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "uint"
+        },
+        "crc": {
+          "type": "string",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "uint"
+        },
+        "cs": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "int"
+        },
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 31,
+          "x-protobuf-type": "bytes"
+        },
+        "dio2": {
+          "type": "string",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "uint"
+        },
+        "freq": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "irq": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "int"
+        },
+        "method": {
+          "const": "lora.fsk"
+        },
+        "miso": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "int"
+        },
+        "mosi": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "int"
+        },
+        "pa_dev": {
+          "type": "string",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "uint"
+        },
+        "pa_duty": {
+          "type": "string",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "uint"
+        },
+        "pa_hp": {
+          "type": "string",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "uint"
+        },
+        "pa_lut": {
+          "type": "string",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "uint"
+        },
+        "power": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "preamble": {
+          "type": "string",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "uint"
+        },
+        "pwr": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "int"
+        },
+        "pwrlvl": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "rst": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "int"
+        },
+        "rx_timeout": {
+          "type": "string",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "uint"
+        },
+        "sck": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "int"
+        },
+        "sf": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "spi": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "sx_sync": {
+          "type": "string",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "uint"
+        },
+        "sync": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "tcxo": {
+          "type": "string",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 43,
+      "x-method-index": 8
+    },
+    {
+      "properties": {
+        "busy": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "int"
+        },
+        "bw": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "cad": {
+          "type": "string",
+          "x-protobuf-index": 28,
+          "x-protobuf-type": "uint"
+        },
+        "cad_interval": {
+          "type": "string",
+          "x-protobuf-index": 29,
+          "x-protobuf-type": "uint"
+        },
+        "cad_period": {
+          "type": "string",
+          "x-protobuf-index": 32,
+          "x-protobuf-type": "uint"
+        },
+        "cad_rx_ms": {
+          "type": "string",
+          "x-protobuf-index": 30,
+          "x-protobuf-type": "uint"
+        },
+        "chip": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "cr": {
+          "type": "string",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "uint"
+        },
+        "crc": {
+          "type": "string",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "uint"
+        },
+        "cs": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "int"
+        },
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 31,
+          "x-protobuf-type": "bytes"
+        },
+        "dio2": {
+          "type": "string",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "uint"
+        },
+        "freq": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "irq": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "int"
+        },
+        "method": {
+          "const": "lora.stats"
+        },
+        "miso": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "int"
+        },
+        "mosi": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "int"
+        },
+        "pa_dev": {
+          "type": "string",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "uint"
+        },
+        "pa_duty": {
+          "type": "string",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "uint"
+        },
+        "pa_hp": {
+          "type": "string",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "uint"
+        },
+        "pa_lut": {
+          "type": "string",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "uint"
+        },
+        "power": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "preamble": {
+          "type": "string",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "uint"
+        },
+        "pwr": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "int"
+        },
+        "pwrlvl": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "rst": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "int"
+        },
+        "rx_timeout": {
+          "type": "string",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "uint"
+        },
+        "sck": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "int"
+        },
+        "sf": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "spi": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "sx_sync": {
+          "type": "string",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "uint"
+        },
+        "sync": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "tcxo": {
+          "type": "string",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 43,
+      "x-method-index": 9
+    }
+  ]
+}

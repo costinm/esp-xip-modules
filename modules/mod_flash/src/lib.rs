@@ -12,11 +12,8 @@ mod state;
 mod upload;
 mod crypto;
 mod wire;
-// Retain the old blocking adapter only for protocol/interoperability tests.
 #[cfg(test)]
-mod device;
-#[cfg(test)]
-mod device_tests;
+mod state_tests;
 #[cfg(test)]
 mod upload_tests;
 #[cfg(test)]
@@ -183,6 +180,29 @@ fn parse_auth(request: &[u8]) -> Auth {
         return Auth::Key(key);
     }
     Auth::Strict
+}
+/// The flash range (offset, size) of the application that is running this module (`device_info` keys 5 and 6 of the first map),
+/// None when the host does not say.
+fn running_partition(hw: Hw) -> Option<(u32, u32)> {
+    let mut bytes = [0u8; 3072]; // the whole status, the modules list included
+    let n = hw.device_info(&mut bytes).ok()?;
+    let mut r = cbor::Reader::new(&bytes[..n]);
+    let (Some(cbor::Item::Map(_)), Some(cbor::Item::Uint(1)), Some(cbor::Item::Map(fields))) = (r.next(), r.next(), r.next()) else {
+        return None;
+    };
+    let (mut offset, mut size) = (None, None);
+    for _ in 0..fields {
+        let Some(cbor::Item::Uint(key)) = r.next() else {
+            return None;
+        };
+        match (key, r.next()?) {
+            (5, cbor::Item::Uint(v)) => offset = Some(v as u32),
+            (6, cbor::Item::Uint(v)) => size = Some(v as u32),
+            (_, cbor::Item::Array(_) | cbor::Item::Map(_)) => return None,
+            _ => {}
+        }
+    }
+    Some((offset?, size?))
 }
 struct Operation {
     offset: u32,
@@ -452,6 +472,14 @@ impl Connection {
             .ok_or(wire::BAD_LENGTH)? & !4095;
         if erased.saturating_sub(prefix) > cap {
             return Err(wire::BAD_LENGTH);
+        }
+        // erasing the code that is running this module (Main from inside Main) would crash the device
+        if t != target::MODULE {
+            if let Some((start, len)) = running_partition(hw) {
+                if base < start.saturating_add(len) && start < base.saturating_add(erased) {
+                    return Err(wire::WRONG_TARGET);
+                }
+            }
         }
         self.base = base;
         self.origin = base;

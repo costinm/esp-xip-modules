@@ -1,0 +1,44 @@
+[package]
+name = "dmesh-fw-transport"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+# Firmware crates are built with their ESP-IDF SDK workspaces. Keeping this
+# crate standalone prevents host-only dependencies from entering the root
+# workspace while allowing Recovery and Main to share it directly.
+[workspace]
+
+[lib]
+name = "dmesh_fw_transport"
+path = "src/lib.rs"
+
+[features]
+default = ["uart-transport", "espnow-transport", "probe"]
+# Main's framed UART bearer and direct diagnostic fallback. Recovery disables
+# this feature and uses only the ESP console for human-readable logs.
+uart-transport = []
+# Main-only bearer and application capabilities. Recovery leaves these off.
+espnow-transport = []
+probe = []
+# Private diagnostic snapshots; the build script also enables SDK accounting.
+rtos-stats = []
+# Host-controlled A/B only; normal firmware intercepts UDP before lwIP.
+udp6-socket = []
+# Main TCP byte-stream comparison using the same registry, no QUIC changes.
+tcp-stream = []
+
+[dependencies]
+# The DMesh libraries (host crates, not copied) come from the DMesh repository at a pinned revision; DMesh never depends on this repository.
+quic-lite = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0" }
+dmesh-server = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+dmesh-wifi-profile = { path = "../../crates/dmesh-wifi-profile" }
+dmesh-rawnan = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+uart-codec = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0" }
+esp-idf-sys = { version = "0.37", default-features = false, features = ["alloc_handler"] }
+xip-abi = { path = "../../crates/xip-abi" }
+xip-runtime-esp = { path = "../../crates/xip-runtime-esp" }
+
+[build-dependencies]
+embuild = "0.33.3"

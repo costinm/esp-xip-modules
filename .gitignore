@@ -1,5 +1,3 @@
-*.pem
-*.wlpkg
 __pycache__/
 build/
 sdkconfig

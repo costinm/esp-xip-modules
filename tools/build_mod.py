@@ -14,8 +14,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
     parser.add_argument('--chip', default='esp32c6', choices=tuple(mkmod.CHIPS))
-    parser.add_argument('--offset', default='0', help='Xtensa: the offset in the module partition the image is linked for (a multiple of 0x10000)')
+    parser.add_argument('--offset', default='0', help='module-partition page offset: selects a RAM cell; Xtensa also links code for this page (multiple of 0x10000)')
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--host-metadata', type=Path, help='write canonical native module metadata without compiling an image')
     args = parser.parse_args()
     directory = args.directory.resolve()
     manifest = directory / 'Cargo.toml'
@@ -38,8 +39,12 @@ def main():
             env['XIP_RUST_ESP_BIN'] = str(rust_bin)
     env.setdefault('CARGO_TARGET_DIR', str(directory / 'target' / 'cargo'))
     features = 'flat-image' + (',' + args.chip if chip_feature else '')
-    command = ['python3', str(Path(mkmod.ROOT) / 'tools' / 'mkmod.py'), '--chip', args.chip, '--offset', args.offset, *options,
-               '--elf', str(out / f'{name}.elf'), '--out', str(out / f'{name}.dmod'), '--cargo', f'{manifest}:{name}:{features}']
+    command = ['python3', str(Path(mkmod.ROOT) / 'tools' / 'mkmod.py'), *options,
+               '--cargo', f'{manifest}:{name}:{features}']
+    if args.host_metadata:
+        command += ['--host-metadata', str(args.host_metadata)]
+    else:
+        command += ['--chip', args.chip, '--offset', args.offset, '--elf', str(out / f'{name}.elf'), '--out', str(out / f'{name}.dmod')]
     subprocess.run(command, env=env, check=True)
 
 

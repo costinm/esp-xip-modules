@@ -9,7 +9,7 @@ through the esp-xip-modules host table (GPIO, interrupts, SPI, time, events). Th
 
 | Form | How |
 |---|---|
-| flash module `mod_lora.dmod` | `scripts/build.sh esp32c6` (needs the ESP Rust toolchain: `XIP_RUST_MODULES=1`), or DMesh's `scripts/build-modules.sh`, signed and installed through the loader (below) |
+| flash module `mod_lora.dmod` | `scripts/build.sh esp32c6` (needs the ESP Rust toolchain), or DMesh's `scripts/build-modules.sh`; install it as described below |
 | linked into an application | an instance whose handler is `esp_mod_lora::xip`'s exported handler (`xip_instance_create`) |
 | host tests | `cargo test` in this directory: the drivers run against a scripted fake board |
 
@@ -58,8 +58,8 @@ DMesh's `fw/main/src/modules.rs` routes event 10 of the `lora` module to the tra
 
 ## Installing
 
-The module is signed (esp-xip-modules `sign.py`) and uploaded to a running `main`; see the esp-xip-modules
-`docs/getting-started.md`. On a DMesh Main the module is `lora` (component 43); on an esp-xip-modules `main` it is the `lora` slot of `main/main.c`. A bench run, with results, is in
+Flash `mod_lora.dmod` with esptool at a page of the module partition, or upload it to a running `main` that has `mod_flash`
+(`tools/flash_upload.py HOST module lora mod_lora.dmod`, see `modules/mod_flash/README.md`). On a DMesh Main the module is `lora` (component 43); on an esp-xip-modules `main` it is the `lora` slot of `main/main.c`. A bench run, with results, is in
 [notes/ai/2026-10-11-mod-lora-on-esp-modules.md](../../notes/ai/2026-10-11-mod-lora-on-esp-modules.md).
 
 ## Hardware notes

@@ -17,8 +17,27 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* The software SHA-512 member determines the driver's union size in this SDK
- * configuration. These private bytes are only initialized to zero by modules. */
+/* Exact ESP-IDF 6.0.2 layouts under this project's sdkconfig defaults.
+ * ESP32 accelerates SHA-512; software SHA-224's SHA-256 context determines the
+ * builtin union. C6 keeps software SHA-512; S3 has hardware SHA and an 84 byte software remainder. The SDK build checks these copies. */
+#if defined(CONFIG_IDF_TARGET_ESP32)
+typedef struct {
+    unsigned char buffer[64];
+    uint32_t total[2], state[8];
+    int is224;
+} xip_psa_sha256_layout;
+typedef struct {
+    uint32_t alg;
+    xip_psa_sha256_layout ctx;
+} xip_psa_builtin_hash_layout;
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+/* ESP32-S3 accelerates SHA in hardware; the largest software context left in the union is 84 bytes, 4 aligned
+ * (measured from the SDK headers: operation 92 bytes, ctx at offset 4). Only the size and alignment matter to modules. */
+typedef struct {
+    uint32_t alg;
+    unsigned char ctx[84];
+} xip_psa_builtin_hash_layout;
+#else
 typedef struct {
     uint64_t total[2], state[8];
     unsigned char buffer[128];
@@ -28,6 +47,7 @@ typedef struct {
     uint32_t alg;
     xip_psa_sha512_layout ctx;
 } xip_psa_builtin_hash_layout;
+#endif
 typedef union {
     unsigned dummy;
     xip_psa_builtin_hash_layout mbedtls_ctx;

@@ -1,0 +1,13 @@
+[package]
+name = "dmesh-wifi-profile"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The Wi-Fi part of DMesh's transport profile as the wifi and wifi-tuning components of the module ABI (host testable; used by fw/transport)"
+publish = false
+
+
+[dependencies]
+xip-abi = { path = "../xip-abi" }
+# DMesh's library at a pinned revision. DMesh never depends on this repository.
+dmesh-server = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }

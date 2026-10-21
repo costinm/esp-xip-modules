@@ -6,8 +6,6 @@ license = "Apache-2.0"
 description = "The xip runtime for a development host (Linux): loads modules as shared objects, runs them with the same event model as the device runtimes, virtual time and pluggable fixtures"
 publish = false
 
-# Standalone, like the other crates of this repository (no cargo workspace).
-[workspace]
 
 [dependencies]
 xip-abi = { path = "../xip-abi" }

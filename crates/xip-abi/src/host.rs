@@ -497,8 +497,7 @@ pub struct Host {
     /// component of a module is found by name in `modules_info`, everything below it in the manifest. The module's own code never
     /// reads it. (Format: `tools/mkmod.py`, `manifest_of_api`.)
     ///
-    /// Manifest key 7 is optional legacy `flash_slots` metadata emitted by the packer. It is not a host authorization
-    /// boundary. Physical flash HAL calls do not interpret manifests; the control plane and upload module own image policy.
+    /// Physical flash HAL calls do not interpret manifests; the control plane and upload module own image policy.
     ///
     /// # Returns
     ///

@@ -10,4 +10,5 @@ for m in rtest con; do
     RUSTC_BOOTSTRAP=1 cargo rustc --quiet --release --lib --crate-type cdylib --features sim \
         --manifest-path modules/mod_$m/Cargo.toml --target-dir target/host-modules-build/$m
     cp target/host-modules-build/$m/release/libesp_mod_$m.so $out/mod_$m.so
+    python3 tools/build_mod.py modules/mod_$m --host-metadata $out/mod_$m.json
 done
