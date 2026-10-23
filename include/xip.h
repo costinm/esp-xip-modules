@@ -114,14 +114,15 @@
 // Also deliver `HOST_WAKE` whenever a wake window opens (a module that batches its work on windows).
 #define XIP_ALARM_WINDOW 4
 
+// Ethernet II + IPv6 + UDP require 62 bytes (66 with one VLAN tag), within this reserve.
 // Bytes in front of the payload window: 80 for link and relay headers, 13 short header, 3 frame header, 36 tagged-CBOR envelope, rounded up to 16.
 #define XIP_PKT_HEADROOM 144
 
 // Largest payload a module can write or send. Larger records are refused with `ERR_SIZE`.
-#define XIP_PKT_MAX 1000
+#define XIP_PKT_MAX 1500
 
 // Smallest pool slot that holds `HEADROOM`, `MAX` and a 60-byte tail (AEAD tag, FCS).
-#define XIP_PKT_SLOT_MIN 1204
+#define XIP_PKT_SLOT_MIN 1704
 
 // The application (its packet hook). As `from`: the message came from the application, or the sender cannot be answered.
 #define XIP_ADDR_MAIN 0
@@ -293,6 +294,37 @@
 #define XIP_ERROR_INVALID_SIGNATURE -149
 
 #define XIP_ERROR_CORRUPTION_DETECTED -151
+
+// Writable packet returned by the pool adapter. A successful begin transfers
+// one writer to C, which must call rx_finish exactly once (commit or abort).
+typedef struct {
+  uint8_t *data;
+  size_t capacity;
+} xip_serial_rx_buffer;
+
+// One consumed TX packet. C borrows its bytes until complete, then calls the
+// single-use destructor/completion callback on success, error or teardown.
+typedef struct {
+  const uint8_t *data;
+  size_t len;
+  uint32_t port;
+  void *owner;
+  void (*complete)(void *owner, int outcome);
+} xip_serial_packet_tx;
+
+// Task-context pool/consumer bridge for the shared C PPP codec. ctx is consumed
+// by start on every outcome; close runs after callbacks and packets quiesce.
+typedef struct {
+  void *ctx;
+  // 0: one exclusive writer returned; positive: unbound port; negative: drop.
+  int (*rx_begin)(void *ctx, uint32_t port, xip_serial_rx_buffer *buffer);
+  // outcome 0 commits len bytes to the consumer; negative aborts the writer.
+  void (*rx_finish)(void *ctx, uint32_t port, size_t len, int outcome);
+  // Events: 1 bytes, 2 driver wake, 3 reset, 4 packet, 5 wake, 6 pool drop,
+  // 7 TX ready. Value is a count (bytes for event 1).
+  void (*event)(void *ctx, uint32_t event, uint32_t value);
+  void (*close)(void *ctx);
+} xip_serial_packet_client;
 
 // The host table, `xip_host`: every call a module can make, each documented below. The leading `user` argument of every call is `host->user`. Slots are `None` only if a host leaves one empty; slots past `size` do not exist.
 typedef struct {
@@ -480,7 +512,7 @@ typedef struct {
   //
   // # Returns
   //
-  // `int` — `OK` (the packet is now held, like one from `pkt_alloc`), `ERR_ARG`, `ERR_BUSY` when the module holds its quota.
+  // `int` — `OK` (the packet lifetime is now held), `ERR_ARG`, `ERR_BUSY` when the module holds its quota. Retained receive references remain read borrows until unique: mutable access and link TX return `ERR_BUSY` while another reader exists; there is no implicit clone.
   //
   // # Arguments
   //
@@ -640,13 +672,15 @@ typedef struct {
             size_t value_len,
             uint8_t *out,
             size_t capacity);
-  // Print where the memory is, to the device log.
+  // Capture heap diagnostics to the device log or PPP records.
   //
-  // `heap_info` says how much is free; this says what is there. The output goes to the **device log** (the port's text output, never
-  // into a reply), because it is long and for a person. `kind`: 0 the heap regions (size, free, largest block, block counts), 1 every block
+  // `heap_info` says how much is free; this says what is there. Kinds 0..5 write the device log; kind 6 streams compact CBOR
+  // records on the native module PPP console port (not the product QUIC wire). `kind`: 0 heap regions (size, free, largest block, block counts), 1 bounded blocks
   // of the heap (address, size, free or used: the picture of fragmentation), 2 the tasks (name, priority, stack left; needs FreeRTOS
   // trace facility), 3 start recording who allocates (`CONFIG_HEAP_TRACING_STANDALONE`; slows allocation, for a bench), 4 print what is
-  // still allocated with the call sites (the owners: this is the one that answers "who holds the RAM"), 5 stop recording.
+  // still allocated with the configured call-site depth, 5 stop recording, 6 bounded block snapshot over PPP.
+  // Block descriptors are captured under allocator locks; output happens after unlocking.
+  // The temporary snapshot buffer is reported in the header and freed after output.
   //
   // # Returns
   //
@@ -969,12 +1003,20 @@ typedef struct __attribute__((packed)) {
 typedef struct {
   // `sizeof(xip_wifi_intent)`, set by the caller; lets the struct grow.
   uint32_t size;
-  // 0: the radio is off, 1: on (ESP-NOW included).
+  // 0: the radio is off, 1: on.
   uint8_t radio;
   // 1: join the station network (`sta_ssid`, or `bssid`) while the radio is on.
   uint8_t sta;
-  // 1: run the soft AP (`ap_ssid`) while the radio is on.
+  // 1: run the soft AP (`ap_ssid`) while the radio is on. The on states are AP+NOW, STA+NOW and AP+STA+NOW
+  // (ESPNOW.md "Radio states", the same in DMesh's transport). The AP is a small extra: ESP-NOW already needs
+  // power save off, the AP adds only its ~512 ms beacon. On the 6.0.2 driver the AP is also **required**: the
+  // ESP-NOW receive hooks are delivered only with the AP interface up, so an unassociated receiver sets this
+  // (`sta` 0, `ap` 1: the AP+NOW state).
   uint8_t ap;
+  // 1: run ESP-NOW while the radio is on (the `espnow` link; it needs the modem awake, so it keeps the power
+  // save off). 0: no ESP-NOW — joined, the station runs the modem power save instead (beacon/DTIM-anchored);
+  // with the AP only, a plain infrastructure AP.
+  uint8_t now;
   // 0: any, else 1..14. Applies to the AP and speeds up a join.
   uint8_t channel;
   // Join this access point only; all zero: none. Together with `channel` it avoids a scan.
@@ -1059,7 +1101,9 @@ typedef struct {
   // `ERR_ARG` for an invalid intent: a name or passphrase of the wrong length, a channel above 14, or `sta` with neither
   // an SSID nor a BSSID. An identical intent keeps the generation and wakes nobody. Acceptance is not completion: the
   // host joins afterwards, so read `state`. With the radio on, ESP-NOW is on: with `sta` and `ap` both 0 the radio is
-  // unassociated on `channel` (6 when 0) and only ESP-NOW runs (the `espnow` link of the `link` component).
+  // unassociated on `channel` (6 when 0) and only ESP-NOW runs (the `espnow` link of the `link` component); on the 6.0.2
+  // driver that state sends but does not receive NOW (the hooks are delivered only with the AP up), so an unassociated
+  // receiver sets `ap` (the AP+NOW state, ESPNOW.md "Radio states").
   int (*set)(void *ctx, const xip_wifi_intent *intent, uint32_t *generation);
   // Read the intended state and its generation (set `intent.size` first). `ERR_SIZE` if `size` is too small.
   int (*get)(void *ctx, xip_wifi_intent *intent, uint32_t *generation);
@@ -1109,8 +1153,10 @@ typedef struct {
   uint8_t bssid_check;
   // Raw transmit rate (driver rate code); 0: the driver default. Rust host only.
   uint8_t raw_tx_rate;
+  // Espressif long-range protocol alongside 11b/g/n. Default: off.
+  uint8_t lr;
   // Zero.
-  uint8_t reserved[2];
+  uint8_t reserved;
   // Static receive buffers, 2..64 (the `wl` settings give the boot default).
   uint16_t rx_static;
   // Dynamic receive buffers, 2..128.
@@ -1276,7 +1322,10 @@ typedef struct {
   // restarted around a plain delay and the CPU does not sleep, as DMesh's `sleepy-soft` (`usb_jtag_debug_hold`). A device on USB is charged by the host, so
   // the saving does not matter there; unplugged, or with a UART console, the sleep is physical. Details: `components/xip_runtime/src/xip_power.c`.
   uint8_t soft_sleep;
-  uint8_t reserved[3];
+  // A UART/wake activity interval is still open. Informational: the module
+  // owns sleep policy. Uses one formerly reserved byte, keeping ABI size.
+  uint8_t active_window;
+  uint8_t reserved[2];
 } xip_power_info;
 
 // The `power` component table, from `get_component("power")`. The functions take no context argument other than `ctx` and never block.
@@ -1488,7 +1537,7 @@ typedef struct {
 
 _Static_assert(sizeof(xip_spi_config) == 44, "xip_spi_config layout");
 _Static_assert(sizeof(xip_dmod_header) == 64, "xip_dmod_header layout");
-_Static_assert(sizeof(xip_wifi_intent) == 212, "xip_wifi_intent layout");
+_Static_assert(sizeof(xip_wifi_intent) == 216, "xip_wifi_intent layout");
 _Static_assert(sizeof(xip_wifi_state) == 52, "xip_wifi_state layout");
 _Static_assert(sizeof(xip_wifi_tuning) == 20, "xip_wifi_tuning layout");
 _Static_assert(sizeof(xip_link_info) == 60, "xip_link_info layout");

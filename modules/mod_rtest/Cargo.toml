@@ -14,7 +14,7 @@ xip-abi = { path = "../../crates/xip-abi", features = ["global-alloc", "allocato
 
 [package.metadata]
 # Options for tools/mkmod.py (scripts/build.sh). 
-mkmod = "--stack 4096 --state 64 --port 3 --stream 3"
+mkmod = "--stack 4096 --state 512 --port 3 --stream 3"
 
 [features]
 flat-image = []

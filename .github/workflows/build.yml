@@ -3,36 +3,105 @@ on:
   push: {branches: [main, master]}
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # CI uses locked tool dependencies, never sibling development checkouts.
+  XIP_NIX_LOCKED: '1'
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-host
+  MESH_TOOLS: ${{ github.workspace }}/crates/dmesh-cli/schemas/lmesh/tools.json
+
 jobs:
   host-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc
-      - run: scripts/test-host.sh abi
-      - run: scripts/test-host.sh c
-      - run: scripts/test-host.sh rust
-      - run: scripts/test-host.sh python   # the module build tests skip themselves without the ESP toolchains
-  firmware:
-    needs: host-tests
+      - uses: cachix/install-nix-action@v31
+      - name: Install host dependencies
+        run: scripts/esp-deps.sh host
+      - name: Check generated interfaces
+        run: |
+          . ./env.sh
+          command -v cbindgen
+          command -v mesh-api-gen
+          scripts/test-host.sh generated
+      - name: Rust runtime and module tests
+        run: |
+          . ./env.sh
+          scripts/test-host.sh ci-runtime
+
+  dmesh-cli:
     runs-on: ubuntu-latest
-    # Same image as the local Dockerfile (docker.io/espressif/idf:v6.0.2).
-    container: espressif/idf:v6.0.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Install host dependencies
+        run: scripts/esp-deps.sh host
+      - name: Build CLI
+        run: |
+          . ./env.sh
+          cargo build --locked --release --manifest-path crates/Cargo.toml -p dmesh-cli --bin dmesh-cli
+          cargo build --locked --manifest-path crates/Cargo.toml -p dmesh-cli --example xip_heap
+          cargo test --locked --manifest-path crates/Cargo.toml -p dmesh-cli --test heap_device --no-run
+      - name: CLI tests with the checked-in catalog
+        run: |
+          . ./env.sh
+          scripts/test-host.sh cli
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: dmesh-cli-linux
+          path: target/ci-host/release/dmesh-cli
+          if-no-files-found: error
+
+  firmware:
+    # Independent of host/CLI test outcomes so all chips receive build coverage.
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         cpu: [esp32, esp32s3, esp32c6]
     steps:
       - uses: actions/checkout@v4
-      - name: Build
-        shell: bash
+      - uses: cachix/install-nix-action@v31
+      - uses: actions/cache@v4
+        with:
+          path: target/esp-idf-6.0
+          key: ${{ runner.os }}-esp-idf-v6.0.2-${{ hashFiles('flake.lock', 'scripts/esp-deps.sh') }}
+      - name: Install ESP-IDF and Rust ESP toolchains
+        run: scripts/esp-deps.sh
+      - name: Build generic Main, Stage2 and modules
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          . "$IDF_PATH/export.sh" >/dev/null 2>&1
+          . ./env.sh
           scripts/build.sh ${{ matrix.cpu }}
-          python3 tests/test_tools.py        # now with the toolchains: builds every module for every chip
+      - name: Build core fw/main
+        if: ${{ !cancelled() }}
+        run: |
+          . ./env.sh
+          fw/build.sh ${{ matrix.cpu }}
+      - name: Check C6 memory budgets and build without BLE
+        if: ${{ matrix.cpu == 'esp32c6' && !cancelled() }}
+        run: |
+          . ./env.sh
+          python3 scripts/check-memory.py c-main target/out/esp32c6/main-build/esp-xip-modules.elf
+          python3 scripts/check-memory.py fw-ble target/fw/riscv32imac-esp-espidf/release/dmesh-rs
+          DMESH_FW_NO_DEFAULT_FEATURES=1 DMESH_FW_FEATURES=modules XIP_FW_TARGET_DIR="$PWD/target/fw-no-ble" fw/build.sh esp32c6
+          python3 scripts/check-memory.py fw-no-ble target/fw-no-ble/riscv32imac-esp-espidf/release/dmesh-rs
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: firmware-${{ matrix.cpu }}
           path: |
             target/out/${{ matrix.cpu }}/main.bin
+            target/out/${{ matrix.cpu }}/stage2-4mb.bin
+            target/out/${{ matrix.cpu }}/partition-table-4mb.bin
+            target/out/${{ matrix.cpu }}/modules.txt
             target/out/${{ matrix.cpu }}/modules/*.dmod
+            target/fw/${{ matrix.cpu }}/main-app.bin
+          if-no-files-found: error

@@ -27,7 +27,7 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 # Allocation limit, not reserved RAM: accommodates the optional external flash module.
 CONFIG_XIP_MEM_QUOTA=0
 
-# Keep the C sample small; the Rust runtime has its own WPA3-enabled defaults.
+# Keep both generic samples small; fw/main has its own product defaults.
 CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
 CONFIG_ESP_WIFI_ENABLE_SAE_H2E=n
 CONFIG_ESP_WIFI_ENABLE_SAE_PK=n

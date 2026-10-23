@@ -23,7 +23,8 @@ fi
 # SDK Python environment inside the source tree.
 export ESP_IDF_TOOLS_INSTALL_DIR=fromenv
 export CARGO_TARGET_DIR="${XIP_MAIN_RS_TARGET_DIR:-$XIP_REPO/target/main-rs}"
-case "${1:-esp32c6}" in
+cpu="${1:-esp32c6}"
+case "$cpu" in
     esp32c6) target=riscv32imac-esp-espidf ;;
     esp32) target=xtensa-esp32-espidf ;;
     esp32s3) target=xtensa-esp32s3-espidf ;;
@@ -32,7 +33,9 @@ esac
 # the partition table by absolute path: ESP-IDF resolves a relative one inside its generated project
 mkdir -p "$CARGO_TARGET_DIR"
 printf 'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="%s"\n' "$HERE/partitions.csv" > "$CARGO_TARGET_DIR/partition.defaults"
-export ESP_IDF_SDKCONFIG_DEFAULTS="$HERE/sdkconfig.defaults;$CARGO_TARGET_DIR/partition.defaults"
+defaults="$XIP_REPO/sdkconfig.defaults"
+[ ! -f "$XIP_REPO/sdkconfig.$cpu.defaults" ] || defaults="$defaults;$XIP_REPO/sdkconfig.$cpu.defaults"
+export ESP_IDF_SDKCONFIG_DEFAULTS="$defaults;$CARGO_TARGET_DIR/partition.defaults"
 cd "$HERE"
 cargo build --release --target "$target"
 python3 -m esptool --chip "${1:-esp32c6}" elf2image --flash-mode dio --flash-freq 80m \

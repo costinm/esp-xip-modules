@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use core::ffi::{c_int, c_void, CStr};
 
 use xip_abi::cbor::{self, Item, Reader, Writer};
-use xip_abi::{CallView, Hw, Module, ADDR_MAIN, ERR_AGAIN, ERR_BUSY, ERR_NOTFOUND, ERR_SIZE, ERR_UNSUPPORTED, HOST_START, HOST_STOP};
+use xip_abi::{CallView, Hw, Module, ADDR_MAIN, ERR_AGAIN, ERR_BUSY, ERR_NOTFOUND, ERR_SIZE, ERR_UNSUPPORTED};
 
 mod tables;
 use tables::*;
@@ -29,6 +29,13 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 const C_CONSOLE: i32 = 20;
 const M_PARSE: i32 = 1;
 const M_RENDER: i32 = 2;
+const M_DISPATCH: i32 = 4;
+const M_STATUS: i32 = 5;
+const M_START: i32 = 6;
+const M_STOP: i32 = 7;
+const M_RESET: i32 = 8;
+const M_HEAP: i32 = 9;
+const M_NV: i32 = 10;
 /// A line typed on the serial port (a packet).
 const M_LINE: i32 = 3;
 const MAX_TOKENS: usize = 24;
@@ -1037,38 +1044,6 @@ fn help_text(o: &mut Out) {
     }
 }
 
-/// The manifest of the installed module is the module's own word on which methods it has; when it has one, a method it does not list is
-/// refused here instead of being sent. No manifest, no such slot or a manifest too large: the catalog's word stands.
-fn manifest_allows(hw: &Hw, comp: u64, method: u64, o: &mut Out) -> bool {
-    let Some(c) = CAT_COMPS[..CAT_COMPS_N].iter().find(|c| c.id as u64 == comp) else { return true };
-    let name = cname(c.name);
-    let mut m = vec![0u8; 1024];
-    let n = hw.module_manifest(name, &mut m);
-    if n <= 0 {
-        return true;
-    }
-    let Ok(Some(mut r)) = cbor::get(&m[..n as usize], 3) else { return true };
-    let Some(Item::Array(count)) = r.next() else { return true };
-    for _ in 0..count {
-        let start = r.rest();
-        let mut after = r;
-        if !after.skip() {
-            return true;
-        }
-        let item = &start[..start.len() - after.rest().len()];
-        if cbor::get_int(item, 1).ok().flatten() == Some(method as i64) {
-            return true;
-        }
-        r = after;
-    }
-    o.s("error: ");
-    o.put(name);
-    o.s(" does not list method ");
-    o.n(method as i64);
-    o.s(" in its manifest\n");
-    false
-}
-
 // ---- native calls ----
 // A method of a host component (`wifi.set`, ...) is called through the component's table, not sent to a module: the tagged fields of the
 // line fill the request struct of the C function, the function is called, and the output struct comes back as tagged fields, which the
@@ -1216,26 +1191,26 @@ fn nat_emit(s: &NatStruct, buf: &[u8], w: &mut Writer) -> usize {
     pairs
 }
 
-fn native_call(hw: &Hw, nm: &NatMethod, cm: Option<&CatMethod>, fields: &[u8], o: &mut Out) {
+fn native_binary(hw: &Hw, nm: &NatMethod, cm: Option<&CatMethod>, fields: &[u8], o: &mut Out) -> Result<Vec<u8>, i32> {
     let name = &NAT_POOL[nm.table as usize..];
-    let Ok(cname_) = CStr::from_bytes_until_nul(name) else { return };
+    let Ok(cname_) = CStr::from_bytes_until_nul(name) else { return Err(xip_abi::ERR_ARG) };
     let table = hw.get_component(cname_) as *const u8;
     if table.is_null() {
         o.s("error: this host has no component ");
         o.put(cname_.to_bytes());
         o.s("\n");
-        return;
+        return Err(xip_abi::ERR_ARG);
     }
     let table_size = unsafe { core::ptr::read_unaligned(table.add(4) as *const u32) } as usize;
     let member = 8 + nm.slot as usize * core::mem::size_of::<usize>(); // after {version, size}
     if member + core::mem::size_of::<usize>() > table_size {
         o.s("error: this host's component does not have that member\n");
-        return;
+        return Err(xip_abi::ERR_ARG);
     }
     let fp = unsafe { core::ptr::read_unaligned(table.add(member) as *const usize) };
     if fp == 0 || nm.nparams > 4 {
         o.s("error: not available on this host\n");
-        return;
+        return Err(xip_abi::ERR_ARG);
     }
     let np = nm.nparams as usize;
     // each argument is a zeroed struct (4-byte aligned) or an 8-byte scalar slot
@@ -1255,7 +1230,7 @@ fn native_call(hw: &Hw, nm: &NatMethod, cm: Option<&CatMethod>, fields: &[u8], o
         if let Some(s) = s {
             let bytes = unsafe { core::slice::from_raw_parts_mut(b.as_mut_ptr() as *mut u8, size) };
             if !nat_fill(s, bytes, if p.role == NAT_IN { Some(fields) } else { None }, cm, o) {
-                return;
+                return Err(xip_abi::ERR_ARG);
             }
         }
         arg[i] = b.as_ptr() as usize;
@@ -1283,7 +1258,7 @@ fn native_call(hw: &Hw, nm: &NatMethod, cm: Option<&CatMethod>, fields: &[u8], o
     };
     if rc < 0 {
         error_rc(o, core::str::from_utf8(cname_.to_bytes()).unwrap_or("call"), rc);
-        return;
+        return Err(rc);
     }
     let mut scratch = vec![0u8; RESP_MAX];
     let mut pw = Writer::new(&mut scratch);
@@ -1310,16 +1285,127 @@ fn native_call(hw: &Hw, nm: &NatMethod, cm: Option<&CatMethod>, fields: &[u8], o
     }
     let Some(body) = pw.finish() else {
         o.s("error: answer too long\n");
-        return;
+        return Err(xip_abi::ERR_ARG);
     };
     let mut result = vec![0u8; RESP_MAX + 16];
     let mut rw = Writer::new(&mut result);
     rw.map(pairs).raw(body);
     let Some(res) = rw.finish() else {
         o.s("error: answer too long\n");
-        return;
+        return Err(xip_abi::ERR_ARG);
     };
-    render_map(o, resp_fields(cm), Reader::new(res));
+    Ok(res.to_vec())
+}
+
+fn native_call(hw: &Hw, nm: &NatMethod, cm: Option<&CatMethod>, fields: &[u8], o: &mut Out) {
+    if let Ok(result) = native_binary(hw, nm, cm, fields, o) {
+        render_map(o, resp_fields(cm), Reader::new(&result));
+    }
+}
+
+/// A single complete CBOR item borrowed from a numeric field.
+fn field_item(data: &[u8], key: u64) -> Result<Option<&[u8]>, i32> {
+    let Some(mut reader) = cbor::get(data, key).map_err(|_| xip_abi::ERR_ARG)? else { return Ok(None) };
+    let rest = reader.rest();
+    if !reader.skip() { return Err(xip_abi::ERR_ARG); }
+    Ok(Some(&rest[..rest.len() - reader.rest().len()]))
+}
+
+fn binary_result(rc: i32) -> Result<Vec<u8>, i32> {
+    if rc < 0 { Err(rc) } else { Ok(vec![0xa0]) }
+}
+
+fn valid_map(data: &[u8]) -> bool {
+    let mut reader = Reader::new(data);
+    if !matches!(reader.next(), Some(Item::Map(_))) { return false; }
+    let mut check = Reader::new(data);
+    check.skip() && check.rest().is_empty()
+}
+
+/// The console's binary operations. No text parser or renderer participates.
+fn binary_method(hw: &Hw, method: i32, data: &[u8]) -> Result<Vec<u8>, i32> {
+    if !valid_map(data) { return Err(xip_abi::ERR_ARG); }
+    match method {
+        M_STATUS => {
+            let mut out = vec![0; RESP_MAX];
+            loop {
+                match hw.device_info(&mut out) {
+                    Err(ERR_SIZE) if out.len() < 16384 => out.resize(out.len() * 2, 0),
+                    Err(rc) => return Err(rc),
+                    Ok(n) => { out.truncate(n); return Ok(out); }
+                }
+            }
+        }
+        M_START | M_STOP => {
+            let name = cbor::get_text(data, 1).map_err(|_| xip_abi::ERR_ARG)?.filter(|n| !n.is_empty()).ok_or(xip_abi::ERR_ARG)?;
+            if method == M_STOP { return binary_result(hw.module_stop(name)); }
+            let request = match cbor::get(data, 2).map_err(|_| xip_abi::ERR_ARG)? {
+                None => &[][..],
+                Some(mut r) => match r.next() { Some(Item::Bytes(b)) => b, _ => return Err(xip_abi::ERR_ARG) },
+            };
+            binary_result(hw.module_start(name, request))
+        }
+        M_RESET => binary_result(hw.reset()),
+        M_HEAP => {
+            if let Some(kind) = cbor::get_int(data, 1).map_err(|_| xip_abi::ERR_ARG)? {
+                let kind = i32::try_from(kind).map_err(|_| xip_abi::ERR_ARG)?;
+                if !(0..=6).contains(&kind) { return Err(xip_abi::ERR_ARG); }
+                return binary_result(hw.heap_dump(kind));
+            }
+            let mut out = vec![0; RESP_MAX];
+            let n = hw.heap_info(&mut out);
+            if n < 0 { return Err(n); }
+            out.truncate(n as usize);
+            Ok(out)
+        }
+        M_NV => {
+            let key = cbor::get_text(data, 1).map_err(|_| xip_abi::ERR_ARG)?.filter(|k| !k.is_empty()).ok_or(xip_abi::ERR_ARG)?;
+            let value = match cbor::get(data, 2).map_err(|_| xip_abi::ERR_ARG)? {
+                None => None,
+                Some(mut r) => match r.next() { Some(Item::Bytes(b)) => Some(b), _ => return Err(xip_abi::ERR_ARG) },
+            };
+            let mut value_out = vec![0; RESP_MAX];
+            let n = hw.nv(key, value, &mut value_out);
+            if n < 0 { return Err(n); }
+            if value.is_some() { return Ok(vec![0xa0]); }
+            let mut out = vec![0; n as usize + 16];
+            let mut w = Writer::new(&mut out);
+            w.map(1).uint(1).bytes(&value_out[..n as usize]);
+            let n = w.finish().ok_or(ERR_SIZE)?.len();
+            out.truncate(n);
+            Ok(out)
+        }
+        _ => Err(ERR_UNSUPPORTED),
+    }
+}
+
+/// Dispatch an envelope locally. Remote module dispatch is performed by the firmware's
+/// manifest registry; never synchronously call another module from its shared worker.
+fn binary_dispatch(hw: &Hw, data: &[u8]) -> Vec<u8> {
+    let comp = cbor::get_int(data, 1).ok().flatten().unwrap_or(0);
+    let method = cbor::get_int(data, 2).ok().flatten().unwrap_or(0);
+    let id_field = field_item(data, 3);
+    let valid_id = id_field.as_ref().is_ok_and(|id| id.is_none_or(|id| matches!(Reader::new(id).next(), Some(Item::Uint(_)))));
+    let id = if valid_id { id_field.ok().flatten().unwrap_or(&[0]) } else { &[0] };
+    let result = (|| {
+        if !valid_map(data) || !valid_id || comp <= 0 || method <= 0 { return Err(xip_abi::ERR_ARG); }
+        let fields = field_item(data, 5)?.unwrap_or(&[0xa0]);
+        if !valid_map(fields) { return Err(xip_abi::ERR_ARG); }
+        if comp == C_CONSOLE as i64 && method != M_DISPATCH as i64 {
+            return binary_method(hw, i32::try_from(method).map_err(|_| xip_abi::ERR_ARG)?, fields);
+        }
+        if let Some(nm) = nat_find(comp as u64, method as u64) {
+            return native_binary(hw, nm, method_of(comp as u64, method as u64), fields, &mut Out::new(OUT_MAX));
+        }
+        Err(ERR_UNSUPPORTED)
+    })();
+    let mut out = vec![0; result.as_ref().map_or(0, |r| r.len()) + id.len() + 48];
+    let mut w = Writer::new(&mut out);
+    w.map(4).uint(1).int(comp).uint(2).int(method).uint(3).raw(id);
+    match result { Ok(result) => { w.uint(6).raw(&result); }, Err(rc) => { w.uint(7).int(rc as i64); } }
+    let n = w.finish().map_or(0, |r| r.len());
+    out.truncate(n);
+    out
 }
 
 /// `NAME.METHOD key=value`: the request payload by the catalog, sent as a packet to the module. True when it was sent (the answer comes
@@ -1342,9 +1428,6 @@ fn cmd_call(hw: &Hw, st: &mut State, line: &[u8], o: &mut Out) -> bool {
     if NAT_METHODS[..NAT_METHODS_N].iter().any(|m| m.comp as u64 == comp) {
         // the rest of a host component has no function to call from text
         o.s("error: not a call the console can make (see the built-in commands: wifi, wifi scan, status)\n");
-        return false;
-    }
-    if !manifest_allows(hw, comp, meth, o) {
         return false;
     }
     let Ok(pkt) = hw.pkt_alloc() else {
@@ -1578,7 +1661,12 @@ impl Module for State {
             self.peer_id = c.id;
             self.has_peer = true;
             self.sock = 0;
-            self.run_line(hw, c.data);
+            if c.data.first().is_some_and(|b| b >> 5 == 5) {
+                let answer = binary_dispatch(hw, c.data);
+                say_bytes(hw, self, &answer);
+            } else {
+                self.run_line(hw, c.data);
+            }
             return CONTINUE;
         }
         if frame {
@@ -1602,6 +1690,31 @@ impl Module for State {
         if !c.wants_response() {
             return CONTINUE;
         }
+        // Heap diagnostics must work when managed allocation is refused by
+        // the host reserve. Six integer fields fit in 64 bytes, even as u64.
+        if c.method == M_HEAP {
+            let mut out = [0u8; 64];
+            let n = match cbor::get_int(c.data, 1) {
+                Ok(None) => hw.heap_info(&mut out),
+                kind => {
+                    let rc = match kind {
+                        Ok(Some(kind @ 0..=6)) => hw.heap_dump(kind as i32),
+                        _ => xip_abi::ERR_ARG,
+                    };
+                    let mut w = Writer::new(&mut out);
+                    if rc < 0 { w.int(rc as i64); } else { w.map(0); }
+                    w.finish().map_or(xip_abi::ERR_SIZE, |r| r.len() as i32)
+                }
+            };
+            if n >= 0 {
+                hw.reply(c, &out[..n as usize]);
+            } else {
+                let mut w = Writer::new(&mut out);
+                w.int(n as i64);
+                if let Some(error) = w.finish() { hw.reply(c, error); }
+            }
+            return CONTINUE;
+        }
         let out = if c.method == M_PARSE {
             match cbor::get_text(c.data, 1) {
                 Ok(Some(line)) => parsed_cbor(None, &parse(line)),
@@ -1609,8 +1722,20 @@ impl Module for State {
             }
         } else if c.method == M_RENDER {
             render_cbor(c.data)
+        } else if c.method == M_DISPATCH {
+            binary_dispatch(hw, c.data)
         } else {
-            return CONTINUE;
+            match binary_method(hw, c.method, c.data) {
+                Ok(result) => result,
+                Err(rc) => {
+                    let mut out = vec![0; 9];
+                    let mut w = Writer::new(&mut out);
+                    w.int(rc as i64);
+                    let n = w.finish().map_or(0, |r| r.len());
+                    out.truncate(n);
+                    out
+                }
+            }
         };
         if !out.is_empty() {
             hw.reply(c, &out);

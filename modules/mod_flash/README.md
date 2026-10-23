@@ -23,7 +23,7 @@ upload never leaves a bootable half image.
 
 ## Authentication
 
-The mode is the request of `start`; it is not stored, so a reboot starts the module strict again (console: `stop flash`, `start flash unsigned`):
+The mode is the request of `start`; it is not stored, so a reboot starts the module strict again (binary `console.stop` followed by `console.start` with name `flash` and request bytes `unsigned`; see `notes/docs/flashing.md`):
 
 | request | meaning |
 |---|---|
@@ -47,4 +47,4 @@ a spare partition would make it possible.
 ## Build and test
 
 `scripts/build.sh` builds it with the other modules; `cargo test` in this directory (also run by `scripts/test-host.sh rust`).
-Test vectors of the frozen formats are in `tests/data` (`loader-esp32c6.pkg`, `module-lora-esp32c6.pkg`, `state.bin`).
+Compatibility vectors currently live in the local root `tests/data` tree (`loader-esp32c6.pkg`, `module-lora-esp32c6.pkg`, `state.bin`). Those tests are not in the CI-safe `ci-runtime` group until rewritten with crate-owned fixtures/generated inputs. Firmware CI still builds the module.

@@ -2,13 +2,14 @@
 //! to run at boot (a console module, if installed). Everything else is in the C components and in `xip-runtime-esp`.
 use xip_runtime_esp::{autostart, init, Features};
 
-
 fn main() {
     app_main();
 }
 
 extern "C" {
     fn xip_log_to_rom();
+    fn xip_wifi_boot_network();
+    fn xip_heap_checkpoint(phase: *const core::ffi::c_char);
 }
 
 /// A line on the ROM console (before and independent of ESP-IDF logging).
@@ -21,24 +22,23 @@ fn mark(text: &'static [u8]) {
 #[no_mangle]
 pub extern "C" fn app_main() {
     // ESP_LOG lines would be lost: with our own app_main the C library has no stdout
-    unsafe { xip_log_to_rom() };
-    mark(b"xip-main: entry\n\0");
+    unsafe { xip_heap_checkpoint(c"app-entry".as_ptr()); xip_log_to_rom() };
     esp_idf_sys::link_patches();
+
     unsafe {
         let mut err = esp_idf_sys::nvs_flash_init();
         if err == esp_idf_sys::ESP_ERR_NVS_NO_FREE_PAGES as i32 || err == esp_idf_sys::ESP_ERR_NVS_NEW_VERSION_FOUND as i32 {
-            esp_idf_sys::nvs_flash_erase();
+            assert_eq!(esp_idf_sys::nvs_flash_erase(), 0, "erase exhausted NVS");
             err = esp_idf_sys::nvs_flash_init();
         }
         assert_eq!(err, 0, "nvs");
     }
-    mark(b"xip-main: nvs ok\n\0");
-    // the host keeps the last events modules emit; this application needs no handler
-    assert_eq!(init("data\0", Features { modules: true, nv: None, pool: None, wifi: None }, None), 0, "host and loader");
-    // last: what is installed and asks to run at boot (a console), now that the host and the loader are up
-    autostart();
-    mark(b"xip-main: running\n\0");
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
+    assert_eq!(init("data\0", Features { modules: true, ..Features::default() }, None), 0, "host and loader");
+    unsafe {
+        xip_heap_checkpoint(c"pre-network".as_ptr());
+        xip_wifi_boot_network();
     }
+    // The installed manifests decide what runs at boot, as in C Main.
+    autostart();
+    mark(b"main: ready\n\0");
 }

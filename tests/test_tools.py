@@ -205,49 +205,5 @@ class Manifest(unittest.TestCase):
         self.assertEqual(metadata["state_bytes"], dmod.unpack(image)["state_bytes"])
 
 
-class ConsoleAnswer(unittest.TestCase):
-    """tools/console.py: the answer to a command is what is not an ESP-IDF log line."""
-
-    def test_log_lines_between_the_reply_are_dropped(self):
-        import console
-
-        class Ser:
-            def __init__(self, chunks):
-                self.chunks, self.sent = list(chunks), b""
-
-            def reset_input_buffer(self): pass
-            def write(self, b): self.sent += b
-            def read(self, n): return self.chunks.pop(0) if self.chunks else b""
-
-        c = console.Console("unused")
-        c.ser = Ser([b"W (1234) xip: test: log line\r\n", b"name=test tag=2 installed=true\r\n",
-                     b"W (1240) main: test event 0x7eff: pass=1\r\n"])
-        self.assertEqual(c.command("status", timeout=3, idle=0.01), "name=test tag=2 installed=true\n")
-        self.assertEqual(c.ser.sent, b"status\n")
-        c.ser = Ser([])
-        self.assertEqual(c.command("status", timeout=0.2, idle=0.01), "no reply")
-
-    def test_a_board_is_discovered_by_asking_its_console(self):
-        import console
-
-        class Ser:
-            sent = b""
-            chunks = [b"", b"", b'{1:{4:"main"},4:[{1:"console",2:20,3:true,4:true},{1:"test",2:2,3:true,4:false}]}\r\n']
-
-            def reset_input_buffer(self): pass
-            def write(self, b): self.sent += b
-            def read(self, n): return self.chunks.pop(0) if self.chunks else b""
-            def close(self): pass
-
-        original = console.Console._open_serial
-        console.Console._open_serial = staticmethod(lambda path: Ser())
-        try:
-            d = console.probe("/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:AC:5A:20-if00", seconds=3)
-        finally:
-            console.Console._open_serial = original
-        self.assertEqual(d["mac"], "10:bd:a3:ac:5a:20")
-        self.assertEqual([(m["name"], m["running"]) for m in d["modules"]], [("console", True), ("test", False)])
-
-
 if __name__ == "__main__":
     unittest.main()
