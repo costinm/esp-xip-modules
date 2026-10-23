@@ -7,8 +7,13 @@ names and numbers the same fields for consoles, gateways and tools. The mapping 
 of byte arrays with lengths.
 
 The model is an **intended state**: a caller says what the radio should do and the device makes it true (joins, retries,
-follows a channel change). There is no start or stop. ESP-NOW is on whenever the radio is on, so the combinations are: off,
-ESP-NOW only, station, soft AP, and both.
+follows a channel change). There is no start or stop. With the radio on, `sta`, `ap` and `now` compose the state
+(ESPNOW.md "Radio states"): soft AP + ESP-NOW, station + ESP-NOW, both, and off (the radio stops and is woken only by
+a NAN/NOW discovery window, for sync); with `now` absent, the plain station — the one on state where the modem power
+save runs instead, on the BSS beacon/DTIM schedule. Every state with ESP-NOW keeps the modem awake (ESP-NOW cannot run
+against a sleeping modem), so the soft AP is a small extra cost — its ~512 ms beacon, which doubles as the soft-NAN
+timing anchor. NOW-only operation (`sta=0, ap=0, now=1`) also receives without AP:
+the radio owner registers a connectionless receive-window vote independently of ordinary modem sleep.
 
 ## 1. `get` — The intended state
 
@@ -22,8 +27,8 @@ ESP-NOW only, station, soft AP, and both.
 
 **C function:** wifi/Wifi.set
 
-Replaces the whole intended state: a field that is absent takes its default (`radio` 0, `sta` 0, `ap` 0, `channel` 0, no
-names). To change only the channel, `get`, edit and `set`. Returns once the state is accepted, not when it is true; read
+Replaces the whole intended state: a field that is absent takes its default (`radio` 0, `sta` 0, `ap` 0, `now` 0 — no
+ESP-NOW, `channel` 0, no names). To change only the channel, `get`, edit and `set`. Returns once the state is accepted, not when it is true; read
 `state` for that. An identical state changes nothing.
 
 **Access:** any of `system`, `mesh.owner`, `mesh.admin`
@@ -40,7 +45,7 @@ names). To change only the channel, `get`, edit and `set`. Returns once the stat
 
 | Error | Meaning |
 |---|---|
-| `invalid_argument` | A name or passphrase of the wrong length, a channel above 14, or `sta` with neither `sta_ssid` nor `bssid`. |
+| `invalid_argument` | A name or passphrase of the wrong length, a flag above 1, a channel above 14, or `sta` with neither `sta_ssid` nor `bssid`. |
 
 ## 3. `state` — What is true now
 
@@ -126,6 +131,13 @@ Rarely needed settings for measurements and unusual links. The defaults of the d
 Replaces all of them; an absent field is the default. `ampdu` and the four buffer sizes are read when the driver starts, so
 a change restarts the radio (the station rejoins); the other fields apply to the next association.
 
+Buffer overrides here are volatile. Persistent boot defaults use `console.nv`
+keys `wifi.rx_static`, `wifi.rx_dynamic`, and `wifi.rx_ba`; see the console API.
+The application baseline is 10 fixed RX buffers, a 32-buffer dynamic limit and
+a 6-frame RX BA window. Stored defaults are applied on driver initialization;
+nonzero fields in this tuning request take precedence. Reboot after changing
+persistent defaults to apply them reliably.
+
 **Access:** any of `system`, `mesh.owner`, `mesh.admin`
 
 **Request:** [Tuning](#tuning)
@@ -147,15 +159,16 @@ What the radio should do.
 
 | Tag | Field | Type | Description |
 |---:|---|---|---|
-| 1 | `radio` | `bool` | The radio is on (ESP-NOW included). |
+| 1 | `radio` | `bool` | The radio is on. |
 | 2 | `sta` | `bool` | Join `sta_ssid`, or the access point `bssid`, while the radio is on. |
-| 3 | `ap` | `bool` | Run the soft AP while the radio is on. |
+| 3 | `ap` | `bool` | Run the soft AP while the radio is on. NOW-only operation can receive without AP using the connectionless receive-window vote; keep this independent of station association and NOW. |
 | 4 | `channel` | `u8` | 0 any, else 1..14. Applies to the AP and speeds up a join. |
 | 5 | `bssid` | `bytes` | Join this access point only (6 bytes). Together with `channel` it avoids a scan. |
 | 6 | `sta_ssid` | `string` | Network name, 1..32 bytes. |
 | 7 | `sta_psk` | `string` | Passphrase, 8..63 bytes; absent for an open network. |
 | 8 | `ap_ssid` | `string` | Name of the soft AP, 1..32 bytes; absent: the device's default. |
 | 9 | `ap_psk` | `string` | Passphrase of the soft AP, 8..63 bytes; absent for an open AP. |
+| 10 | `now` | `bool` | Run ESP-NOW while the radio is on (the `espnow` link). Absent (0): no ESP-NOW — joined, the modem power save runs instead of the modem being held awake. |
 
 ## `Monitor`
 
@@ -187,6 +200,7 @@ C runtime, and `raw_rx`, `driver_tx` and `raw_tx_rate` need the `udp6` link, whi
 | 8 | `rx_dynamic` | `u16` | Dynamic receive buffers, 2..128. |
 | 9 | `tx_dynamic` | `u16` | Dynamic transmit buffers, 4..128. |
 | 10 | `rx_ba` | `u16` | Receive block-ack window, 2..64; the driver limits it by the receive buffers. |
+| 11 | `lr` | [`Switch`](#enum-switch) | Enable Espressif long-range protocol alongside 11b/g/n on the active interfaces. Default: off. Restarts the radio; does not force every transmission to use an LR rate. |
 
 ## enum `StaState`
 

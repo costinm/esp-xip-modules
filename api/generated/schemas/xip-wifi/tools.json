@@ -34,6 +34,11 @@
           "x-protobuf-index": 4,
           "x-protobuf-type": "u8"
         },
+        "now": {
+          "type": "boolean",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "bool"
+        },
         "radio": {
           "type": "boolean",
           "x-protobuf-index": 1,
@@ -102,6 +107,11 @@
           "x-protobuf-index": 4,
           "x-protobuf-type": "u8"
         },
+        "now": {
+          "type": "boolean",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "bool"
+        },
         "radio": {
           "type": "boolean",
           "x-protobuf-index": 1,
@@ -142,7 +152,7 @@
     "x-component-index": 10,
     "x-errors": [
       {
-        "description": "A name or passphrase of the wrong length, a channel above 14, or `sta` with neither `sta_ssid` nor `bssid`.",
+        "description": "A name or passphrase of the wrong length, a flag above 1, a channel above 14, or `sta` with neither `sta_ssid` nor `bssid`.",
         "name": "invalid_argument"
       }
     ],
@@ -327,6 +337,11 @@
           "x-protobuf-index": 4,
           "x-protobuf-type": "Switch"
         },
+        "lr": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "Switch"
+        },
         "rates_11b": {
           "type": "string",
           "x-protobuf-index": 2,
@@ -398,6 +413,11 @@
         "driver_tx": {
           "type": "string",
           "x-protobuf-index": 4,
+          "x-protobuf-type": "Switch"
+        },
+        "lr": {
+          "type": "string",
+          "x-protobuf-index": 11,
           "x-protobuf-type": "Switch"
         },
         "rates_11b": {

@@ -1,7 +1,7 @@
 {
   "components": [
     {
-      "doc": "The radio of the device, as the network-facing (CBOR, JSON, text) view of the `wifi` and `wifi-tuning` components. The C\nstructs modules use are in `crates/xip-abi/src/wifi.rs` (`xip_wifi_intent`, `xip_wifi_state`, `xip_wifi_tuning`); this file\nnames and numbers the same fields for consoles, gateways and tools. The mapping is one to one: `get` and `set` carry a\n`WifiIntent`, `state` a `WifiState` and `tuning` / `set_tuning` a `WifiTuning`, with names and passphrases as text instead\nof byte arrays with lengths.\n\nThe model is an **intended state**: a caller says what the radio should do and the device makes it true (joins, retries,\nfollows a channel change). There is no start or stop. ESP-NOW is on whenever the radio is on, so the combinations are: off,\nESP-NOW only, station, soft AP, and both.",
+      "doc": "The radio of the device, as the network-facing (CBOR, JSON, text) view of the `wifi` and `wifi-tuning` components. The C\nstructs modules use are in `crates/xip-abi/src/wifi.rs` (`xip_wifi_intent`, `xip_wifi_state`, `xip_wifi_tuning`); this file\nnames and numbers the same fields for consoles, gateways and tools. The mapping is one to one: `get` and `set` carry a\n`WifiIntent`, `state` a `WifiState` and `tuning` / `set_tuning` a `WifiTuning`, with names and passphrases as text instead\nof byte arrays with lengths.\n\nThe model is an **intended state**: a caller says what the radio should do and the device makes it true (joins, retries,\nfollows a channel change). There is no start or stop. With the radio on, `sta`, `ap` and `now` compose the state\n(ESPNOW.md \"Radio states\"): soft AP + ESP-NOW, station + ESP-NOW, both, and off (the radio stops and is woken only by\na NAN/NOW discovery window, for sync); with `now` absent, the plain station — the one on state where the modem power\nsave runs instead, on the BSS beacon/DTIM schedule. Every state with ESP-NOW keeps the modem awake (ESP-NOW cannot run\nagainst a sleeping modem), so the soft AP is a small extra cost — its ~512 ms beacon, which doubles as the soft-NAN\ntiming anchor. NOW-only operation (`sta=0, ap=0, now=1`) also receives without AP:\nthe radio owner registers a connectionless receive-window vote independently of ordinary modem sleep.",
       "index": 10,
       "name": "wifi"
     }
@@ -53,10 +53,10 @@
     {
       "access": "any of `system`, `mesh.owner`, `mesh.admin`",
       "component": "wifi",
-      "doc": "Replaces the whole intended state: a field that is absent takes its default (`radio` 0, `sta` 0, `ap` 0, `channel` 0, no\nnames). To change only the channel, `get`, edit and `set`. Returns once the state is accepted, not when it is true; read\n`state` for that. An identical state changes nothing.",
+      "doc": "Replaces the whole intended state: a field that is absent takes its default (`radio` 0, `sta` 0, `ap` 0, `now` 0 — no\nESP-NOW, `channel` 0, no names). To change only the channel, `get`, edit and `set`. Returns once the state is accepted, not when it is true; read\n`state` for that. An identical state changes nothing.",
       "errors": [
         {
-          "description": "A name or passphrase of the wrong length, a channel above 14, or `sta` with neither `sta_ssid` nor `bssid`.",
+          "description": "A name or passphrase of the wrong length, a flag above 1, a channel above 14, or `sta` with neither `sta_ssid` nor `bssid`.",
           "name": "invalid_argument"
         }
       ],
@@ -267,7 +267,7 @@
     {
       "access": "any of `system`, `mesh.owner`, `mesh.admin`",
       "component": "wifi",
-      "doc": "Replaces all of them; an absent field is the default. `ampdu` and the four buffer sizes are read when the driver starts, so\na change restarts the radio (the station rejoins); the other fields apply to the next association.",
+      "doc": "Replaces all of them; an absent field is the default. `ampdu` and the four buffer sizes are read when the driver starts, so\na change restarts the radio (the station rejoins); the other fields apply to the next association.\n\nBuffer overrides here are volatile. Persistent boot defaults use `console.nv`\nkeys `wifi.rx_static`, `wifi.rx_dynamic`, and `wifi.rx_ba`; see the console API.\nThe application baseline is 10 fixed RX buffers, a 32-buffer dynamic limit and\na 6-frame RX BA window. Stored defaults are applied on driver initialization;\nnonzero fields in this tuning request take precedence. Reboot after changing\npersistent defaults to apply them reliably.",
       "errors": [
         {
           "description": "A value is out of range.",
@@ -316,7 +316,7 @@
       "doc": "What the radio should do.",
       "fields": [
         {
-          "description": "The radio is on (ESP-NOW included).",
+          "description": "The radio is on.",
           "name": "radio",
           "tag": 1,
           "type": "bool",
@@ -338,7 +338,7 @@
           }
         },
         {
-          "description": "Run the soft AP while the radio is on.",
+          "description": "Run the soft AP while the radio is on. NOW-only operation can receive without AP using the connectionless receive-window vote; keep this independent of station association and NOW.",
           "name": "ap",
           "tag": 3,
           "type": "bool",
@@ -355,7 +355,7 @@
           "type": "u8",
           "x-c": {
             "kind": "u8",
-            "offset": 7,
+            "offset": 8,
             "size": 1
           }
         },
@@ -366,7 +366,7 @@
           "type": "bytes",
           "x-c": {
             "kind": "bytes",
-            "offset": 8,
+            "offset": 9,
             "size": 6
           }
         },
@@ -379,10 +379,10 @@
             "kind": "bytes",
             "len_field": {
               "name": "sta_ssid_len",
-              "offset": 14,
+              "offset": 15,
               "size": 1
             },
-            "offset": 20,
+            "offset": 21,
             "size": 32
           }
         },
@@ -395,10 +395,10 @@
             "kind": "bytes",
             "len_field": {
               "name": "sta_psk_len",
-              "offset": 15,
+              "offset": 16,
               "size": 1
             },
-            "offset": 52,
+            "offset": 53,
             "size": 64
           }
         },
@@ -411,10 +411,10 @@
             "kind": "bytes",
             "len_field": {
               "name": "ap_ssid_len",
-              "offset": 16,
+              "offset": 17,
               "size": 1
             },
-            "offset": 116,
+            "offset": 117,
             "size": 32
           }
         },
@@ -427,11 +427,22 @@
             "kind": "bytes",
             "len_field": {
               "name": "ap_psk_len",
-              "offset": 17,
+              "offset": 18,
               "size": 1
             },
-            "offset": 148,
+            "offset": 149,
             "size": 64
+          }
+        },
+        {
+          "description": "Run ESP-NOW while the radio is on (the `espnow` link). Absent (0): no ESP-NOW — joined, the modem power save runs instead of the modem being held awake.",
+          "name": "now",
+          "tag": 10,
+          "type": "bool",
+          "x-c": {
+            "kind": "u8",
+            "offset": 7,
+            "size": 1
           }
         }
       ],
@@ -441,7 +452,7 @@
         "align": 4,
         "c": "xip_wifi_intent",
         "rust": "WifiIntent",
-        "size": 212,
+        "size": 216,
         "size_field": {
           "offset": 0,
           "size": 4
@@ -598,6 +609,17 @@
             "kind": "u16",
             "offset": 18,
             "size": 2
+          }
+        },
+        {
+          "description": "Enable Espressif long-range protocol alongside 11b/g/n on the active interfaces. Default: off. Restarts the radio; does not force every transmission to use an LR rate.",
+          "name": "lr",
+          "tag": 11,
+          "type": "Switch",
+          "x-c": {
+            "kind": "u8",
+            "offset": 10,
+            "size": 1
           }
         }
       ],

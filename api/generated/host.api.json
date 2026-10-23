@@ -189,10 +189,106 @@
           "name": "channel",
           "tag": 6,
           "type": "u8"
+        },
+        {
+          "description": "The ESP-NOW action path; cumulative since boot (the C runtime; an empty map when the host has no radio).",
+          "name": "now",
+          "tag": 7,
+          "type": "NowStats"
         }
       ],
       "kind": "row",
       "name": "WifiStatus"
+    },
+    {
+      "fields": [
+        {
+          "description": "The private receive hook was called (either call form).",
+          "name": "dispatcher",
+          "tag": 1,
+          "type": "u32"
+        },
+        {
+          "description": "The action request's in-band reply hook was called.",
+          "name": "tx_response_hook",
+          "tag": 2,
+          "type": "u32"
+        },
+        {
+          "description": "Delivered to the `espnow` link.",
+          "name": "actions",
+          "tag": 3,
+          "type": "u32"
+        },
+        {
+          "description": "Dropped: the source is one of our own addresses.",
+          "name": "self_echoes",
+          "tag": 4,
+          "type": "u32"
+        },
+        {
+          "description": "Dropped: a near-simultaneous second copy.",
+          "name": "duplicates",
+          "tag": 5,
+          "type": "u32"
+        },
+        {
+          "description": "Dropped: a malformed native call.",
+          "name": "invalid",
+          "tag": 6,
+          "type": "u32"
+        },
+        {
+          "description": "Dropped: the body does not parse.",
+          "name": "parse",
+          "tag": 7,
+          "type": "u32"
+        },
+        {
+          "description": "Dropped: the other callback held the parser.",
+          "name": "busy",
+          "tag": 8,
+          "type": "u32"
+        },
+        {
+          "description": "Every drop above.",
+          "name": "drops",
+          "tag": 9,
+          "type": "u32"
+        },
+        {
+          "description": "Accepted by the driver.",
+          "name": "tx",
+          "tag": 10,
+          "type": "u32"
+        },
+        {
+          "description": "Refused by the driver.",
+          "name": "tx_failures",
+          "tag": 11,
+          "type": "u32"
+        },
+        {
+          "description": "The last driver error (ESP_ERR_*), 0 when clean.",
+          "name": "tx_last_error",
+          "tag": 12,
+          "type": "i32"
+        },
+        {
+          "description": "Every private receive-hook invocation, before any gate.",
+          "name": "hook_calls",
+          "tag": 13,
+          "type": "u32"
+        },
+        {
+          "description": "The hook ran while the `espnow` link was stopped.",
+          "name": "disabled",
+          "tag": 14,
+          "type": "u32"
+        }
+      ],
+      "kind": "row",
+      "name": "NowStats"
     },
     {
       "fields": [

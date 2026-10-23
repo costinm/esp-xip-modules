@@ -11,8 +11,6 @@ default = ["modules", "ble-stack"]
 modules = []
 ble-stack = ["dep:dmesh-ble"]
 rtos-stats = ["dmesh-fw-transport/rtos-stats"]
-udp6-socket = ["dmesh-fw-transport/udp6-socket"]
-tcp-stream = ["dmesh-fw-transport/tcp-stream"]
 
 [dependencies]
 dmesh-ble = { path = "../ble", optional = true }

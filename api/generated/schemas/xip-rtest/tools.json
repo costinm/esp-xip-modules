@@ -147,7 +147,7 @@
     ]
   },
   {
-    "description": "how often the handler ran",
+    "description": "handler and NOW receive measurements",
     "inputSchema": {
       "properties": {},
       "required": [],
@@ -156,14 +156,84 @@
     "name": "test.info",
     "outputSchema": {
       "properties": {
+        "busy": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
         "calls": {
           "type": "string",
           "x-protobuf-index": 1,
           "x-protobuf-type": "uint"
         },
+        "destination": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "echo": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "uint"
+        },
+        "invalid_payload": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "uint"
+        },
+        "link": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "uint"
+        },
+        "max_rx": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "uint"
+        },
+        "min_rx": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "uint"
+        },
         "mode": {
           "type": "string",
           "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "peer": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "uint"
+        },
+        "sent": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "size": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "tx_done": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "uint"
+        },
+        "tx_errors": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "valid_ping": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "valid_pong": {
+          "type": "string",
+          "x-protobuf-index": 8,
           "x-protobuf-type": "uint"
         }
       },

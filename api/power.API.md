@@ -91,3 +91,4 @@ Name, priority and stack left of every task.
 | 23 | `filter_dropped` | `u32` | Frames the early receive filter dropped. |
 | 24 | `promisc_frames` | `u32` | Promiscuous frames delivered. |
 | 25 | `soft_sleep` | `u8` | How the last sleep was done: 1 soft, 0 physical. Soft while the console is on USB-Serial/JTAG with a host attached (light sleep powers that port down and the host does not recover the device): the radio is stopped and restarted around a plain delay and the CPU does not sleep. Physical with a UART console or no host. |
+| 26 | `active_window` | `u8` | An activity interval opened by UART traffic or a wake record is still active. Modules decide sleep policy; querying this flag does not acquire a PM lock. |

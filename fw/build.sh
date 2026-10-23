@@ -73,7 +73,7 @@ fi
 cd "$HERE/main"
 export ESP_IDF_SDKCONFIG_DEFAULTS="$sdkconfig;$overlay"
 cargo "${args[@]}"
-out="$XIP_REPO/target/fw/$cpu"
+out="$CARGO_TARGET_DIR/$cpu"
 mkdir -p "$out"
 python3 -m esptool --chip "$cpu" elf2image --flash-mode dio --flash-freq 80m --flash-size 4MB \
     --output "$out/main-app.bin" "$CARGO_TARGET_DIR/$target/release/dmesh-rs"

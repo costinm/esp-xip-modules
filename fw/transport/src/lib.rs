@@ -18,7 +18,7 @@ extern crate alloc;
 pub mod profile;
 pub mod wifi_component;
 mod ipv6;
-#[cfg(not(feature = "udp6-socket"))]
+mod now_wire;
 mod raw_udp6;
 
 // These modules are the shared ESP-IDF runtime.  The crate is built only by
@@ -31,8 +31,6 @@ pub mod core_runtime;
 pub mod crypto_esp;
 mod firmware_identity;
 mod device_telemetry;
-/// Shared lwIP readiness and TCP listener ownership for firmware adapters.
-pub mod lwip_io_esp;
 /// Main-only retained firmware log lines used by the remote `log-watch`
 /// diagnostic stream.
 pub mod log_history;
@@ -72,12 +70,7 @@ pub mod wifi_nan_dw_capture_esp;
 pub mod wifi_nonpromisc_probe_esp;
 pub mod wifi_radio_control_esp;
 pub mod wifi_radio_inject_esp;
-#[cfg_attr(feature = "udp6-socket", path = "wifi_udp6_socket_facade_esp.rs")]
 pub mod wifi_raw_udp6_esp;
-#[cfg(feature = "udp6-socket")]
-mod wifi_udp6_socket_esp;
-#[cfg(feature = "tcp-stream")]
-mod tcp_stream_esp;
 
 /// The one packet payload limit used by every bearer. A bearer that cannot
 /// carry this must reject it at bring-up; it must not fragment at this layer.

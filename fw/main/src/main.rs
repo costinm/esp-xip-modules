@@ -86,6 +86,10 @@ fn start_ble_after_radio_ready() {
 
 #[no_mangle]
 pub extern "C" fn app_main() {
+    unsafe {
+        unsafe extern "C" { fn xip_heap_checkpoint(phase: *const core::ffi::c_char); }
+        xip_heap_checkpoint(c"app-entry".as_ptr());
+    }
     // Kept adjacent to the Stage2 handoff write while lora4 early boot is
     // diagnosed: this distinguishes a failed Main entry from a bad RTC write
     // before the runtime can emit its own ROM markers.

@@ -24,10 +24,6 @@ espnow-transport = []
 probe = []
 # Private diagnostic snapshots; the build script also enables SDK accounting.
 rtos-stats = []
-# Host-controlled A/B only; normal firmware intercepts UDP before lwIP.
-udp6-socket = []
-# Main TCP byte-stream comparison using the same registry, no QUIC changes.
-tcp-stream = []
 
 [dependencies]
 # The DMesh libraries (host crates, not copied) come from the DMesh repository at a pinned revision; DMesh never depends on this repository.

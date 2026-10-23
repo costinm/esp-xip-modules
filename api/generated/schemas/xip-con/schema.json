@@ -46,6 +46,142 @@
       "type": "object",
       "x-component-index": 20,
       "x-method-index": 2
+    },
+    {
+      "properties": {
+        "component": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "fields": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "map"
+        },
+        "id": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "method": {
+          "const": "console.dispatch"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 20,
+      "x-method-index": 4
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "console.status"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 20,
+      "x-method-index": 5
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "console.start"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        },
+        "request": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 20,
+      "x-method-index": 6
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "console.stop"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 20,
+      "x-method-index": 7
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "console.reset"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 20,
+      "x-method-index": 8
+    },
+    {
+      "properties": {
+        "kind": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "int"
+        },
+        "method": {
+          "const": "console.heap"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 20,
+      "x-method-index": 9
+    },
+    {
+      "properties": {
+        "key": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        },
+        "method": {
+          "const": "console.nv"
+        },
+        "value": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 20,
+      "x-method-index": 10
     }
   ]
 }

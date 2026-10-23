@@ -64,6 +64,11 @@
     "name": "power.info",
     "outputSchema": {
       "properties": {
+        "active_window": {
+          "type": "integer",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "u8"
+        },
         "auto_light_sleep": {
           "type": "integer",
           "x-protobuf-index": 3,

@@ -65,6 +65,7 @@
               pkgs.libusb1
               pkgs.ldproxy
               pkgs.espup
+              pkgs.espflash
               pkgs.ninja
               pkgs.pkg-config
               pkgs.python3

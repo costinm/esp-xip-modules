@@ -61,6 +61,26 @@ This call never invokes another module. No console module is needed. No partial 
 | 4 | `rssi` | `i8` | Signal in dBm, when up. |
 | 5 | `ap_up` | `bool` | The soft AP is running. |
 | 6 | `channel` | `u8` | The channel in use. |
+| 7 | `now` | `NowStats` | The ESP-NOW action path; cumulative since boot (the C runtime; an empty map when the host has no radio). |
+
+`NowStats` fields:
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `dispatcher` | `u32` | The private receive hook was called (either call form). |
+| 2 | `tx_response_hook` | `u32` | The action request's in-band reply hook was called. |
+| 3 | `actions` | `u32` | Delivered to the `espnow` link. |
+| 4 | `self_echoes` | `u32` | Dropped: the source is one of our own addresses. |
+| 5 | `duplicates` | `u32` | Dropped: a near-simultaneous second copy. |
+| 6 | `invalid` | `u32` | Dropped: a malformed native call. |
+| 7 | `parse` | `u32` | Dropped: the body does not parse. |
+| 8 | `busy` | `u32` | Dropped: the other callback held the parser. |
+| 9 | `drops` | `u32` | Every drop above. |
+| 10 | `tx` | `u32` | Accepted by the driver. |
+| 11 | `tx_failures` | `u32` | Refused by the driver. |
+| 12 | `tx_last_error` | `i32` | The last driver error (ESP_ERR_*), 0 when clean. |
+| 13 | `hook_calls` | `u32` | Every private receive-hook invocation, before any gate. |
+| 14 | `disabled` | `u32` | The hook ran while the `espnow` link was stopped. |
 
 `Heap` fields:
 

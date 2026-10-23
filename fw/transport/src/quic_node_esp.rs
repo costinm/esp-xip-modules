@@ -18,10 +18,22 @@ use quic_lite::{
 
 // Table ceiling only: packet storage is allocated/reclaimed at runtime.
 pub(crate) const PACKETS: usize = 128;
-const MIN_PACKETS: usize = 8;
+// Native module PPP needs one receive lease and one reply lease in addition
+// to the two slots reserved from module allocations. Storage stays reclaimable.
+const MIN_PACKETS: usize = esp_idf_sys::CONFIG_XIP_PKT_RESERVE as usize + 2;
+const IDLE_PACKETS: usize = {
+    let keep = esp_idf_sys::CONFIG_XIP_PKT_KEEP as usize;
+    if keep > MIN_PACKETS { keep } else { MIN_PACKETS }
+};
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 const HEAP_RESERVE: usize = 48 * 1024;
-const SLOT_SIZE: usize = quic_lite::DEFAULT_PACKET_POOL_SLOT_SIZE;
+// Shared storage must fit the module window as well as QUIC framing.
+// QUIC keeps its existing wire MTU and lease ownership.
+const SLOT_SIZE: usize = {
+    let module = xip_abi::PKT_SLOT_MIN as usize;
+    let quic = quic_lite::DEFAULT_PACKET_POOL_SLOT_SIZE;
+    if module > quic { module } else { quic }
+};
 
 pub(crate) type FirmwarePool = HeapPacketPool<PACKETS, SLOT_SIZE>;
 pub(crate) type FirmwarePacket = OwnedPacket<HeapPacketLease<'static, PACKETS, SLOT_SIZE>>;
@@ -29,6 +41,9 @@ pub(crate) type FirmwarePacket = OwnedPacket<HeapPacketLease<'static, PACKETS, S
 // registry. Firmware does not currently reserve additional entries for relay
 // forwarding, but a zero-entry registry would reject the first association.
 type FirmwareRuntime = NoStdRuntime<FirmwarePool>;
+// Keep the fixed node shell bounded; packets, associations and ledgers have
+// independent ownership/lifetimes. A larger base is a firmware memory regression.
+const _: () = assert!(core::mem::size_of::<FirmwareRuntime>() <= 5 * 1024);
 
 fn allocate_packet(bytes: usize) -> *mut u8 {
     unsafe {
@@ -45,7 +60,7 @@ unsafe fn free_packet(pointer: *mut u8, _bytes: usize) {
 static POOL: FirmwarePool =
     FirmwarePool::new_with_allocator(HeapPacketAllocator::new(allocate_packet, free_packet));
 static mut POOL_POLICY: dmesh_server::packet_pool_policy::PacketPoolPolicy =
-    dmesh_server::packet_pool_policy::PacketPoolPolicy::new(MIN_PACKETS, PACKETS, 8, 2_000);
+    dmesh_server::packet_pool_policy::PacketPoolPolicy::new(MIN_PACKETS, PACKETS, IDLE_PACKETS, 2_000);
 static POOL_LIMIT: AtomicUsize = AtomicUsize::new(PACKETS);
 static POOL_PRESSURE: AtomicBool = AtomicBool::new(false);
 
@@ -69,13 +84,6 @@ fn acquire_packet_writer(
 /// transferred to a stream writer without first shifting its CBOR bytes.
 pub(crate) fn acquire_log_writer() -> Option<<FirmwarePool as quic_lite::PacketPool>::Writer> {
     acquire_packet_writer(quic_lite::PACKET_PREFIX_RESERVE)
-}
-
-/// Acquire a transient UART framing chunk from the shared dynamic pool. This
-/// replaces a permanently reserved UART TX scratch array; an idle UART holds
-/// no dedicated encoder buffer.
-pub(crate) fn acquire_uart_tx_writer() -> Option<<FirmwarePool as quic_lite::PacketPool>::Writer> {
-    acquire_packet_writer(0)
 }
 
 /// Acquire a receive packet directly from the node pool with relay headroom.
@@ -875,8 +883,7 @@ unsafe fn runtime() -> &'static mut FirmwareRuntime {
 #[inline(never)]
 unsafe fn initialize_runtime() {
     if !READY.load(Ordering::Acquire) {
-        POOL.resize(MIN_PACKETS)
-            .expect("minimum firmware packet pool allocation succeeds");
+        prepare_packet_pool();
         let mut embedded = quic_lite::AssociationLimits::embedded();
         // Outstanding reliable payload, not diagnostic history. Heap slots
         // grow on demand; these limits reserve no packet bytes at admission.
@@ -924,6 +931,13 @@ unsafe fn initialize_runtime() {
             .expect("static ESP-NOW bearer registration succeeds");
         core::ptr::addr_of_mut!(RUNTIME).write(Box::into_raw(value));
         READY.store(true, Ordering::Release);
+    }
+}
+
+/// Prepare the shared base pool before initializing bearer callbacks.
+fn prepare_packet_pool() {
+    if POOL.capacity() < MIN_PACKETS {
+        POOL.resize(MIN_PACKETS).expect("base firmware packet pool allocation succeeds");
     }
 }
 
@@ -1416,13 +1430,9 @@ fn drain_runtime_notifications(runtime: &mut FirmwareRuntime) {
 /// Main calls this only from its single event owner. It is intentionally not
 /// public API: physical bearers enqueue through `BearerContext` and merely
 /// wake that owner.
-// Diagnostic placement experiment: reduce the C6 owner instruction-cache
-// footprint. This remains task code and calls flash-resident functions; it
-// is not safe to invoke while the flash cache is disabled.
-#[cfg_attr(target_arch = "riscv32", link_section = ".iram1.text")]
+// Task-context dispatch uses flash-resident code; keep it in flash rather
+// than reserving SRAM for the entire inlined QUIC/handler progress path.
 pub(crate) fn progress() {
-    #[cfg(feature = "tcp-stream")]
-    crate::tcp_stream_esp::progress();
     let started_us = unsafe { esp_idf_sys::esp_timer_get_time().max(0) as u64 };
     maintain_packet_pool(unsafe { esp_idf_sys::esp_timer_get_time().max(0) as u64 } / 1_000);
     dispatch_control_requests();

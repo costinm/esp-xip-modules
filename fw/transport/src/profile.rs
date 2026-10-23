@@ -42,4 +42,7 @@ pub fn announce(generation: u32) {
     }
 }
 /// Tell every module that the wanted Wi-Fi state changed (`HOST_WIFI`).
-pub fn notify_modules(generation: u32) { xip_runtime_esp::wifi::changed(generation) }
+pub fn notify_modules(generation: u32) {
+    unsafe extern "C" { fn xip_host_wifi_changed(generation: u32); }
+    unsafe { xip_host_wifi_changed(generation) };
+}

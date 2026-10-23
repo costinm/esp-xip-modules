@@ -6,6 +6,8 @@
 //! It knows no module's configuration: a `lora` record's numeric fields are passed to the LoRa module as they are
 //! (`modules/mod_lora/API.md`).
 //! The module runtime owns slot names, tags and placement.
+use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -84,6 +86,7 @@ static POOL_OPS: em::PoolOps = em::PoolOps {
     slot_size: pool_slot_size,
     slots: pool_slots,
     available: pool_available,
+    acquire_cached: None, // Product NOW ingress uses its own QUIC pool adapter.
 };
 
 static READY: AtomicBool = AtomicBool::new(false);
@@ -106,6 +109,7 @@ pub fn ensure_loader() -> i32 {
     let rc = em::init("data\0", Features { modules: true, nv: Some(dmesh_nv), pool: Some(&POOL_OPS), wifi: Some(&dmesh_fw_transport::wifi_component::OWNER), ..Features::default() }, Some(on_event));
     if rc == 0 {
         READY.store(true, Ordering::Release);
+        register_installed_handlers();
         if !ppp {
             em::autostart();
         }
@@ -113,8 +117,8 @@ pub fn ensure_loader() -> i32 {
     rc
 }
 
-/// Register the module components with `dmesh-server` before a connection is accepted. This does not initialize,
-/// map, or execute a module.
+/// Register loader controls and installed module methods before a connection is accepted.
+/// Initialize the loader to read manifests; module code runs only on autostart or a call.
 pub fn register_tagged_handlers() {
     use dmesh_server::registry::{register, register_all, Method, SyncFn};
     assert!(register_all(
@@ -128,6 +132,9 @@ pub fn register_tagged_handlers() {
     assert!(register(Method::new(HELLO_COMPONENT, "hello", MODULE_RUN, "run"), SyncFn(handle_hello)));
     assert!(register(Method::new(LORA_COMPONENT, "lora", MODULE_RUN, "run"), SyncFn(handle_lora)));
     assert!(register(Method::new(HARDWARE_COMPONENT, "hardware", MODULE_RUN, "run"), SyncFn(handle_hardware)));
+    // Scan even with PPP selected: its clients use exactly the same installed module methods.
+    // This creates the worker but does not start a console or claim the serial link in PPP mode.
+    let _ = ensure_loader();
 }
 
 fn response(record: Record<'_>, ok: bool, value: i64) -> Option<Vec<u8>> {
@@ -343,4 +350,70 @@ fn module_call(record: Record<'_>, method_of: impl Fn(&[u8]) -> Option<i32>, wit
     drop(encoder);
     out.truncate(used);
     Some((method, out))
+}
+
+
+/// Register installed APIs once per boot. Names are owned by the registry for its
+/// lifetime; legacy DMesh methods keep their existing numbers and adapters.
+fn register_installed_handlers() {
+    use dmesh_server::registry::{register, Method};
+    for slot in 0..em::slot_count() {
+        let mut manifest = vec![0; 8192];
+        let Ok(n) = em::slot_manifest(slot, &mut manifest) else { continue };
+        let Some(api) = em::module_api::InstalledApi::decode(&manifest[..n]) else { continue };
+        let name: &'static str = Box::leak(String::from(api.name).into_boxed_str());
+        for (id, method_name) in api.methods {
+            let method_name: &'static str = Box::leak(String::from(method_name).into_boxed_str());
+            // A conflicting firmware method retains ownership. The registry also rejects
+            // a full table rather than silently replacing an unrelated handler.
+            if !register(Method::new(api.component, name, id, method_name), InstalledHandler { name, component: api.component, method: id }) {
+                unsafe { esp_idf_sys::esp_rom_printf(b"DMESH module registration rejected: %s.%s\n\0".as_ptr().cast(),
+                    alloc::ffi::CString::new(name).unwrap().as_ptr(), alloc::ffi::CString::new(method_name).unwrap().as_ptr()); }
+            }
+        }
+    }
+}
+
+struct InstalledHandler {
+    name: &'static str,
+    component: u64,
+    method: u64,
+}
+
+impl InstalledHandler {
+    fn invoke(&self, record: Record<'_>) -> Option<Vec<u8>> {
+        if record.component != Some(Name::Tag(self.component)) || record.method != Some(Name::Tag(self.method)) { return None; }
+        // Match the C runtime reply limit; a larger bridge buffer cannot
+        // admit a larger reply and can exhaust memory before dispatch.
+        let mut answer = vec![0; esp_idf_sys::CONFIG_XIP_RESPONSE_MAX as usize];
+        let result = em::call(self.name, b"idle", self.component as i32, self.method as i32,
+            record.fields.unwrap_or(&[0xa0]), &mut answer);
+        let n = match result {
+            Ok(0) => {
+                let mut response = vec![0; 128];
+                let used = tagged::encode_numeric_error(self.component, self.method,
+                    record.id.unwrap_or(0), b"module returned no result (check reply/pool admission)", &mut response)?;
+                response.truncate(used);
+                return Some(response);
+            }
+            Ok(n) => n,
+            Err(rc) => {
+                let mut e = Encoder::new(&mut answer);
+                e.int(rc as i64)?;
+                e.len()
+            }
+        };
+        let mut response = vec![0; n + 48];
+        let used = tagged::encode_numeric_response(self.component, self.method, record.id.unwrap_or(0), &answer[..n], &mut response)?;
+        response.truncate(used);
+        Some(response)
+    }
+}
+
+impl dmesh_server::registry::Handler for InstalledHandler {
+    fn call<'a>(&'a self, call: dmesh_server::registry::Call<'a>) -> dmesh_server::registry::Reply<'a> {
+        // Called by the DMesh owner, outside the module worker. request_raw queues
+        // onto that serialized worker; it must never be called from a module handler.
+        Box::pin(core::future::ready(self.invoke(call.record)))
+    }
 }

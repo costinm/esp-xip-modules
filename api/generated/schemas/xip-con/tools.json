@@ -106,5 +106,338 @@
       "unavailable",
       "internal"
     ]
+  },
+  {
+    "description": "binary envelope to binary answer",
+    "inputSchema": {
+      "properties": {
+        "component": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "fields": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "map"
+        },
+        "id": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "method": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "console.dispatch",
+    "outputSchema": {
+      "properties": {
+        "component": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "error": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "int"
+        },
+        "id": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "method": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "result": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "map"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 20,
+    "x-method-index": 4,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "device snapshot",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "console.status",
+    "outputSchema": {
+      "properties": {
+        "components": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "map"
+        },
+        "device": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "map"
+        },
+        "heap": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "map"
+        },
+        "modules": {
+          "type": "array",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "Slot[]"
+        },
+        "wifi": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "map"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 20,
+    "x-method-index": 5,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "start a module",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        },
+        "request": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "console.start",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 20,
+    "x-method-index": 6,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "queue module stop",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "console.stop",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 20,
+    "x-method-index": 7,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "request device reset",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "console.reset",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 20,
+    "x-method-index": 8,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "heap snapshot or diagnostic request",
+    "inputSchema": {
+      "properties": {
+        "kind": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "int"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "console.heap",
+    "outputSchema": {
+      "properties": {
+        "free": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "internal_free": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "internal_largest": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "largest": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "min_free": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "total": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 20,
+    "x-method-index": 9,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "read or write a setting",
+    "inputSchema": {
+      "properties": {
+        "key": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        },
+        "value": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "console.nv",
+    "outputSchema": {
+      "properties": {
+        "value": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 20,
+    "x-method-index": 10,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
   }
 ]

@@ -480,14 +480,14 @@ pub(crate) fn receive_registered_action_payload(
         // the generic action-body path; copying `body` verbatim would enqueue
         // `7f 18 fe 34 ...` as if those framing bytes were a QUIC header.
         receive_now_with(|output| {
-            dmesh_rawnan::espnow::parse_action_body_into(body, output)
+            crate::now_wire::parse_action_body_into(body, output)
                 .map(|used| (source, used))
         });
         return;
     }
     // Parse generic STA/AP action framing directly into the packet pool.
     receive_now_with(|output| {
-        dmesh_rawnan::espnow::parse_action_body_into(body, output).map(|used| (source, used))
+        crate::now_wire::parse_action_body_into(body, output).map(|used| (source, used))
     });
 }
 
@@ -535,27 +535,7 @@ fn receive_action_parts(header: *mut u8, payload: *mut u8, len: usize) {
     RX_MANAGEMENT.fetch_add(1, Ordering::Relaxed);
     RX_ACTION_FRAMES.fetch_add(1, Ordering::Relaxed);
     receive_now_with(|output| {
-        match dmesh_rawnan::espnow::parse_action_body_into(payload, output) {
-            Some(used) => Some((source, used)),
-            None if payload.starts_with(&dmesh_rawnan::espnow::ACTION_PREFIX)
-                && payload.len() > 8 =>
-            {
-                // The C6 ROC callback may validate and remove the vendor IEs
-                // before invoking its response hook, while retaining the eight
-                // byte action header.  In that ABI variant the suffix is already
-                // the complete bounded QUIC datagram.  The connection/direct
-                // dispatcher still validates it; this branch only removes the
-                // native framing that the driver has already consumed.
-                let packet = &payload[8..];
-                if packet.len() > output.len() {
-                    None
-                } else {
-                    output[..packet.len()].copy_from_slice(packet);
-                    Some((source, packet.len()))
-                }
-            }
-            None => None,
-        }
+        crate::now_wire::parse_action_body_into(payload, output).map(|used| (source, used))
     });
     ACTION_PARSE_BUSY.store(false, Ordering::Release);
 }
@@ -590,7 +570,7 @@ pub fn receive_action_frame(frame: &[u8]) {
 /// Parse one action while [`ACTION_PARSE_BUSY`] owns the receive turn. The
 /// parser writes directly into a node-pool packet lease.
 fn receive_action_frame_unlocked(frame: &[u8]) {
-    receive_now_with(|output| dmesh_rawnan::espnow::parse_action_frame_into(frame, output));
+    receive_now_with(|output| crate::now_wire::parse_action_frame_into(frame, output));
 }
 
 /// Apply the common post-framing admission policy.  Every callback variant
@@ -845,7 +825,7 @@ fn transmit_submitted(peer: EspNowPeer, payload: &[u8], wait_time_ms: u32) -> No
     // associated. The cluster-BSSID experiment did not admit unsolicited
     // vendor actions through C6's private receiver.
     let Ok(frame_len) =
-        dmesh_rawnan::espnow::encode_action_frame(frame, destination, local, [0xff; 6], payload)
+        crate::now_wire::encode_action_frame(frame, destination, local, [0xff; 6], payload)
     else {
         TX_FAILURES.fetch_add(1, Ordering::Relaxed);
         return NowTransmitResult::Failed;

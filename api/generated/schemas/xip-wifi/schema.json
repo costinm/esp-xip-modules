@@ -44,6 +44,11 @@
         "method": {
           "const": "wifi.set"
         },
+        "now": {
+          "type": "boolean",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "bool"
+        },
         "radio": {
           "type": "boolean",
           "x-protobuf-index": 1,
@@ -149,6 +154,11 @@
         "driver_tx": {
           "type": "string",
           "x-protobuf-index": 4,
+          "x-protobuf-type": "Switch"
+        },
+        "lr": {
+          "type": "string",
+          "x-protobuf-index": 11,
           "x-protobuf-type": "Switch"
         },
         "method": {

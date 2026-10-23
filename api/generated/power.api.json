@@ -477,6 +477,17 @@
             "offset": 72,
             "size": 1
           }
+        },
+        {
+          "description": "An activity interval opened by UART traffic or a wake record is still active. Modules decide sleep policy; querying this flag does not acquire a PM lock.",
+          "name": "active_window",
+          "tag": 26,
+          "type": "u8",
+          "x-c": {
+            "kind": "u8",
+            "offset": 73,
+            "size": 1
+          }
         }
       ],
       "kind": "record",

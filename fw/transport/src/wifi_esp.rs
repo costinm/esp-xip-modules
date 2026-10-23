@@ -1,10 +1,10 @@
 // IMPORTANT: This is shared no-std ESP firmware code. QUIC-lite and CBOR
 // service mechanics remain in quic-lite/dmesh-server; this file owns ESP-IDF
 // STA and FreeRTOS bearer scheduling for Recovery and Main.
-//! Wi-Fi STA setup and UDP6 socket transport adapter.
+//! Wi-Fi STA setup and raw UDP6 bearer registration.
 //!
 //! This module owns STA lifecycle and bearer registration. UDP6 datagram I/O
-//! lives in `wifi_udp6_socket_esp`; QUIC-lite scheduling stays in the owner.
+//! lives in `wifi_raw_udp6_esp`; QUIC-lite scheduling stays in the owner.
 //! The
 //! flashing module sees only ordered application stream callbacks.
 
@@ -22,6 +22,19 @@ use core::{
 const RECOVERY_STA_PROTOCOL: u8 = (esp_idf_sys::WIFI_PROTOCOL_11B
     | esp_idf_sys::WIFI_PROTOCOL_11G
     | esp_idf_sys::WIFI_PROTOCOL_11N) as u8;
+// Apply the same protocol mask to both interfaces in an APSTA epoch: NOW TX
+// can use either interface, and LR must not silently depend on that choice.
+unsafe fn set_radio_protocols(protocols: &mut esp_idf_sys::wifi_protocols_t) -> i32 {
+    let rc = unsafe { esp_idf_sys::esp_wifi_set_protocols(esp_idf_sys::wifi_interface_t_WIFI_IF_STA, protocols) };
+    if rc != esp_idf_sys::ESP_OK { return rc; }
+    let mut mode = esp_idf_sys::wifi_mode_t_WIFI_MODE_NULL;
+    let rc = unsafe { esp_idf_sys::esp_wifi_get_mode(&mut mode) };
+    if rc != esp_idf_sys::ESP_OK { return rc; }
+    if mode == esp_idf_sys::wifi_mode_t_WIFI_MODE_APSTA {
+        return unsafe { esp_idf_sys::esp_wifi_set_protocols(esp_idf_sys::wifi_interface_t_WIFI_IF_AP, protocols) };
+    }
+    esp_idf_sys::ESP_OK
+}
 // Keep the normal STA lane at HT20.  The data bearer must coexist with NAN
 // and NOW on 2.4 GHz, where an HT40 secondary channel is both less robust and
 // needlessly complicates retry/performance diagnosis.  A future dedicated
@@ -36,6 +49,19 @@ const NAN_FALLBACK_AP_BEACON_TU: u16 = 500;
 /// Bearers can share packet/QUIC code, but they must not independently alter
 /// Wi-Fi callbacks, promiscuous state, or channel while another personality
 /// is live.  All transitions are serialized and logged here.
+///
+/// The radio states the personalities realize are the five of ESPNOW.md
+/// "Radio states" (the same states the C runtime names): off with the NAN/NOW
+/// discovery window as the sync wake, plain STA (the association without the
+/// NOW extensions, `RequestedMode::Sta`; DMesh product policy keeps the modem
+/// awake there — `init_sta` sets power save off, since MAX_MODEM would delay
+/// UDP reception until the listen window), AP+NOW (the unassociated epoch,
+/// `init_nan_now`, with the AP up because the 6.0.2 driver delivers the NOW
+/// hooks only with the AP interface), STA+NOW (the association,
+/// `start_sta_extensions`), and AP+STA+NOW (`init_sta` with `ap=1`).  NOW in
+/// every state that runs it needs power save off, and the AP adds only its
+/// ~512 ms beacon (the soft-NAN timing anchor), so the AP on top of NOW is
+/// not a large cost.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum RadioMode {
@@ -46,10 +72,12 @@ pub enum RadioMode {
     NanPromiscuous = 3,
     RadioLab = 4,
 
-    // Prod modes
-    // - Nan means promiscuous in DW (512ms or 4 sec for sleepy)
-    // - Now means action frames callback/tx
-    // Both must work along with AP (with other devices connected), APSta ()
+    // Prod modes (the radio states above): AP+NOW arrives with the AP (the
+    // driver delivers the NOW hooks only with the AP up), STA+NOW with the
+    // association, AP+STA+NOW with both; off + NAN/NOW DW for sync owns no
+    // radio.  Nan means promiscuous in DW (512 ms, or 4 s sleepy), Now means
+    // the action frames callback/tx; both must work along with the AP (with
+    // other devices connected) and with the association.
     ApRawUdp6 = 5,
     /// Associated raw-UDP6 with independently selected NOW and NAN/DW
     /// extensions. This is one hardware personality, not separate owners of
@@ -99,6 +127,19 @@ static APPLIED_CHANNEL: AtomicU8 = AtomicU8::new(0);
 /// Receive callbacks may use this as a bounded capture fact.  It is not a
 /// substitute for `current_channel()` in worker-context status reporting,
 /// where the driver query remains authoritative for an associated STA.
+// Scope exit records failures and early returns as well as successful changes.
+struct HeapTransition(&'static core::ffi::CStr);
+impl HeapTransition {
+    fn begin(before: &'static core::ffi::CStr, after: &'static core::ffi::CStr) -> Self {
+        unsafe { xip_heap_checkpoint(before.as_ptr()); }
+        Self(after)
+    }
+}
+impl Drop for HeapTransition {
+    fn drop(&mut self) { unsafe { xip_heap_checkpoint(self.0.as_ptr()); } }
+}
+unsafe extern "C" { fn xip_heap_checkpoint(phase: *const core::ffi::c_char); }
+
 pub fn selected_channel() -> Option<u8> {
     let channel = APPLIED_CHANNEL.load(Ordering::Acquire);
     (1..=13).contains(&channel).then_some(channel)
@@ -188,11 +229,11 @@ unsafe extern "C" {
     // Private libnet80211 receive registration. It is lifecycle state, not
     // ESP-NOW framing: all firmware images use the same Wi-Fi owner and may
     // select it at runtime alongside bounded ROC observation.
-    fn ieee80211_recv_action_register(
-        category: u8,
-        action: u8,
+    fn xip_wifi_now_enable(
         callback: Option<unsafe extern "C" fn(*mut c_void, usize, *mut u8, *mut u8) -> i32>,
+        now_only: bool,
     ) -> i32;
+    fn xip_wifi_now_disable() -> i32;
 }
 
 /// Configure the private BSSID policy on one real Wi-Fi receive lane.
@@ -232,7 +273,9 @@ pub fn disable_bssid_check(interface_id: u8) {
 /// receive is bounded to its scheduled promiscuous discovery windows.
 pub fn register_now_dispatcher() -> bool {
     // This private `ieee80211_action_vendor` hook is intentionally NOW-only.
-    // Its category/action table accepts other entries, but on C6 an
+    // Category 127 has one slot (action is ignored); other vendor-action
+    // owners need explicit dispatch/chaining. Standard AP/STA action categories
+    // have separate slots. On C6 an
     // unassociated STA admits continuous unsolicited vendor action `(127, 0)`
     // while it does not deliver NAN/Public Vendor Specific `(4, 9)` through
     // this callback. This was verified with DW and promiscuous receive off,
@@ -248,7 +291,17 @@ pub fn register_now_dispatcher() -> bool {
         // separate receive lease without a null function pointer transition.
         return true;
     }
-    unsafe { ieee80211_recv_action_register(127, 0, Some(action_rx_callback)) == 0 }
+    unsafe {
+        let mut mode = esp_idf_sys::wifi_mode_t_WIFI_MODE_NULL;
+        if esp_idf_sys::esp_wifi_get_mode(&mut mode) != esp_idf_sys::ESP_OK {
+            return false;
+        }
+        // Use intended association policy, not the transient connected state:
+        // a joining STA must retain its infrastructure power policy.
+        let now_only = mode == esp_idf_sys::wifi_mode_t_WIFI_MODE_STA
+            && LAB_FORCE_UNASSOCIATED.load(Ordering::Acquire);
+        xip_wifi_now_enable(Some(action_rx_callback), now_only) == 0
+    }
 }
 
 unsafe extern "C" fn action_rx_callback(
@@ -281,7 +334,7 @@ pub fn action_dispatch_stats() -> (u32, u32, u32, u32) {
 pub fn set_now_dispatcher(enabled: bool) -> bool {
     NOW_DISPATCHER_ENABLED.store(enabled, Ordering::Release);
     if !enabled {
-        return true;
+        return unsafe { xip_wifi_now_disable() == 0 };
     }
     // `ieee80211_recv_action_register` is a private Wi-Fi-driver entry
     // point.  On C6 it may block indefinitely when invoked after an
@@ -643,6 +696,7 @@ unsafe fn start_sta_driver_once() -> i32 {
 
 /// Release association, not the driver/netif. NAN uses this same STA radio.
 pub fn disconnect_sta_retaining_driver() {
+    let _heap = HeapTransition::begin(c"wifi:disconnect_sta_retaining_driver:before", c"wifi:disconnect_sta_retaining_driver:after");
     STA_OWNER_DISCONNECT_PENDING.store(
         STA_ASSOCIATED_EVENT.load(Ordering::Acquire),
         Ordering::Release,
@@ -811,18 +865,12 @@ unsafe extern "C" fn wifi_diagnostic_event_handler(
 ) {
     if event_id == esp_idf_sys::wifi_event_t_WIFI_EVENT_STA_START as i32 {
         ensure_link_local(STA_NETIF.load(Ordering::Acquire));
-        #[cfg(feature = "udp6-socket")]
-        crate::wifi_udp6_socket_esp::refresh_interfaces();
-        #[cfg(not(feature = "udp6-socket"))]
         if crate::wifi_raw_udp6_esp::started() {
             crate::wifi_raw_udp6_esp::rebind_sta_after_wifi_restart();
         }
     }
     if event_id == esp_idf_sys::wifi_event_t_WIFI_EVENT_AP_START as i32 {
         ensure_link_local(AP_NETIF.load(Ordering::Acquire));
-        #[cfg(feature = "udp6-socket")]
-        crate::wifi_udp6_socket_esp::refresh_interfaces();
-        #[cfg(not(feature = "udp6-socket"))]
         if crate::wifi_raw_udp6_esp::started() {
             crate::wifi_raw_udp6_esp::ensure_ap_rx_callback();
         }
@@ -989,12 +1037,83 @@ unsafe fn register_sta_event_handlers() -> bool {
 }
 
 fn wifi_init_config(params: &TransportProfile) -> esp_idf_sys::wifi_init_config_t {
-    xip_runtime_esp::wifi_esp::init_config_with(params.sta_ampdu_enabled, crate::wifi_component::buffers())
+    let sta_ampdu_enabled = params.sta_ampdu_enabled;
+    let buffers = crate::wifi_component::buffers();
+    let mut config = esp_idf_sys::wifi_init_config_t {
+        osi_funcs: core::ptr::addr_of_mut!(esp_idf_sys::g_wifi_osi_funcs),
+        wpa_crypto_funcs: unsafe { esp_idf_sys::g_wifi_default_wpa_crypto_funcs },
+        static_rx_buf_num: esp_idf_sys::CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM as i32,
+        dynamic_rx_buf_num: esp_idf_sys::CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM as i32,
+        tx_buf_type: esp_idf_sys::CONFIG_ESP_WIFI_TX_BUFFER_TYPE as i32,
+        static_tx_buf_num: esp_idf_sys::WIFI_STATIC_TX_BUFFER_NUM as i32,
+        dynamic_tx_buf_num: esp_idf_sys::WIFI_DYNAMIC_TX_BUFFER_NUM as i32,
+        rx_mgmt_buf_type: esp_idf_sys::CONFIG_ESP_WIFI_DYNAMIC_RX_MGMT_BUF as i32,
+        rx_mgmt_buf_num: esp_idf_sys::WIFI_RX_MGMT_BUF_NUM_DEF as i32,
+        cache_tx_buf_num: esp_idf_sys::WIFI_CACHE_TX_BUFFER_NUM as i32,
+        csi_enable: esp_idf_sys::WIFI_CSI_ENABLED as i32,
+        ampdu_rx_enable: if sta_ampdu_enabled {
+            esp_idf_sys::WIFI_AMPDU_RX_ENABLED as i32
+        } else {
+            0
+        },
+        ampdu_tx_enable: if sta_ampdu_enabled {
+            esp_idf_sys::WIFI_AMPDU_TX_ENABLED as i32
+        } else {
+            0
+        },
+        amsdu_tx_enable: esp_idf_sys::WIFI_AMSDU_TX_ENABLED as i32,
+        // An application's transient STA profile must not reopen stale IDF Wi-Fi NVS.
+        nvs_enable: 0,
+        nano_enable: esp_idf_sys::WIFI_NANO_FORMAT_ENABLED as i32,
+        rx_ba_win: if sta_ampdu_enabled {
+            esp_idf_sys::WIFI_DEFAULT_RX_BA_WIN as i32
+        } else {
+            0
+        },
+        wifi_task_core_id: esp_idf_sys::WIFI_TASK_CORE_ID as i32,
+        beacon_max_len: esp_idf_sys::WIFI_SOFTAP_BEACON_MAX_LEN as i32,
+        mgmt_sbuf_num: esp_idf_sys::WIFI_MGMT_SBUF_NUM as i32,
+        feature_caps: esp_idf_sys::WIFI_FEATURE_CAPS as u64,
+        sta_disconnected_pm: esp_idf_sys::WIFI_STA_DISCONNECTED_PM_ENABLED != 0,
+        espnow_max_encrypt_num: esp_idf_sys::CONFIG_ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM as i32,
+        tx_hetb_queue_num: esp_idf_sys::WIFI_TX_HETB_QUEUE_NUM as i32,
+        dump_hesigb_enable: esp_idf_sys::WIFI_DUMP_HESIGB_ENABLED != 0,
+        magic: esp_idf_sys::WIFI_INIT_CONFIG_MAGIC as i32,
+    };
+    // Use the same persistent wifi.rx_* / tx_dynamic settings and bounds as
+    // C Main. Volatile wifi-tuning fields below override the stored defaults.
+    unsafe extern "C" {
+        fn xip_wifi_apply_init_settings(config: *mut esp_idf_sys::wifi_init_config_t);
+    }
+    unsafe { xip_wifi_apply_init_settings(&mut config) };
+    // The wifi-tuning component over the NVS defaults.
+    let [rx_static, rx_dynamic, tx_dynamic, rx_ba] = buffers.map(i32::from);
+    if rx_static != 0 {
+        config.static_rx_buf_num = rx_static;
+    }
+    if rx_dynamic != 0 {
+        config.dynamic_rx_buf_num = rx_dynamic;
+    }
+    config.dynamic_rx_buf_num = config.dynamic_rx_buf_num.max(config.static_rx_buf_num);
+    if tx_dynamic != 0 && config.tx_buf_type == 1 {
+        config.dynamic_tx_buf_num = tx_dynamic;
+    }
+    if config.ampdu_rx_enable != 0 {
+        if rx_ba != 0 {
+            config.rx_ba_win = rx_ba;
+        }
+        config.rx_ba_win = config
+            .rx_ba_win
+            .min((2 * config.static_rx_buf_num).min(config.dynamic_rx_buf_num - 1));
+    }
+    config
+
 }
 
 /// Associate STA without constructing a separate IPv4 transport endpoint.
 /// The UDP6 socket adapter binds after association.
 pub fn init_sta(params: &TransportProfile) {
+    let _heap = HeapTransition::begin(c"wifi:init_sta:before", c"wifi:init_sta:after");
     prepare_sta_driver_policy(params);
     unsafe {
         // `transport.start {mode: Sta}` is the only transition that permits
@@ -1203,13 +1322,10 @@ pub fn init_sta(params: &TransportProfile) {
             return;
         }
         let mut protocols = esp_idf_sys::wifi_protocols_t {
-            ghz_2g: RECOVERY_STA_PROTOCOL as u16,
+            ghz_2g: (RECOVERY_STA_PROTOCOL as u16) | if crate::wifi_component::lr_enabled() { esp_idf_sys::WIFI_PROTOCOL_LR as u16 } else { 0 },
             ghz_5g: 0,
         };
-        if esp_idf_sys::esp_wifi_set_protocols(
-            esp_idf_sys::wifi_interface_t_WIFI_IF_STA,
-            &mut protocols,
-        ) != esp_idf_sys::ESP_OK
+        if set_radio_protocols(&mut protocols) != esp_idf_sys::ESP_OK
         {
             uart::send_response(b"wifi bgn set failed");
             return;
@@ -1350,10 +1466,16 @@ pub(crate) fn use_configured_sta_profile_once() {
 /// its established control flow.  NAN here means the unassociated Wi-Fi
 /// channel owner; `nan_dw_interval=0` keeps promiscuous DW capture disabled
 /// while the NOW action callback remains available.
+///
+/// `params.ap=1` retains the compatibility AP/channel anchor. An explicit
+/// `ap=0, now=1` profile is NOW-only: the owner adds the maximum connectionless
+/// receive-window vote. This mode passed two-C6 payload probes without AP,
+/// association, NAN DW, promiscuous capture or ROC (2026-10-22).
 pub fn init_nan_now(
     params: &TransportProfile,
     handler: crate::wifi_espnow_esp::EspNowHandler,
 ) -> bool {
+    let _heap = HeapTransition::begin(c"wifi:init_nan_now:before", c"wifi:init_nan_now:after");
     prepare_sta_driver_policy(params);
     unsafe {
         // An unassociated NAN+NOW epoch must remain unassociated. A prior
@@ -1416,9 +1538,10 @@ pub fn init_nan_now(
         } else {
             params.sta_channel.clamp(1, 13)
         };
-        // The default unassociated setup starts APSTA once. Its WPA2 AP
-        // provides the channel anchor for NOW/NAN validation; it is not a
-        // later lab overlay on top of a running STA driver.
+        // Keep APSTA as the compatibility default when requested. NOW-only
+        // reception also works with the connectionless PM vote installed by
+        // register_now_dispatcher; the AP is no longer required for receive. It is not
+        // a later lab overlay on top of a running STA driver.
         let mode = if params.ap == 1 {
             esp_idf_sys::wifi_mode_t_WIFI_MODE_APSTA
         } else {
@@ -1438,13 +1561,10 @@ pub fn init_nan_now(
             return false;
         }
         let mut protocols = esp_idf_sys::wifi_protocols_t {
-            ghz_2g: RECOVERY_STA_PROTOCOL as u16,
+            ghz_2g: (RECOVERY_STA_PROTOCOL as u16) | if crate::wifi_component::lr_enabled() { esp_idf_sys::WIFI_PROTOCOL_LR as u16 } else { 0 },
             ghz_5g: 0,
         };
-        let protocols_result = esp_idf_sys::esp_wifi_set_protocols(
-            esp_idf_sys::wifi_interface_t_WIFI_IF_STA,
-            &mut protocols,
-        );
+        let protocols_result = set_radio_protocols(&mut protocols);
         if protocols_result != esp_idf_sys::ESP_OK {
             uart::send_stat(
                 b"wifi NAN/NOW protocol result=",
@@ -1553,6 +1673,7 @@ pub fn resume_sleepy_nan_now(
     params: &TransportProfile,
     handler: crate::wifi_espnow_esp::EspNowHandler,
 ) -> bool {
+    let _heap = HeapTransition::begin(c"wifi:resume_sleepy_nan_now:before", c"wifi:resume_sleepy_nan_now:after");
     unsafe {
         let started_us = esp_idf_sys::esp_timer_get_time();
         LAB_FORCE_UNASSOCIATED.store(true, Ordering::Release);
@@ -1584,13 +1705,10 @@ pub fn resume_sleepy_nan_now(
             return false;
         }
         let mut protocols = esp_idf_sys::wifi_protocols_t {
-            ghz_2g: RECOVERY_STA_PROTOCOL as u16,
+            ghz_2g: (RECOVERY_STA_PROTOCOL as u16) | if crate::wifi_component::lr_enabled() { esp_idf_sys::WIFI_PROTOCOL_LR as u16 } else { 0 },
             ghz_5g: 0,
         };
-        if esp_idf_sys::esp_wifi_set_protocols(
-            esp_idf_sys::wifi_interface_t_WIFI_IF_STA,
-            &mut protocols,
-        ) != esp_idf_sys::ESP_OK
+        if set_radio_protocols(&mut protocols) != esp_idf_sys::ESP_OK
             || esp_idf_sys::esp_wifi_set_bandwidth(
                 esp_idf_sys::wifi_interface_t_WIFI_IF_STA,
                 esp_idf_sys::wifi_bandwidth_t_WIFI_BW20,
@@ -1689,21 +1807,17 @@ pub fn factory_sta_mac() -> Option<[u8; 6]> {
         .then_some(mac)
 }
 
-#[cfg(not(feature = "udp6-socket"))]
 pub type EthernetRxCallback = unsafe extern "C" fn(*mut c_void, u16, *mut c_void) -> i32;
 
-#[cfg(not(feature = "udp6-socket"))]
 pub fn register_ethernet_rx_callback(interface: RadioInterface, callback: Option<EthernetRxCallback>) -> i32 {
     unsafe { esp_idf_sys::esp_wifi_internal_reg_rxcb(radio_interface_native(interface), callback) }
 }
 
-#[cfg(not(feature = "udp6-socket"))]
 pub fn release_ethernet_rx_buffer(buffer: *mut c_void) {
     unsafe { esp_idf_sys::esp_wifi_internal_free_rx_buffer(buffer) }
 }
 
 /// Transfers ownership to lwIP, including the opaque driver allocation.
-#[cfg(not(feature = "udp6-socket"))]
 pub fn forward_ethernet_to_lwip(link: crate::shared_ingress_esp::IngressLink, buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 {
     let netif = match link {
         crate::shared_ingress_esp::IngressLink::WifiSta => STA_NETIF.load(Ordering::Acquire),
@@ -1717,17 +1831,14 @@ pub fn forward_ethernet_to_lwip(link: crate::shared_ingress_esp::IngressLink, bu
     unsafe { esp_idf_sys::esp_netif_receive(netif, buffer, len as usize, eb) }
 }
 
-#[cfg(not(feature = "udp6-socket"))]
 pub fn transmit_ethernet(interface: RadioInterface, frame: &[u8]) -> i32 {
     unsafe { esp_idf_sys::esp_wifi_internal_tx(radio_interface_native(interface), frame.as_ptr().cast_mut().cast(), frame.len() as u16) }
 }
 
-#[cfg(not(feature = "udp6-socket"))]
 pub fn transmit_raw_station(frame: &[u8]) -> i32 {
     unsafe { esp_idf_sys::esp_wifi_80211_tx(radio_interface_native(RadioInterface::Sta), frame.as_ptr().cast(), frame.len() as i32, true) }
 }
 
-#[cfg(not(feature = "udp6-socket"))]
 pub fn register_raw_tx_done_callback(callback: Option<unsafe extern "C" fn(*const esp_idf_sys::esp_80211_tx_info_t)>) -> i32 {
     unsafe { esp_idf_sys::esp_wifi_register_80211_tx_cb(callback) }
 }
@@ -2041,6 +2152,7 @@ pub fn start_sta_extensions(
     nan_dw_interval: u8,
     now: u8,
 ) -> bool {
+    let _heap = HeapTransition::begin(c"wifi:start_sta_extensions:before", c"wifi:start_sta_extensions:after");
     if RADIO_MODE
         .compare_exchange(
             RadioMode::StaRawUdp6 as u8,
@@ -2110,6 +2222,7 @@ pub fn start_sta_extensions(
 /// Apply the volatile NAN/DW portion of an active STA extension set. `0`
 /// leaves the proven STA+UDP6+NOW path with promiscuous receive off.
 pub fn set_nan_dw_interval(nan_dw_interval: u8) -> bool {
+    let _heap = HeapTransition::begin(c"wifi:set_nan_dw_interval:before", c"wifi:set_nan_dw_interval:after");
     if radio_mode() != RadioMode::StaRawUdp6Extensions {
         return false;
     }
@@ -2120,6 +2233,7 @@ pub fn set_nan_dw_interval(nan_dw_interval: u8) -> bool {
 /// mode starts from the known STA lifecycle rather than retaining a callback
 /// or driver state across personalities.
 pub fn stop_sta_extensions() {
+    let _heap = HeapTransition::begin(c"wifi:stop_sta_extensions:before", c"wifi:stop_sta_extensions:after");
     let extensions_active = radio_mode() == RadioMode::StaRawUdp6Extensions;
     crate::wifi_nan_dw_capture_esp::stop();
     // Wi-Fi owns the packet-pool admission lifetime for the hardware action
@@ -2138,6 +2252,7 @@ pub fn stop_sta_extensions() {
 /// this adapter only releases the ESP-IDF STA bearer so the normal light-sleep
 /// scheduler can resume. Infrastructure callers intentionally never use it.
 fn stop_sta_with_leave_grace(leave_grace_ms: u32) {
+    let _heap = HeapTransition::begin(c"wifi:stop_sta_with_leave_grace:before", c"wifi:stop_sta_with_leave_grace:after");
     STA_DRIVER_RUNNING.store(false, Ordering::Release);
     stop_sta_extensions();
     crate::wifi_raw_udp6_esp::stop();
@@ -2191,6 +2306,7 @@ pub fn stop_sta_for_reset() {
 /// for its physical DW8 sleep path and `init_nan_now()` recreates the driver
 /// after the timer wake.
 pub fn deinit_for_light_sleep() {
+    let _heap = HeapTransition::begin(c"wifi:deinit_for_light_sleep:before", c"wifi:deinit_for_light_sleep:after");
     unsafe {
         let result = esp_idf_sys::esp_wifi_deinit();
         if result != esp_idf_sys::ESP_OK
@@ -2215,6 +2331,7 @@ pub fn replace_sta(params: &TransportProfile) {
 /// bearer shutdown and immediately reinitializes the same radio mode; this is
 /// a controlled Wi-Fi restart, not a device reboot or a second Wi-Fi owner.
 pub fn restart_sta_runtime() {
+    let _heap = HeapTransition::begin(c"wifi:restart_sta_runtime:before", c"wifi:restart_sta_runtime:after");
     STA_DRIVER_RUNNING.store(false, Ordering::Release);
     STA_ASSOCIATED_EVENT.store(false, Ordering::Release);
     unsafe {
@@ -2229,6 +2346,7 @@ pub fn restart_sta_runtime() {
 /// The default netif is also released, avoiding a second persistent adapter
 /// or a stale binding across the driver epoch.
 pub fn restart_sta_driver_runtime() {
+    let _heap = HeapTransition::begin(c"wifi:restart_sta_driver_runtime:before", c"wifi:restart_sta_driver_runtime:after");
     STA_DRIVER_RUNNING.store(false, Ordering::Release);
     STA_ASSOCIATED_EVENT.store(false, Ordering::Release);
     unsafe {
@@ -2430,6 +2548,7 @@ pub fn set_lab_open_ap(enabled: bool, channel: u8, beacon_tu: u16) -> bool {
 /// nor enables promiscuous capture.  It is a volatile lab mode, not a new
 /// connection/profile owner.
 pub fn ensure_lab_main_style_raw_sta(channel: u8) -> bool {
+    LAB_FORCE_UNASSOCIATED.store(true, Ordering::Release);
     let channel = channel.clamp(1, 13);
     unsafe {
         let mut mode = esp_idf_sys::wifi_mode_t_WIFI_MODE_NULL;
