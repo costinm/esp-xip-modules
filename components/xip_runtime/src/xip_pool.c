@@ -74,11 +74,12 @@ void xip_pool_trim(xip_pool *p)
 uint16_t xip_pool_allocated(const xip_pool *p) { return p->ext ? p->ext->slots(p->ext->ctx) - p->ext->available(p->ext->ctx) : (uint16_t)atomic_load(&((xip_pool *)p)->buffers); }
 
 /* Claim slot i (its count 0 -> 1) and make sure it has storage; undo and fail when it cannot. */
-static int claim(xip_pool *p, uint16_t i)
+static int claim(xip_pool *p, uint16_t i, int allocate)
 {
     unsigned zero = 0;
     if (!atomic_compare_exchange_strong(&p->refs[i], &zero, 1)) return 0;
     if (!p->mem[i]) {
+        if (!allocate) { atomic_store(&p->refs[i], 0); return 0; }
         uint8_t *m = NULL;
         if (!p->free_heap || p->free_heap() >= (size_t)p->slot_size + p->reserve_bytes) m = malloc(p->slot_size);
         if (!m) { atomic_store(&p->refs[i], 0); return -1; }
@@ -88,9 +89,10 @@ static int claim(xip_pool *p, uint16_t i)
     return 1;
 }
 
-int xip_pool_acquire(xip_pool *p, uint16_t reserve)
+static int acquire_slot(xip_pool *p, uint16_t reserve, int allocate)
 {
-    if (p->ext) return p->ext->acquire(p->ext->ctx, reserve);
+    if (p->ext) return allocate ? p->ext->acquire(p->ext->ctx, reserve) :
+        (p->ext->acquire_cached ? p->ext->acquire_cached(p->ext->ctx, reserve) : -1);
     /* take one from the count only if more than `reserve` are free, in one step: two takers cannot both pass */
     unsigned n = atomic_load(&p->free_count);
     do {
@@ -99,13 +101,24 @@ int xip_pool_acquire(xip_pool *p, uint16_t reserve)
     for (int pass = 0; pass < 2; pass++) {              /* slots that already have storage first, then any */
         for (uint16_t i = 0; i < p->slots; i++) {
             if (pass == 0 && !p->mem[i]) continue;
-            int c = claim(p, i);
+            int c = claim(p, i, allocate);
             if (c > 0) return i;
             if (c < 0) { atomic_fetch_add(&p->free_count, 1); return -1; }      /* no memory for the storage */
         }
     }
     atomic_fetch_add(&p->free_count, 1);     /* cannot happen: the count said a slot was free */
     return -1;
+}
+
+int xip_pool_acquire(xip_pool *p, uint16_t reserve) { return acquire_slot(p, reserve, 1); }
+int xip_pool_acquire_cached(xip_pool *p, uint16_t reserve) { return acquire_slot(p, reserve, 0); }
+void xip_pool_prepare_rx(xip_pool *p)
+{
+    if (p->ext) return; /* The application's owner prepares its pool. */
+    int held[2] = {-1, -1};
+    const unsigned n = p->keep < 2 ? p->keep : 2;
+    for (unsigned i = 0; i < n; i++) held[i] = xip_pool_acquire(p, 0);
+    for (unsigned i = 0; i < n; i++) if (held[i] >= 0) xip_pool_release(p, held[i]);
 }
 
 void xip_pool_retain(xip_pool *p, int slot)

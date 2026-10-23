@@ -92,7 +92,10 @@ pub struct PowerInfo {
     /// restarted around a plain delay and the CPU does not sleep, as DMesh's `sleepy-soft` (`usb_jtag_debug_hold`). A device on USB is charged by the host, so
     /// the saving does not matter there; unplugged, or with a UART console, the sleep is physical. Details: `components/xip_runtime/src/xip_power.c`.
     pub soft_sleep: u8,
-    pub reserved: [u8; 3],
+    /// A UART/wake activity interval is still open. Informational: the module
+    /// owns sleep policy. Uses one formerly reserved byte, keeping ABI size.
+    pub active_window: u8,
+    pub reserved: [u8; 2],
 }
 impl Default for PowerInfo {
     fn default() -> Self {

@@ -13,7 +13,7 @@ usize_is_size_t = true
 trailer = """
 _Static_assert(sizeof(xip_spi_config) == 44, "xip_spi_config layout");
 _Static_assert(sizeof(xip_dmod_header) == 64, "xip_dmod_header layout");
-_Static_assert(sizeof(xip_wifi_intent) == 212, "xip_wifi_intent layout");
+_Static_assert(sizeof(xip_wifi_intent) == 216, "xip_wifi_intent layout");
 _Static_assert(sizeof(xip_wifi_state) == 52, "xip_wifi_state layout");
 _Static_assert(sizeof(xip_wifi_tuning) == 20, "xip_wifi_tuning layout");
 _Static_assert(sizeof(xip_link_info) == 60, "xip_link_info layout");
@@ -40,10 +40,14 @@ int xip_handle(const xip_host *host, void *state, const xip_call *call);
 """
 
 [export]
-include = ["Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware"]
+include = ["SerialRxBuffer", "SerialPacketTx", "SerialPacketClient", "Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware"]
 prefix = "xip_"
 
 [export.rename]
+SerialRxBuffer = "serial_rx_buffer"
+SerialPacketTx = "serial_packet_tx"
+SerialPacketClient = "serial_packet_client"
+
 Host = "host"
 Call = "call"
 SpiConfig = "spi_config"

@@ -6,10 +6,13 @@ license = "Apache-2.0"
 description = "Rust side of an esp-xip-modules application: start the host and the loader over the module partition, run, stop and call modules; the pieces DMesh and `main-rs` share"
 publish = false
 
-# Built by the application that uses it (ESP-IDF, or a PC for the tests); not part of a Cargo workspace.
+# ESP builds come from the application; host tests run in the crates workspace.
 
 [dependencies]
 xip-abi = { path = "../xip-abi" }
 
 [target.'cfg(target_os = "espidf")'.dependencies]
 esp-idf-sys = { version = "0.37", default-features = false, features = ["alloc_handler"] }
+
+[target.'cfg(not(target_os = "espidf"))'.dev-dependencies]
+libloading = "0.8"

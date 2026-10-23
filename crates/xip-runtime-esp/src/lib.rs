@@ -2,7 +2,7 @@
 //! and the loader over the module partition, start, stop and call modules, receive their events.
 //!
 //! Generic host facilities include module lifecycle, packet-backed socket
-//! readiness, settings, the `wifi` components with a simple station owner, and ESP Wi-Fi initialization.
+//! readiness, settings, the `wifi` components with the C Wi-Fi owner.
 //! Products keep protocol parsing and radio scheduling policy in their own owners: an application that drives the
 //! radio itself passes a [`WifiOwner`] in [`Features`]. The module interface is a C-compatible function table.
 //!
@@ -14,25 +14,10 @@ extern crate alloc;
 extern crate std;
 
 mod loader;
-pub mod espnow_frame;
-#[cfg(target_os = "espidf")]
-pub mod espnow_esp;
-#[cfg(target_os = "espidf")]
-pub mod promisc_esp;
-pub mod wifi;
 #[cfg(target_os = "espidf")]
 pub mod settings;
 
-#[cfg(target_os = "espidf")]
-pub mod lwip_io_esp;
-#[cfg(target_os = "espidf")]
-mod module_poll_esp;
-#[cfg(target_os = "espidf")]
-pub mod wifi_esp;
-
-pub mod uart_frames;
-pub use wifi::WifiOwner;
-pub use loader::{autostart, call, find, init, manifest, request_raw, slot_count, start, status, stop, stop_all, EventHandler, Features, PoolOps, SlotStatus};
+pub use loader::{autostart, call, find, init, manifest, request_raw, slot_manifest, slot_count, start, status, stop, stop_all, EventHandler, Features, PoolOps, SlotStatus, WifiOwner};
 
 /// Read host status without depending on a console module.
 #[cfg(target_os = "espidf")]
@@ -63,3 +48,6 @@ mod tests {
         assert!(stop_all(10));
     }
 }
+
+/// Validated installed module API metadata.
+pub mod module_api;

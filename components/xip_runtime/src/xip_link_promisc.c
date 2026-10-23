@@ -1,6 +1,6 @@
 /* Promiscuous receive as the "promisc" link, for a NAN module (the wifi component's `monitor`). The frames of the selected types are
  * delivered as pool packets: the 802.11 frame from its MAC header (radio FCS removed), the transmitter address (addr2) as the source
- * token, the RSSI as the signal. The Rust twin is crates/xip-runtime-esp/src/promisc_esp.rs.
+ * token, the RSSI as the signal. Both C and Rust hosts enter through xip_wifi_owner_monitor.
  *
  * Deliberately small: on/off and a channel. The early filter (xip_rx_filter.c) runs before a packet is taken; the runtime does not touch power save; the module decides the window (DMesh's NAN
  * owner uses 64 ms in a 512 ms discovery window), when to stop, and what to do about power save. The callback only copies. */
@@ -11,7 +11,7 @@
 #include "esp_wifi.h"
 #include "xip_wifi.h"
 
-#define LINK_MTU 1000                          /* a pool packet; a longer frame is dropped */
+#define LINK_MTU XIP_PKT_MAX                          /* a pool packet; a longer frame is dropped */
 #define MAC_HEADER 24                          /* a management frame shorter than this has no addresses */
 #define FCS_LEN 4
 

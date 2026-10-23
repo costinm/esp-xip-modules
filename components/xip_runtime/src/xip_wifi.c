@@ -109,6 +109,31 @@ int xip_wifi_nv(const char *key, size_t key_len, const uint8_t *value, size_t va
     return -4;
 }
 
+/* Saved credentials are a boot input in either application partition.
+ * This is a volatile request; it never creates a separate profile setting. */
+void xip_wifi_boot_network(void)
+{
+    xip_wifi_intent now = {.size = sizeof(now)};
+    uint32_t generation;
+    if (!xip_wifi_get_intent(&now, &generation) && now.sta_ssid_len) return;
+    char ssid[33] = {0}, secret[64] = {0};
+    nvs_handle_t nvs;
+    if (nvs_open("wl", NVS_READONLY, &nvs) != ESP_OK) return;
+    size_t n = sizeof(ssid), m = sizeof(secret);
+    esp_err_t rc = nvs_get_str(nvs, "ssid", ssid, &n);
+    if (nvs_get_str(nvs, "psk", secret, &m) != ESP_OK) m = 1;
+    nvs_close(nvs);
+    if (rc != ESP_OK || n <= 1 || n > sizeof(ssid) || m > sizeof(secret)) return;
+    /* Add the shared boot keys, preserving the loader's original keys. */
+    (void)xip_wifi_nv("sta_ssid", 8, (const uint8_t *)ssid, n-1, NULL, 0);
+    (void)xip_wifi_nv("sec:sta", 7, (const uint8_t *)secret, m-1, NULL, 0);
+    xip_wifi_intent want = {.size = sizeof(want), .radio = 1, .sta = 1, .now = 1};
+    memcpy(want.sta_ssid, ssid, n-1); want.sta_ssid_len = n-1;
+    memcpy(want.sta_psk, secret, m-1); want.sta_psk_len = m-1;
+    (void)xip_wifi_set_intent(&want, &generation);
+}
+
+
 wifi_init_config_t xip_wifi_init_config(bool ampdu_enabled)
 {
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -148,10 +173,11 @@ static xip_wifi_tuning current_tuning(void)
 
 /* ---------------------------------------------------------------------------------------------------------------------------------
  * The radio bring-up. This follows DMesh's wifi_esp.rs (init_sta, init_nan_now, start_sta_driver_once, stop_sta) step by step, in the
- * same order and with the same driver settings, because that sequence went through a lot of testing on the boards. The Rust twin is
- * crates/xip-runtime-esp/src/wifi_esp.rs and the two are meant to behave the same. What DMesh decides by policy (scan-then-choose of
+ * same order and with the same driver settings, because that sequence went through a lot of testing on the boards. Generic C and Rust applications
+ * install this same owner. What DMesh decides by policy (scan-then-choose of
  * the access point, the reconnect task, its fixed AP name, NAN discovery windows) is not here: the wanted state comes from the `wifi`
- * intent, a failed association is retried, and the ESP-NOW link (xip_link_espnow.c) is started with the radio.
+ * intent, a failed association is retried, and the ESP-NOW link (xip_link_espnow.c) is started with the radio when the intent wants it
+ * (`now`).
  * --------------------------------------------------------------------------------------------------------------------------------- */
 
 /* 802.11 b/g/n, as DMesh sets on the STA: n lets the association negotiate HT20 and AMPDU (no n-only 2.4 GHz bitmap exists). */
@@ -317,7 +343,9 @@ static esp_err_t start_driver_once(void)
 }
 
 /* The soft AP, configured before the one Wi-Fi start of an AP+STA epoch (DMesh's configure_unassociated_dmesh_ap, with the name and
- * passphrase of the intent in place of its fixed ones). */
+ * passphrase of the intent in place of its fixed ones). It also carries the unassociated NOW state AP+NOW: on the 6.0.2 driver the
+ * ESP-NOW hooks are delivered only with the AP interface up, and since NOW already forces power save off, the AP adds only its
+ * ~512 ms beacon, which doubles as the soft-NAN timing anchor (ESPNOW.md "Radio states"). */
 static bool configure_ap(const xip_wifi_intent *p, uint8_t channel)
 {
     if (!ap_netif) {
@@ -329,7 +357,7 @@ static bool configure_ap(const xip_wifi_intent *p, uint8_t channel)
     if (p->ap_ssid_len) {
         memcpy(config.ap.ssid, p->ap_ssid, p->ap_ssid_len); config.ap.ssid_len = p->ap_ssid_len;
     } else {
-        uint8_t mac[6]; esp_wifi_get_mac(WIFI_IF_AP, mac);       /* the default name, as the Rust twin: xip-<last two bytes of the AP MAC> */
+        uint8_t mac[6]; esp_wifi_get_mac(WIFI_IF_AP, mac);       /* the default name: xip-<last two bytes of the AP MAC> */
         config.ap.ssid_len = snprintf((char *)config.ap.ssid, sizeof(config.ap.ssid), "xip-%02x%02x", mac[4], mac[5]);
     }
     if (!open) memcpy(config.ap.password, p->ap_psk, p->ap_psk_len);
@@ -352,12 +380,71 @@ static void restart_driver(void)
 
 static void wifi_down(void);
 
-/* Bring the radio up for the wanted state: the station (and its association), the soft AP, and ESP-NOW (always, with the radio).
- * DMesh's init_sta / init_nan_now, step by step. */
+/* Bring the radio up for the wanted state. The on states are AP+NOW, STA+NOW, AP+STA+NOW and the plain station
+ * (no ESP-NOW, the modem power save on instead): ESPNOW.md "Radio states", the same states in DMesh's transport
+ * (whose product policy keeps the modem awake even in the plain station). ESP-NOW (xip_link_espnow.c) runs
+ * with the radio when the intent wants it and needs the modem awake for it (power save below); the AP is a small
+ * extra on top. The earlier hook-only setup required AP for unassociated RX;
+ * the native connectionless initialization below reproduces the missing SDK
+ * setup before the next AP-free receive experiment. */
+/* BEGIN NOW RADIO SETUP: native SDK-boundary tests compile this exact region. */
+/* Pinned IDF 6.0.2 private entry points, as called by esp_now_init/mt_init.
+ * The lower vendor-spec callback used by mt_init reassembles IE data and would
+ * discard our raw tail. Keep our full-action callback, but reproduce the power
+ * vote for NOW-only operation without linking peer/key/send policy. */
+extern int ieee80211_recv_action_register(uint8_t category, uint8_t action,
+    int (*callback)(void *, size_t, uint8_t *, uint8_t *));
+extern esp_err_t esp_wifi_internal_configure_wake_window(bool enable, const uint16_t *window);
+
+/* The SDK retains this pointer in its PM vote list, reading (never writing)
+ * the value. Keep this two-byte parameter in DRAM for cache-off PM paths and
+ * valid even if unregister fails; there are no idle packet/peer buffers. */
+static uint16_t now_wake_window = UINT16_MAX;
+static struct { bool window_registered; } now_radio;
+
+int xip_wifi_now_disable(void)
+{
+    if (now_radio.window_registered) {
+        if (esp_wifi_internal_configure_wake_window(false, &now_wake_window) != ESP_OK) return XIP_ERR_IO;
+        now_radio.window_registered = false;
+    }
+    /* The action hook remains installed; its bearer makes it inert on stop.
+     * Do not register a NULL callback or re-enter registration during teardown. */
+    return XIP_OK;
+}
+
+int xip_wifi_now_enable(int (*callback)(void *, size_t, uint8_t *, uint8_t *), bool now_only)
+{
+    if (!callback) return XIP_ERR_ARG;
+    /* Infrastructure roles retain their own power policy. Drop our vote when
+     * moving from a NOW-only epoch into AP/STA service. */
+    if (!now_only && xip_wifi_now_disable() != XIP_OK) return XIP_ERR_IO;
+    /* Reuse our retained vote on repeated registrations (each radio epoch
+     * re-arms the hook). The immutable window also makes failed cleanup safe. */
+    if (now_only && !now_radio.window_registered) {
+        if (esp_wifi_internal_configure_wake_window(true, &now_wake_window) != ESP_OK) return XIP_ERR_IO;
+        now_radio.window_registered = true;
+    }
+    if (ieee80211_recv_action_register(127, 0, callback) != 0) {
+        (void)xip_wifi_now_disable();
+        return XIP_ERR_IO;
+    }
+    return XIP_OK;
+}
+/* END NOW RADIO SETUP */
+
+static int start_now(bool now_only)
+{
+    int rc = xip_link_espnow_start();
+    if (!rc) rc = xip_wifi_now_enable(xip_link_espnow_action_rx, now_only);
+    if (rc) xip_link_espnow_stop();
+    return rc;
+}
+
 static int wifi_up(const xip_wifi_intent *p, const xip_wifi_tuning *tuning)
 {
     if (started || scan_only) return -5;
-    const bool sta = p->sta, ap = p->ap;
+    const bool sta = p->sta, ap = p->ap, now = p->now;
     /* DMesh's defaults: AMPDU on, 11b rates off, BSSID check off (frames of other BSSIDs reach unassociated NOW receive) */
     const bool ampdu = tuning->ampdu != XIP_TUNE_OFF;
     const bool rates_11b_disabled = tuning->rates_11b != XIP_TUNE_ON;
@@ -396,8 +483,9 @@ static int wifi_up(const xip_wifi_intent *p, const xip_wifi_tuning *tuning)
         if (memcmp(p->bssid, none, 6)) { config.sta.bssid_set = 1; memcpy(config.sta.bssid, p->bssid, 6); }
         if (esp_wifi_set_config(WIFI_IF_STA, &config) != ESP_OK) return -3;
     }
-    wifi_protocols_t protocols = {.ghz_2g = STA_PROTOCOL, .ghz_5g = 0};
+    wifi_protocols_t protocols = {.ghz_2g = STA_PROTOCOL | (tuning->lr == XIP_TUNE_ON ? WIFI_PROTOCOL_LR : 0), .ghz_5g = 0};
     if (esp_wifi_set_protocols(WIFI_IF_STA, &protocols) != ESP_OK) return -3;
+    if (ap && esp_wifi_set_protocols(WIFI_IF_AP, &protocols) != ESP_OK) return -3;
     if (esp_wifi_set_bandwidth(WIFI_IF_STA, STA_HT40 ? WIFI_BW40 : WIFI_BW20) != ESP_OK) return -3;
     /* after init and before start; it includes the negotiated legacy/basic-rate set, so it is never applied to a running driver */
     if (!driver_running && esp_wifi_config_11b_rate(WIFI_IF_STA, rates_11b_disabled) != ESP_OK) return -3;
@@ -405,7 +493,11 @@ static int wifi_up(const xip_wifi_intent *p, const xip_wifi_tuning *tuning)
     rc = start_driver_once();
     if (rc != ESP_OK && rc != ESP_ERR_INVALID_STATE) return -3;
     if (!set_bssid_check_disabled(0, bssid_check_disabled)) return -3;
-    (void)esp_wifi_set_ps(WIFI_PS_NONE);
+    /* ESP-NOW cannot run against a sleeping modem, so the states with it keep the radio awake for the whole epoch
+     * (ESPNOW.md "Radio states"); the plain station instead anchors on the BSS beacons and runs the modem power
+     * save (MIN_MODEM: the modem wakes at every DTIM window). With the AP alone the mode is moot, so it stays off.
+     * A sleep owner suspends the radio around a light sleep instead (xip_power.c). */
+    (void)esp_wifi_set_ps(now ? WIFI_PS_NONE : (sta ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE));
     want_sta = sta; ap_enabled = ap;
     if (sta) {
         memset(active_ssid, 0, sizeof(active_ssid));
@@ -420,15 +512,18 @@ static int wifi_up(const xip_wifi_intent *p, const xip_wifi_tuning *tuning)
         applied_channel = primary;
         started = true;
     } else {
-        /* an unassociated ESP-NOW-only epoch stays unassociated and pins its channel */
+        /* Unassociated STA: same start/channel sequence as the SDK example.
+         * start_now adds its connectionless PM vote below; AP-free reception remains to be measured on hardware. */
         (void)esp_wifi_disconnect();
         vTaskDelay(5);
         if (!set_ht20_channel(channel)) return -3;
         started = true;
     }
     { uint8_t sm[6], am[6]; esp_wifi_get_mac(WIFI_IF_STA, sm); esp_wifi_get_mac(WIFI_IF_AP, am); xip_rx_filter_local(sm, ap ? am : NULL); }
-    /* with the radio on, ESP-NOW is on (DMesh's start_sta_extensions, after the driver is live and the channel is pinned) */
-    (void)xip_link_espnow_start();
+    /* with the radio on and the intent asking for it, ESP-NOW is on (DMesh's start_sta_extensions): the last step of
+     * the epoch, after the driver is live and its channel is pinned (the hook is registered at every radio-up:
+     * xip_wifi.c); a plain-STA epoch (now 0) leaves the link stopped, its callback inert */
+    if (now) { int rc = start_now(!sta && !ap); if (rc) { wifi_down(); return rc; } }
     return 0;
 }
 
@@ -447,6 +542,7 @@ static void wifi_down(void)
     xip_rx_filter_local(NULL, NULL);
     xip_rx_filter_bssid(NULL);
     xip_link_promisc_stop();
+    (void)xip_wifi_now_disable();
     xip_link_espnow_stop();
     driver_running = false;
     scanning = scan_done = false;
@@ -461,8 +557,9 @@ static void wifi_down(void)
 #define wifi_stop wifi_down
 
 /* Promiscuous receive for a NAN module (xip_link_promisc.c); the radio must be up. */
-static int wifi_monitor(const xip_wifi_monitor *m)
+int xip_wifi_owner_monitor(const xip_wifi_monitor *m)
 {
+    if (!m || m->size < sizeof(*m)) return XIP_ERR_ARG;
     if (!started) return XIP_ERR_UNSUPPORTED;
     return xip_link_promisc_set(m);
 }
@@ -558,10 +655,12 @@ static void reconcile(void)
     if (xip_wifi_get_intent(&p, &generation)) return;
     xip_wifi_tuning t = current_tuning();
     if (!memcmp(applied, &p, sizeof(p)) && !memcmp(&applied_tuning, &t, sizeof(t))) return;
+    xip_heap_checkpoint("wifi:before");
     wifi_down();
     memcpy(applied, &p, sizeof(p));
     applied_tuning = t;
     if (p.radio) (void)wifi_up(&p, &t);
+    xip_heap_checkpoint("wifi:after");
 }
 
 void xip_wifi_install_hooks(xip_host_hooks_t *hooks)
@@ -569,8 +668,22 @@ void xip_wifi_install_hooks(xip_host_hooks_t *hooks)
     hooks->wifi_state = wifi_state;
     hooks->wifi_reconcile = reconcile;
     hooks->wifi_scan = wifi_scan;
-    hooks->wifi_monitor = wifi_monitor;
+    hooks->wifi_monitor = xip_wifi_owner_monitor;
     static const xip_power_radio power_radio = {.suspend = power_suspend, .resume = power_resume};
     xip_power_set_radio(&power_radio);
     if (!hooks->nv) hooks->nv = xip_wifi_nv;
+}
+
+/* Rust's small extension table uses this installer only for generic firmware.
+ * Keep it with the radio owner so products using init_simple do not link a
+ * second owner merely to convert their hook table. */
+void xip_wifi_install_simple(xip_host_ext_t *ext)
+{
+    xip_host_hooks_t hooks = {0};
+    xip_wifi_install_hooks(&hooks);
+    ext->wifi_state = hooks.wifi_state;
+    ext->wifi_reconcile = hooks.wifi_reconcile;
+    ext->wifi_scan = hooks.wifi_scan;
+    ext->wifi_monitor = hooks.wifi_monitor;
+    if (!ext->nv) ext->nv = hooks.nv;
 }

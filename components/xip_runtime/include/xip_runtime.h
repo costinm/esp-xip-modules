@@ -24,7 +24,7 @@ typedef struct { uint8_t ssid[32]; uint8_t ssid_len; uint8_t bssid[6]; int8_t rs
 
 typedef struct {
     /* the wifi component and the module calls of include/xip.h. NULL: not offered; the optional
-     * xip_wifi component implements simple STA hooks in C, and the Rust host has its own STA hooks.
+     * xip_wifi component implements the shared generic C/Rust radio owner.
      * xip_loader implements the module ones; all are called on the
      * worker and must return at once. wifi_state fills xip_wifi_state; the host turns it
      * into the CBOR of wifi_info. modules_info writes CBOR (slot records). */
@@ -68,7 +68,9 @@ typedef struct {
     int (*wifi_monitor)(const xip_wifi_monitor *monitor);
 } xip_host_hooks_t;
 
-/* For an application that cannot build the hook table (Rust): the Wi-Fi, settings and module-control calls when given. */
+/* For an application that cannot build the hook table (Rust): the Wi-Fi, settings and module-control calls when given.
+ * Generic firmware first uses xip_wifi_install_simple; products supply their
+ * own callbacks and keep radio and sleep ownership with the application. */
 typedef struct {
     int (*wifi_set)(const xip_wifi_intent *intent, uint32_t *generation);
     int (*wifi_get)(xip_wifi_intent *intent, uint32_t *generation);
@@ -124,7 +126,11 @@ void xip_host_wifi_changed(uint32_t generation);
  * refuse (XIP_ERR_BUSY: the sender keeps the packet and waits for the READY event; call xip_link_native_ready when there is room),
  * XIP_LINK_TX_DONE when the frame is already sent, or 0 when it will be: the driver then calls xip_link_native_tx_done(addr,
  * pkt->slot, outcome) exactly once, from any task. `data` may be moved back into `headroom` to prepend the driver's envelope. */
-typedef struct { uint8_t *data; size_t len; size_t headroom; int slot; } xip_link_packet;
+/* tx() receives exclusive mutable access to one pool lease. It must not retain,
+ * clone, or release that lease: synchronous DONE returns it to the runtime;
+ * asynchronous acceptance holds it until tx_done exactly once. BUSY leaves the
+ * original with the sender. The runtime blocks TX while read borrows remain. */
+typedef struct { uint8_t *data; size_t len; size_t headroom; int slot; xip_pool *pool; } xip_link_packet;
 #define XIP_LINK_TX_DONE 1
 typedef int (*xip_link_tx_fn)(void *ctx, uint64_t dest, const xip_link_packet *pkt);
 int xip_link_native_register(const char *name, uint32_t mtu, uint32_t flags, xip_link_tx_fn tx, void *ctx);
@@ -136,6 +142,9 @@ int xip_link_native_rx(int addr, uint64_t source, int32_t signal, const uint8_t 
 /* The same without the copy: begin (0 + a packet to fill, 1 nobody listens, or an error), parse into buf->data, then commit or abort. */
 typedef struct { uint8_t *data; size_t capacity; int slot; } xip_link_rx_buf;
 int xip_link_native_rx_begin(int addr, xip_link_rx_buf *buf);
+/* NOW callbacks use prepared storage only; prepare on the serialized owner. */
+void xip_link_native_rx_prepare(void);
+int xip_link_native_rx_begin_cached(int addr, xip_link_rx_buf *buf);
 void xip_link_native_rx_commit(int addr, const xip_link_rx_buf *buf, size_t len, uint64_t source, int32_t signal);
 void xip_link_native_rx_abort(const xip_link_rx_buf *buf);
 
@@ -191,33 +200,76 @@ int xip_instance_send(xip_instance_t *inst, int component, int method, uint64_t 
 int xip_instance_request(xip_instance_t *inst, int component, int method, const uint8_t *data, size_t len,
                             uint8_t *response, size_t capacity, size_t *response_len, uint32_t timeout_ms);
 
-/* The serial port of the board (the console), as hardware the host owns: start and stop it, receive lines, write text.
- * ESP32-C6: USB-Serial/JTAG when a computer is attached at boot, else UART0; ESP32 and S3: UART0 (115200 8N1).
- * Its pins are always reserved from modules. `on_line` runs on the reader task (CONFIG_XIP_SERIAL_STACK) with one
- * edited line (no newline, empty lines dropped), one at a time; it may take its time, but must not call
- * xip_serial_stop(). */
-typedef void (*xip_serial_line_fn)(void *ctx, char *line, size_t len);
-int xip_serial_start(xip_serial_line_fn on_line, void *ctx);
-/* Stop the reader and release the driver (the port goes back to ESP-IDF's console). Not from `on_line`. */
+/* The serial port of the board, the wire the runtime reads: started once at xip_host_init, with
+ * the runtime's PPP codec (xip_ppp.c) from the first byte. The UART speaks the runtime's framing
+ * exclusively: a record is `0x7e port bytes 0x7e`, escaped; the record's port decides which
+ * module receives it (ports of modules: through xip_port_rx_begin / commit; the port byte itself
+ * is not part of the frame). The serial text mode is not on the UART: the person's console is the
+ * TCP lane (the console module's stream port). A record no module holds is skipped whole. */
+int xip_serial_start(void);
+/* Product adapters share the same physical driver/tasks, while retaining their
+ * own wire codec and pool. open stops/releases the previous reader first.
+ * start_client consumes ctx on success AND failure via on_close, after all
+ * callbacks are quiescent. TX is independent of RX; callbacks run in tasks. */
+typedef struct {
+    void *ctx;
+    void (*on_bytes)(void *ctx, const uint8_t *data, size_t len);
+    void (*on_reset)(void *ctx);
+    void (*on_tx)(void *ctx);
+    void (*on_uart_event)(void *ctx);
+    void (*on_close)(void *ctx);
+} xip_serial_client_t;
+/* Application-entry and transition heap checkpoints do not allocate. */
+void xip_heap_checkpoint(const char *phase);
+int xip_serial_open(int baud, size_t usb_buffer_size);
+int xip_serial_start_client(const xip_serial_client_t *client);
+/* The packet API uses the same C PPP codec as module serial. C consumes ctx on
+ * start (also failure). Busy submit never calls take: source keeps its packet.
+ * Accepted submit calls take synchronously under admission lock, then owns the
+ * packet until complete. One physical slot, no FIFO or payload copy. */
+int xip_serial_start_packets(const xip_serial_packet_client *client);
+int xip_serial_submit_packet(void *source, void (*take)(void *ctx, void *source, xip_serial_packet_tx *packet));
+bool xip_serial_tx_available(void);
+void xip_serial_receive_enabled(bool enabled);
+int xip_serial_frame_begin(uint32_t port, xip_link_rx_buf *buf);
+void xip_serial_frame_finish(uint32_t port, const xip_link_rx_buf *buf, size_t len, int outcome);
+void xip_serial_tx_ready(void);
+int xip_serial_set_baud(uint32_t baud);
+/* Native serial owner: queue a volatile rate change, or handle decoded
+ * control ports 0xf8 (wake) / 0xf9 (request+BE32 rate). ACK drains first.
+ * USB rejects rate changes. No packet allocation or QUIC dependency. */
+int xip_serial_request_baud(uint32_t baud);
+int xip_serial_control(uint32_t port, const uint8_t *data, size_t len);
+void xip_serial_activity_window(uint32_t ms);
+void xip_serial_activate(void);
+/* Generic activity mechanism; policy decides whether/how to sleep.
+ * activate extends (never shortens) the current interval; zero is a no-op. */
+void xip_power_activate(uint32_t duration_ms);
+void xip_power_clear_activity(void);
+uint32_t xip_power_active_remaining_ms(void);
+int xip_serial_buffered_bytes(size_t *bytes);
+/* Stop the reader and release the driver (the port goes back to ESP-IDF's console). */
 void xip_serial_stop(void);
-/* Write text; returns the bytes taken, or a negative XIP_ERR_*. */
+/* Write text; returns the bytes taken, or a negative XIP_ERR_*. The runtime's log calls use this outside the codec. */
 int xip_serial_write(const void *data, size_t len);
 
-/* The serial line carries ports (include/xip.h, XIP_PORT_*). By default it is what the console uses: text lines are frames for
- * XIP_PORT_CONSOLE and a frame sent to a port is written as text. An application can install a codec that does more (the Rust runtime's
- * PPP framing: records that carry their port in the first byte, text lines still for the console). `on_bytes` gets every chunk the driver
- * reads (reader task) and cuts frames with xip_serial_rx_begin / commit; `on_reset` drops a partial frame when the input was flushed;
- * `tx` writes one frame for a port. */
+/* The framing of the serial line. `on_bytes` gets every chunk the driver reads (reader task) and
+ * cuts records with xip_serial_rx_begin / commit; `on_reset` drops a partial record when the
+ * input was flushed; `tx` writes one frame for a port. An application can install its own codec
+ * (the runtime installs its PPP codec at start; a product may frame differently, e.g. its own
+ * records lane). */
 typedef struct {
     void (*on_bytes)(const uint8_t *data, size_t len);
     void (*on_reset)(void);
     int (*tx)(uint32_t port, const uint8_t *data, size_t len);
 } xip_serial_codec_t;
 void xip_serial_set_codec(const xip_serial_codec_t *codec);
-/* Write one frame for `port` with the codec, or as plain text without one. */
+/* Write one frame for `port` through the codec (the bytes on the wire, framed). */
 int xip_serial_write_frame(uint32_t port, const void *data, size_t len);
-/* Receive a frame for `port` without a copy: begin returns 0 and a pool packet to fill (capacity XIP_PKT_MAX), 1 when no module has the port
- * (skip the frame), or an error (XIP_ERR_NOMEM: the pool is empty). Then commit (the frame is `len` bytes) or abort. The token of the frame is its port. */
+/* Receive a frame for `port` without a copy: begin returns 0 and a pool packet to fill
+ * (capacity XIP_PKT_MAX), 1 when no module has the port (skip the frame), or an error
+ * (XIP_ERR_NOMEM: the pool is empty). Then commit (the frame is `len` bytes) or abort. The token
+ * of the frame is its port. */
 int xip_serial_rx_begin(uint32_t port, xip_link_rx_buf *buf);
 void xip_serial_rx_commit(uint32_t port, const xip_link_rx_buf *buf, size_t len);
 void xip_serial_rx_abort(const xip_link_rx_buf *buf);

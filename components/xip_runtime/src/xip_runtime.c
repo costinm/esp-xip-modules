@@ -49,6 +49,8 @@ static void serial_release(struct xip_instance *in);
 static int h_tcp_accept(void *u, uint16_t port, uint32_t mode, int32_t c, int32_t m, uint32_t *handle);
 static xip_pool *pool_get(void);
 static void drop_slot(int slot);
+static bool link_drop_pending(int slot);
+static void wake_reader_waiters(void);
 static uint32_t now_us32(void);
 static void link_fanout(uint32_t addr, uint32_t port, int slot, uint16_t start, uint16_t len, uint64_t source, int32_t signal, uint32_t time_us);
 static struct xip_instance *by_component(int component, const struct xip_instance *except);
@@ -278,40 +280,29 @@ static int h_alarm_cancel(void *user, int alarm)
 /* ---- ports: virtual, numbered, and not tied to a link or an encoding ----
  * A module's manifest names a port (key 9); the runtime binds it when the module is created, and the module only handles calls. Any link
  * can deliver frames to a port, and the frame arrives with `from` = the link and `id` = the token of the far end, which the module answers
- * to as for any link frame. Datagram ports are packets and messages: the serial line serves them (text lines for the console port; with a codec,
- * records that carry their port), UDP will. Stream ports (the manifest's second setting) are streams the module reads with socket_read: TCP, QUIC
+ * to as for any link frame. Datagram ports are packets and messages: the serial line serves them (PPP records that carry their port), UDP will. Stream ports (the manifest's second setting) are streams the module reads with socket_read: TCP, QUIC
  * streams later. The serial driver runs while a module has the console port, and is released in the background when it ends. */
 #define XIP_PORTS_MAX 8
 static struct { uint32_t port; int component; } ports[XIP_PORTS_MAX];
 static int serial_link = -1;
 
-static void serial_close_task(void *arg)
-{
-    (void)arg;
-    xip_serial_stop();
-    if (serial_link >= 0) (void)xip_link_native_set_state(serial_link, XIP_LINK_DOWN, 0);
-    vTaskDelete(NULL);
-}
-
 static void serial_release(struct xip_instance *in)
 {
-    uint32_t released[XIP_PORTS_MAX];
-    unsigned n = 0;
+    /* the serial stays: it serves every module's port records, not only the one that bound it */
     portENTER_CRITICAL(&registry_lock);
     for (int i = 0; i < XIP_PORTS_MAX; i++)
-        if (ports[i].port && ports[i].component == in->component) { released[n++] = ports[i].port; ports[i].port = 0; }
+        if (ports[i].port == in->port && ports[i].component == in->component)
+            memset(&ports[i], 0, sizeof(ports[i]));
     portEXIT_CRITICAL(&registry_lock);
-    for (unsigned k = 0; k < n; k++) {
-        if (released[k] != XIP_PORT_CONSOLE) continue;
-        if (xTaskCreate(serial_close_task, "xip_serial_close", 3072, NULL, 4, NULL) != pdPASS) ESP_LOGE(TAG, "serial not closed");
-    }
 }
 
 /* The far end of the serial link is a port: the token of a frame is the port it came to, and a frame sent to it goes out as that port's. */
 static int serial_tx(void *ctx, uint64_t dest, const xip_link_packet *pkt)
 {
     (void)ctx;
-    xip_serial_write_frame(dest ? (uint32_t)dest : XIP_PORT_CONSOLE, pkt->data, pkt->len);
+    /* written synchronously: DONE returns the packet to its sender or the pool. A failed write is an error, as for every link: the
+     * runtime returns the packet to the pool and counts the drop; the next record starts with its own flag and is fine. */
+    if (xip_serial_write_frame(dest ? (uint32_t)dest : XIP_PORT_CONSOLE, pkt->data, pkt->len) != 0) return XIP_ERR_IO;
     return XIP_LINK_TX_DONE;
 }
 
@@ -351,40 +342,23 @@ int xip_serial_rx_begin(uint32_t port, xip_link_rx_buf *buf) { return xip_port_r
 void xip_serial_rx_commit(uint32_t port, const xip_link_rx_buf *buf, size_t len) { xip_port_rx_commit(serial_link, port, buf, len, port); }
 void xip_serial_rx_abort(const xip_link_rx_buf *buf) { xip_port_rx_abort(buf); }
 
-/* A text line arrived (serial task, the default decoder): a frame for the console port. One copy of at most XIP_LINE_MAX bytes: the line is
- * edited in a scratch buffer, because a person types slowly and a pool packet should not be held between keys. */
-static void on_serial_line(void *ctx, char *line, size_t len)
-{
-    (void)ctx;
-    xip_link_rx_buf b;
-    if (xip_port_rx_begin(XIP_PORT_CONSOLE, &b) != XIP_OK) return;
-    if (len > b.capacity) { xip_port_rx_abort(&b); return; }
-    memcpy(b.data, line, len);
-    xip_serial_rx_commit(XIP_PORT_CONSOLE, &b, len);
-}
-
 static int port_bind(struct xip_instance *in)
 {
     if (!in->component) return XIP_ERR_ARG;
     int rc = XIP_OK;
     portENTER_CRITICAL(&registry_lock);
     int free_at = -1;
+    bool already_bound = false;
     for (int i = 0; i < XIP_PORTS_MAX; i++) {
         if (ports[i].port == in->port && ports[i].component != in->component) rc = XIP_ERR_BUSY;
+        if (ports[i].port == in->port && ports[i].component == in->component) already_bound = true;
         if (!ports[i].port && free_at < 0) free_at = i;
     }
-    if (!rc && free_at < 0) rc = XIP_ERR_NOMEM;
-    if (!rc) { ports[free_at].port = in->port; ports[free_at].component = in->component; }
+    if (!rc && !already_bound && free_at < 0) rc = XIP_ERR_NOMEM;
+    if (!rc && !already_bound) { ports[free_at].port = in->port; ports[free_at].component = in->component; }
     portEXIT_CRITICAL(&registry_lock);
     if (rc) return rc;
-    if (in->port != XIP_PORT_CONSOLE) return XIP_OK;
-    if (serial_link < 0) {
-        serial_link = xip_link_native_register("serial", 256, XIP_LINK_FLAG_STREAM, serial_tx, NULL);
-        if (serial_link < 0) return serial_link;
-    }
-    rc = xip_serial_start(on_serial_line, NULL);
-    if (rc && rc != XIP_ERR_BUSY) return rc;
-    (void)xip_link_native_set_state(serial_link, XIP_LINK_UP, 0);
+    /* the serial link was registered at xip_host_init: binding a port only routes records to it */
     return XIP_OK;
 }
 
@@ -483,6 +457,9 @@ static void *h_mem_alloc(void *user, size_t size)
 static int h_mem_free(void *user, void *ptr) { return xip_mem_free(&I(user)->mem, ptr) == 0 ? XIP_OK : XIP_ERR_ARG; }
 
 /* ---- packets (include/xip.h, PKT): the C pool, and what each module holds ---- */
+
+// TODO: move to xip_pool.c
+
 static xip_pool *pool;
 static SemaphoreHandle_t pool_lock;
 
@@ -514,7 +491,15 @@ static xip_pool *pool_get(void)
 
 #define PKT_TAIL (XIP_PKT_SLOT_MIN - XIP_PKT_HEADROOM - XIP_PKT_MAX)
 
-static void drop_slot(int slot) { xip_pool_release(pool, slot); }
+static void drop_slot(int slot)
+{
+    /* Dropping a provider's sole TX lease is an aborted transmission, not an
+     * orphaned completion record or a second runtime-owned packet reference. */
+    if (xip_pool_refs(pool, slot) == 1 && link_drop_pending(slot)) return;
+    const bool shared = xip_pool_refs(pool, slot) > 1;
+    xip_pool_release(pool, slot);
+    if (shared && xip_pool_refs(pool, slot) == 1) wake_reader_waiters();
+}
 
 static int h_pkt_alloc(void *user, uint32_t *out)
 {
@@ -684,6 +669,7 @@ typedef struct {
     bool used;
     char name[16];
     uint8_t provider;                       /* XIP_LINK_NONE / NATIVE / MODULE */
+    bool wait_readers;                      /* a TX lease is waiting for read borrows to end */
     int owner;                              /* component of the providing module */
     int tx_component, tx_method;            /* where a module provider receives what is sent to the link */
     xip_link_tx_fn tx;                      /* a native provider */
@@ -698,7 +684,8 @@ typedef struct {
 } link_t;
 static link_t links[XIP_LINKS_MAX];
 
-/* A frame sent with a completion wanted: the packet reference the runtime keeps until the provider is done. */
+/* TX return metadata only. The native driver or module provider holds the sole
+ * lease until completion; this table never owns another reference. */
 static struct {
     bool used;
     uint32_t addr;
@@ -806,11 +793,31 @@ static void link_event(uint32_t addr, uint32_t kind, int32_t value, uint64_t id)
     }
 }
 
+/* READY is a retry hint: a released read borrow may unblock a held TX lease.
+ * Marking wait_readers and examining refs in link_tx use this same lock, so a
+ * release racing TX admission cannot lose its wake-up. */
+static void wake_reader_waiters(void)
+{
+    uint32_t wake[XIP_LINKS_MAX]; unsigned n = 0;
+    portENTER_CRITICAL(&registry_lock);
+    for (unsigned i = 0; i < XIP_LINKS_MAX; i++) {
+        link_t *l = &links[i];
+        if (l->used && l->provider != XIP_LINK_NONE && l->wait_readers) {
+            l->wait_readers = false; wake[n++] = link_addr(l);
+        }
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    for (unsigned i = 0; i < n; i++) link_event(wake[i], XIP_LINK_EVENT_READY, 0, 0);
+}
+
 /* ---- transmit: the sending side of a link ---- */
 static bool pending_add(uint32_t addr, int slot, uint16_t start, uint16_t len, int sender, int component, int method, uint64_t token)
 {
     bool ok = false;
     portENTER_CRITICAL(&registry_lock);
+    for (int i = 0; i < XIP_TX_PENDING; i++) {
+        if (pending[i].used && pending[i].slot == slot) { portEXIT_CRITICAL(&registry_lock); return false; }
+    }
     for (int i = 0; i < XIP_TX_PENDING && !ok; i++) {
         if (pending[i].used) continue;
         pending[i].used = true; pending[i].addr = addr; pending[i].slot = slot; pending[i].start = start; pending[i].len = len;
@@ -836,14 +843,25 @@ static bool pending_take(int slot, typeof(pending[0]) *out)
 }
 
 /* The provider is done with the frame in `slot`: the reference the runtime kept goes back to the sender (TX_DONE) or is released. */
+static void link_return(int slot, const typeof(pending[0]) *p, int outcome)
+{
+    struct xip_instance *t = by_component(p->sender, NULL);
+    const uint32_t elapsed = (uint32_t)(esp_timer_get_time() - p->t0_us);
+    if (!t || deliver(t, slot, p->start, p->len, p->component, p->method, p->addr, p->token, outcome,
+                      XIP_CALL_LINK | XIP_CALL_LINK_EVENT | (XIP_LINK_EVENT_TX_DONE << 8), elapsed)) drop_slot(slot);
+}
 static void link_complete(int slot, int outcome)
 {
     typeof(pending[0]) p;
     if (!pending_take(slot, &p)) { drop_slot(slot); return; }
-    struct xip_instance *t = by_component(p.sender, NULL);
-    const uint32_t elapsed = (uint32_t)(esp_timer_get_time() - p.t0_us);
-    if (!t || deliver(t, slot, p.start, p.len, p.component, p.method, p.addr, p.token, outcome,
-                      XIP_CALL_LINK | XIP_CALL_LINK_EVENT | (XIP_LINK_EVENT_TX_DONE << 8), elapsed)) drop_slot(slot);
+    link_return(slot, &p, outcome);
+}
+static bool link_drop_pending(int slot)
+{
+    typeof(pending[0]) p;
+    if (!pending_take(slot, &p)) return false;
+    link_return(slot, &p, XIP_ERR_IO);
+    return true;
 }
 static void link_tx_returned(uint32_t from, int slot)
 {
@@ -863,11 +881,19 @@ static int link_tx(uint32_t dst, int slot, uint16_t start, uint16_t len, uint64_
     if (l) { provider = l->provider; owner = l->owner; tx_component = l->tx_component; tx_method = l->tx_method; tx = l->tx; tx_ctx = l->tx_ctx; }
     portEXIT_CRITICAL(&registry_lock);
     if (provider == XIP_LINK_NONE) return XIP_ERR_NOTFOUND;
+    /* Mutable TX cannot overlap a shared receive/fan-out borrow. BUSY retains
+     * the exact lease; retry after readers release it. No implicit clone. */
+    portENTER_CRITICAL(&registry_lock);
+    const bool shared = xip_pool_refs(pool, slot) != 1;
+    l = link_at_locked(dst);
+    if (shared && l) l->wait_readers = true;
+    portEXIT_CRITICAL(&registry_lock);
+    if (shared) return XIP_ERR_BUSY;
     const bool completion = component || method;
     int rc;
     if (completion && !pending_add(dst, slot, start, len, sender, component, method, token)) return XIP_ERR_BUSY;
     if (provider == XIP_LINK_NATIVE && tx) {
-        xip_link_packet pk = {.data = xip_pool_slot(pool, slot) + start, .len = len, .headroom = start, .slot = slot};
+        xip_link_packet pk = {.data = xip_pool_slot(pool, slot) + start, .len = len, .headroom = start, .slot = slot, .pool = pool};
         rc = tx(tx_ctx, token, &pk);
         if (rc < 0) {
             if (completion) { typeof(pending[0]) gone; (void)pending_take(slot, &gone); }
@@ -877,14 +903,10 @@ static int link_tx(uint32_t dst, int slot, uint16_t start, uint16_t len, uint64_
         }
     } else if (provider == XIP_LINK_MODULE) {
         struct xip_instance *t = by_component(owner, NULL);
-        xip_pool_retain(pool, slot);                                     /* the provider's inbox gets its own reference */
         rc = t ? deliver(t, slot, start, len, tx_component, tx_method, sender, token, 0, XIP_CALL_LINK, 0) : XIP_ERR_NOTFOUND;
-        if (rc) {
-            drop_slot(slot);
-            if (completion) { typeof(pending[0]) gone; (void)pending_take(slot, &gone); }
-        } else if (!completion) {
-            drop_slot(slot);                                             /* nothing to give back: the provider's reference is the last */
-        }
+        if (rc && completion) { typeof(pending[0]) gone; (void)pending_take(slot, &gone); }
+        /* Success moves the sole reference into the provider's inbox. Pending
+         * completion is metadata only; it owns no second alias of the packet. */
     } else {
         rc = XIP_ERR_UNSUPPORTED;
         if (completion) { typeof(pending[0]) gone; (void)pending_take(slot, &gone); }
@@ -913,9 +935,12 @@ static int link_send(struct xip_instance *in, uint32_t pkt, size_t len, uint32_t
         in->stats.pkt_dropped++;
         return XIP_ERR_SIZE;
     }
+    /* Move out of the sender's table before lending TX to the provider. On
+     * BUSY restore the same entry/generation, never mint a replacement handle.
+     * This table is used only by the serialized module worker. */
+    xip_held_entry moved = xip_held_take(&in->held, pkt);
     int rc = link_tx(dst, slot, start, (uint16_t)len, token, in->component, component, method);
-    if (rc == XIP_ERR_BUSY) return rc;                                   /* kept: try another link, or later */
-    (void)xip_held_take(&in->held, pkt);
+    if (rc == XIP_ERR_BUSY) { *held = moved; return rc; }
     if (rc == 0) { in->stats.pkt_sent++; return 0; }
     drop_slot(slot);
     in->stats.pkt_dropped++;
@@ -934,8 +959,7 @@ static int c_link_tx_done(void *ctx, uint32_t addr, uint32_t pkt, int outcome)
     if (!mine) return XIP_ERR_ARG;
     xip_held_entry e = xip_held_take(&in->held, pkt);
     if (e.slot < 0) return XIP_ERR_ARG;
-    drop_slot(e.slot);                                                   /* the provider's own reference */
-    link_complete(e.slot, outcome);                                      /* the runtime's: back to the sender, or released */
+    link_complete(e.slot, outcome);                                      /* move the sole reference back, or release it */
     return XIP_OK;
 }
 
@@ -989,13 +1013,20 @@ static bool link_route(uint32_t addr, int slot, uint16_t start, uint16_t len)
     portEXIT_CRITICAL(&registry_lock);
     if (!hit) return false;
     const bool copy = flags & XIP_ROUTE_COPY;
-    if (copy) xip_pool_retain(pool, slot);                               /* one reference for the forward, one for the subscribers */
-    const int rc = link_tx(egress, slot, start, len, token, 0, 0, 0);
+    int forwarded = slot;
+    if (copy) {
+        /* COPY is an explicit caller-requested clone for observers plus egress,
+         * not a driver's defensive copy of an allegedly owned packet. Each
+         * resulting lease has one owner and separate mutable headroom. */
+        forwarded = xip_pool_acquire_cached(pool, 0);
+        if (forwarded >= 0) memcpy(xip_pool_slot(pool, forwarded) + start, xip_pool_slot(pool, slot) + start, len);
+    }
+    const int rc = forwarded < 0 ? XIP_ERR_NOMEM : link_tx(egress, forwarded, start, len, token, 0, 0, 0);
     portENTER_CRITICAL(&registry_lock);
     link_t *l2 = link_at_locked(addr);
     if (l2) { if (rc == 0) l2->forwarded++; else l2->dropped++; }
     portEXIT_CRITICAL(&registry_lock);
-    if (rc) drop_slot(slot);                                             /* the forward's reference: nobody took it */
+    if (rc && forwarded >= 0) drop_slot(forwarded);                       /* the forward's lease: nobody took it */
     return !copy;
 }
 
@@ -1148,17 +1179,10 @@ static void links_release(struct xip_instance *in)
         if (l->provider == XIP_LINK_NONE && !l->nsubs) l->used = false;
     }
     portEXIT_CRITICAL(&registry_lock);
-    for (unsigned k = 0; k < ndown; k++) {
-        for (;;) {                                                       /* what it was transmitting for senders */
-            int slot = -1;
-            portENTER_CRITICAL(&registry_lock);
-            for (int i = 0; i < XIP_TX_PENDING && slot < 0; i++) if (pending[i].used && pending[i].addr == down[k]) slot = pending[i].slot;
-            portEXIT_CRITICAL(&registry_lock);
-            if (slot < 0) break;
-            link_complete(slot, XIP_ERR_IO);
-        }
-        link_event(down[k], XIP_LINK_EVENT_STATE, XIP_LINK_DOWN, 0);
-    }
+    /* packets_release moves/frees each provider-held or queued lease once and
+     * reports pending TX as IO failure through drop_slot. Do not return a lease
+     * here while the provider's held table/inbox still owns it. */
+    for (unsigned k = 0; k < ndown; k++) link_event(down[k], XIP_LINK_EVENT_STATE, XIP_LINK_DOWN, 0);
 }
 
 /* The runtime's own transports: a driver registers a link and hands over what it receives. */
@@ -1189,7 +1213,7 @@ void xip_link_native_tx_done(int addr, int slot, int outcome) { (void)addr; link
 /* Receive without a copy: the driver parses into a pool packet, the way DMesh's receive_now_with does. begin returns 0 and a
  * packet to fill (capacity XIP_PKT_MAX at the payload window), 1 when nobody listens (skip the frame), or an error (XIP_ERR_NOMEM:
  * the pool is empty, counted). Then commit (the frame is `len` bytes; stamped now) or abort. */
-int xip_link_native_rx_begin(int addr, xip_link_rx_buf *buf)
+static int native_rx_begin(int addr, xip_link_rx_buf *buf, bool cached)
 {
     xip_pool *p = pool_get();
     unsigned subs = 0;
@@ -1200,7 +1224,7 @@ int xip_link_native_rx_begin(int addr, xip_link_rx_buf *buf)
     portEXIT_CRITICAL(&registry_lock);
     if (!l || !buf || !p) return XIP_ERR_ARG;
     if (!subs && !routed) return 1;
-    int slot = xip_pool_acquire(p, 0);
+    int slot = cached ? xip_pool_acquire_cached(p, 0) : xip_pool_acquire(p, 0);
     if (slot < 0) {
         portENTER_CRITICAL(&registry_lock);
         l = link_at_locked((uint32_t)addr);
@@ -1213,6 +1237,14 @@ int xip_link_native_rx_begin(int addr, xip_link_rx_buf *buf)
     buf->capacity = XIP_PKT_MAX;
     return XIP_OK;
 }
+
+void xip_link_native_rx_prepare(void)
+{
+    xip_pool *p = pool_get();
+    if (p) xip_pool_prepare_rx(p);
+}
+int xip_link_native_rx_begin(int addr, xip_link_rx_buf *buf) { return native_rx_begin(addr, buf, false); }
+int xip_link_native_rx_begin_cached(int addr, xip_link_rx_buf *buf) { return native_rx_begin(addr, buf, true); }
 
 void xip_link_native_rx_commit(int addr, const xip_link_rx_buf *buf, size_t len, uint64_t source, int32_t signal)
 {
@@ -1449,9 +1481,10 @@ static void handle_packets(struct xip_instance *in)
         xip_held_entry *e = xip_held_get(&in->held, h);
         if (e && e->state == XIP_HELD_BORROWED) {         /* not kept, not sent on */
             xip_held_take(&in->held, h);
-            drop_slot(slot);
-            /* a frame handed to a provider that did not keep it is sent, as far as the sender is concerned */
+            /* A provider returns the sole TX lease through completion; other
+             * borrowed calls simply release their receive reference. */
             if ((lflags & XIP_CALL_LINK) && !(lflags & XIP_CALL_LINK_EVENT) && from < XIP_ADDR_LINK) link_tx_returned(from, slot);
+            else drop_slot(slot);
         }
         if (settle(in, rc)) return;
     }
@@ -1553,6 +1586,22 @@ esp_err_t xip_host_init(const xip_host_hooks_t *h)
         return ESP_ERR_NO_MEM;
     xip_periph_init();
     inited = true;
+    /* the wire: records on, from the very first byte. Without it there is no
+     * console and no module traffic, so the host does not come up at all. */
+    if (xip_serial_start()) {
+        inited = false;
+        ESP_LOGE(TAG, "the serial did not start");
+        return ESP_FAIL;
+    }
+    /* the link the records travel on: registered with the wire, not when a module binds the console
+     * port — a record of any port a module holds must reach it, with or without a console. */
+    serial_link = xip_link_native_register("serial", 256, XIP_LINK_FLAG_STREAM, serial_tx, NULL);
+    if (serial_link < 0) {
+        inited = false;
+        ESP_LOGE(TAG, "the serial link did not register");
+        return ESP_FAIL;
+    }
+    (void)xip_link_native_set_state(serial_link, XIP_LINK_UP, 0);
     xip_wifi_intent initial = {.size = sizeof(initial)}; uint32_t generation;
     if (hooks.wifi_get && !hooks.wifi_get(&initial, &generation)) xip_host_wifi_changed(generation);
     return ESP_OK;

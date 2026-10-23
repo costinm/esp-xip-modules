@@ -1,4 +1,20 @@
-//! The loader (C: `components/xip_runtime`, `xip_loader`): it scans the module partition for images; there is no slot table.
+//! Rust bindings to the loader (C: `components/xip_runtime`, `xip_loader`): it scans the module partition for images; there is no slot table.
+
+use xip_abi::{WifiIntent, WifiState, WifiTuning};
+
+/// An application's own implementation of the Wi-Fi components, called from the host worker and from module handlers
+/// (never blocking). The signatures are those of the C host's hooks: `set`/`get` carry the generation, `state` and `scan` may be
+/// left out when the application reports neither.
+pub struct WifiOwner {
+    pub set: unsafe extern "C" fn(*const WifiIntent, *mut u32) -> i32,
+    pub get: unsafe extern "C" fn(*mut WifiIntent, *mut u32) -> i32,
+    pub tuning_set: unsafe extern "C" fn(*const WifiTuning) -> i32,
+    pub tuning_get: unsafe extern "C" fn(*mut WifiTuning) -> i32,
+    pub state: Option<unsafe extern "C" fn(*mut WifiState) -> i32>,
+    pub scan: Option<unsafe extern "C" fn(*mut u8, usize) -> i32>,
+    /// Promiscuous receive on/off (`Wifi::monitor`); `None`: `ERR_UNSUPPORTED`.
+    pub monitor: Option<unsafe extern "C" fn(*const xip_abi::WifiMonitor) -> i32>,
+}
 
 /// `xip_slot_status_t`.
 #[repr(C)]
@@ -32,6 +48,8 @@ pub struct PoolOps {
     pub slot_size: unsafe extern "C" fn(*mut core::ffi::c_void) -> u16,
     pub slots: unsafe extern "C" fn(*mut core::ffi::c_void) -> u16,
     pub available: unsafe extern "C" fn(*mut core::ffi::c_void) -> u16,
+    /// Optional callback-safe admission; must not allocate storage.
+    pub acquire_cached: Option<unsafe extern "C" fn(*mut core::ffi::c_void, u16) -> i32>,
 }
 unsafe impl Sync for PoolOps {}
 
@@ -47,7 +65,7 @@ pub struct Features {
     pub pool: Option<&'static PoolOps>,
     /// The application's own Wi-Fi owner (DMesh drives the radio itself): its functions answer the `wifi` and `wifi-tuning`
     /// components. `None`: the host's simple station owner.
-    pub wifi: Option<&'static crate::WifiOwner>,
+    pub wifi: Option<&'static WifiOwner>,
 }
 
 #[cfg(target_os = "espidf")]
@@ -86,6 +104,7 @@ mod imp {
 
     extern "C" {
         fn xip_host_init_simple(ext: *const HostExt) -> i32;
+        fn xip_wifi_install_simple(ext: *mut HostExt);
         fn xip_loader_init(config: *const LoaderConfig) -> i32;
         fn xip_loader_autostart() -> i32;
         fn xip_loader_find(name: *const u8) -> i32;
@@ -98,35 +117,18 @@ mod imp {
         fn xip_loader_modules_info(out: *mut u8, capacity: usize) -> i32;
         fn xip_loader_start_named(name: *const u8, name_len: usize, request: *const u8, request_len: usize) -> i32;
         fn xip_loader_stop_named(name: *const u8, name_len: usize) -> i32;
+        fn xip_loader_manifest(slot: i32, out: *mut u8, capacity: usize) -> i32;
         fn xip_loader_manifest_named(name: *const u8, name_len: usize, out: *mut u8, capacity: usize) -> i32;
     }
 
     pub fn init(partition: &'static str, features: Features, on_event: Option<EventHandler>) -> i32 {
         debug_assert!(partition.ends_with('\0'));
-        crate::module_poll_esp::install();
-        extern "C" {
-            fn xip_power_set_radio(radio: *const PowerRadio);
-        }
-        /// `xip_power_radio`: the radio steps around a light sleep.
-        #[repr(C)]
-        struct PowerRadio {
-            suspend: Option<unsafe extern "C" fn() -> bool>,
-            resume: Option<unsafe extern "C" fn()>,
-        }
-        static POWER_RADIO: PowerRadio = PowerRadio { suspend: Some(crate::wifi::power_suspend), resume: Some(crate::wifi::power_resume) };
-        if features.wifi.is_none() {
-            // an application that owns the radio sleeps it itself; the built-in owner gives the sleep owner its steps
-            unsafe { xip_power_set_radio(&POWER_RADIO) };
-            // the boot credentials (`nv` sta_ssid / sec:sta) are the wanted state of the built-in owner
-            let (mut boot, _) = crate::wifi::wanted();
-            if crate::settings::load_sta(&mut boot).is_ok() { crate::wifi::set_boot(boot); }
-        }
         let mut ext = HostExt {
-            wifi_set: Some(crate::wifi::set), wifi_get: Some(crate::wifi::get),
-            wifi_state: Some(crate::wifi_esp::abi_state), wifi_scan: Some(crate::wifi_esp::abi_scan),
-            wifi_reconcile: Some(crate::wifi::reconcile), wifi_monitor: Some(crate::promisc_esp::abi_monitor),
-            wifi_tuning_set: Some(crate::wifi::tuning_set), wifi_tuning_get: Some(crate::wifi::tuning_get),
-            nv: features.nv.or(Some(crate::settings::nv_hook)),
+            wifi_set: None, wifi_get: None,
+            wifi_state: None, wifi_scan: None,
+            wifi_reconcile: None, wifi_monitor: None,
+            wifi_tuning_set: None, wifi_tuning_get: None,
+            nv: features.nv,
             pool: features.pool.map_or(core::ptr::null(), |p| p as *const PoolOps),
             modules_info: None, module_start: None, module_stop: None, module_manifest: None, packet: None, inbox_ready: None,
         };
@@ -135,6 +137,8 @@ mod imp {
             ext.wifi_tuning_set = Some(owner.tuning_set); ext.wifi_tuning_get = Some(owner.tuning_get);
             ext.wifi_state = owner.state; ext.wifi_scan = owner.scan; ext.wifi_monitor = owner.monitor;
             ext.wifi_reconcile = None;
+        } else {
+            unsafe { xip_wifi_install_simple(&mut ext) };
         }
         if features.modules {
             ext.modules_info = Some(xip_loader_modules_info);
@@ -144,7 +148,6 @@ mod imp {
         }
         unsafe {
             let _ = on_event;
-            crate::uart_frames::install(); // the serial line carries ports in PPP records, text lines are the console
             let rc = xip_host_init_simple(&ext);
             if rc != 0 {
                 return rc;
@@ -174,6 +177,11 @@ mod imp {
         unsafe { xip_loader_start(slot as i32, request.as_ptr(), request.len()) }
     }
     pub fn stop(slot: usize, timeout_ms: u32) -> i32 { unsafe { xip_loader_stop(slot as i32, timeout_ms) } }
+    pub fn slot_manifest(slot: usize, out: &mut [u8]) -> Result<usize, i32> {
+        let slot = i32::try_from(slot).map_err(|_| xip_abi::ERR_ARG)?;
+        let n = unsafe { xip_loader_manifest(slot, out.as_mut_ptr(), out.len()) };
+        if n >= 0 { Ok(n as usize) } else { Err(n) }
+    }
     pub fn manifest(module: &str, out: &mut [u8]) -> Result<usize, i32> {
         let n = unsafe { xip_loader_manifest_named(module.as_ptr(), module.len(), out.as_mut_ptr(), out.len()) };
         if n >= 0 { Ok(n as usize) } else { Err(n) }
@@ -202,6 +210,7 @@ mod imp {
     pub fn start(_: usize, _: &[u8]) -> i32 { -1 }
     pub fn stop(_: usize, _: u32) -> i32 { -1 }
     pub fn request_raw(_: usize, _: i32, _: i32, _: &[u8], _: &mut [u8]) -> Result<usize, i32> { Err(-1) }
+    pub fn slot_manifest(_: usize, _: &mut [u8]) -> Result<usize, i32> { Err(-1) }
     pub fn manifest(_: &str, _: &mut [u8]) -> Result<usize, i32> { Err(-1) }
 }
 
@@ -228,6 +237,8 @@ pub fn stop_all(timeout_ms: u32) -> bool {
 /// The CBOR manifest of an installed module (`module_manifest`, include/xip.h): what it says about itself, read from flash. The way to learn
 /// a module's method names and ids without compiling its crate in.
 pub fn manifest(module: &str, out: &mut [u8]) -> Result<usize, i32> { imp::manifest(module, out) }
+/// Read an installed slot's manifest without executing or starting its module.
+pub fn slot_manifest(slot: usize, out: &mut [u8]) -> Result<usize, i32> { imp::slot_manifest(slot, out) }
 /// One request to a running module; its answer (bytes the module defines) or the loader's error.
 pub fn request_raw(slot: usize, component: i32, method: i32, data: &[u8], answer: &mut [u8]) -> Result<usize, i32> {
     imp::request_raw(slot, component, method, data, answer)

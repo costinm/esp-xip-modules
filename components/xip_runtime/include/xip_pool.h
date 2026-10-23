@@ -30,6 +30,8 @@ typedef struct {
     uint16_t (*slot_size)(void *ctx);                   /* bytes; at least XIP_PKT_SLOT_MIN */
     uint16_t (*slots)(void *ctx);                       /* the table size */
     uint16_t (*available)(void *ctx);
+    /* Optional: must never allocate storage; -1 means drop when none is ready. */
+    int (*acquire_cached)(void *ctx, uint16_t reserve);
 } xip_pool_ops;
 
 /* A pool of up to `slots` slots of `slot_size` bytes (at least XIP_PKT_SLOT_MIN for the packets of the ABI); no storage yet.
@@ -48,6 +50,10 @@ uint16_t xip_pool_allocated(const xip_pool *pool);
 
 /* A free slot with one reference, or -1 (none free beyond `reserve`, or no memory for its storage). */
 int xip_pool_acquire(xip_pool *pool, uint16_t reserve);
+/* Callback-safe admission: never malloc; external pools must supply acquire_cached. */
+int xip_pool_acquire_cached(xip_pool *pool, uint16_t reserve);
+/* Owner-side preparation: warm up to two retained RX buffers, within keep policy. */
+void xip_pool_prepare_rx(xip_pool *pool);
 void xip_pool_retain(xip_pool *pool, int slot);
 /* The last release frees the slot (and its storage, if more than `keep` idle slots have some). */
 void xip_pool_release(xip_pool *pool, int slot);

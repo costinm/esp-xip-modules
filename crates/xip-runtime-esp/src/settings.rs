@@ -1,6 +1,6 @@
 //! Rust access to the host settings behind the module ABI. ESP-IDF calls are
 //! confined here; drivers use slices and typed values.
-use core::ffi::{CStr, c_char};
+use core::ffi::CStr;
 
 pub struct Namespace(esp_idf_sys::nvs_handle_t);
 impl Namespace {
@@ -110,26 +110,4 @@ pub fn nv(key: &[u8], value: Option<&[u8]>, out: &mut [u8]) -> i32 {
         }
     })();
     result.unwrap_or_else(|error| error)
-}
-pub(crate) unsafe extern "C" fn nv_hook(key: *const c_char, key_len: usize, value: *const u8, value_len: usize, out: *mut u8, cap: usize) -> i32 {
-    if key.is_null() || (out.is_null() && cap != 0) { return -1; }
-    let name = unsafe { core::slice::from_raw_parts(key.cast(), key_len) };
-    let value = if value.is_null() { if value_len != 0 { return -1; } None }
-                else { Some(unsafe { core::slice::from_raw_parts(value, value_len) }) };
-    let out = if cap == 0 { &mut [] } else { unsafe { core::slice::from_raw_parts_mut(out, cap) } };
-    nv(name, value, out)
-}
-
-/// The boot credentials (`dmesh/sta_ssid`, `sec/sta`, the keys the console and `nv` write) as a station intent.
-pub fn load_sta(intent: &mut xip_abi::WifiIntent) -> Result<(), i32> {
-    let settings = Namespace::open(c"dmesh", false)?;
-    let secrets = Namespace::open(c"sec", false)?;
-    let mut ssid = [0; 33]; let mut secret = [0; 64];
-    let n = settings.get_text(c"sta_ssid", &mut ssid)?;
-    let m = secrets.get_text(c"sta", &mut secret)?;
-    if !(1..=32).contains(&n) || !(8..=63).contains(&m) { return Err(-1); }
-    intent.sta_ssid = [0; 32]; intent.sta_ssid[..n].copy_from_slice(&ssid[..n]); intent.sta_ssid_len = n as u8;
-    intent.sta_psk = [0; 64]; intent.sta_psk[..m].copy_from_slice(&secret[..m]); intent.sta_psk_len = m as u8;
-    intent.radio = 1; intent.sta = 1;
-    intent.validate()
 }

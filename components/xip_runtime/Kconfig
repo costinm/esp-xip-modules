@@ -1,5 +1,12 @@
 menu "esp-xip-modules host"
 
+    config XIP_ESPNOW_DIAGNOSTICS
+        bool "Detailed ESP-NOW callback diagnostics"
+        default n
+        help
+            Allocate per-epoch callback/error counters while NOW is enabled.
+            Normal packet flow counters remain in the link/transport layer.
+
     config XIP_REQUEST_MAX
         int "Largest request a module can receive"
         default 1024
@@ -31,12 +38,12 @@ menu "esp-xip-modules host"
         default 32
 
     config XIP_PKT_SLOTS
-        int "Packets in the host's own pool, at most (1204 bytes each, allocated one by one as modules use them)"
+        int "Packets in the host's own pool, at most (1704 bytes each, allocated one by one as modules use them)"
         default 16
 
     config XIP_PKT_KEEP
         int "Idle packets that keep their storage (the rest go back to the heap when released)"
-        default 2
+        default 4
 
     config XIP_PKT_HEAP_RESERVE
         int "Free heap that must remain after a packet is allocated, bytes"

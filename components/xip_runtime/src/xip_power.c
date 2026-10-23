@@ -61,6 +61,33 @@
 #define PM_MIN_MHZ 80
 #define PM_MAX_MHZ 160
 
+/* BEGIN ACTIVITY WINDOW: monotonic milliseconds, no task/timer allocation. */
+static atomic_uint active_until_ms;
+static uint32_t activity_now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+uint32_t xip_power_active_remaining_ms(void)
+{
+    uint32_t until = atomic_load(&active_until_ms), now = activity_now_ms();
+    int32_t remaining = (int32_t)(until - now);
+    if (until && remaining > 0) return (uint32_t)remaining;
+    unsigned expected = until;
+    (void)atomic_compare_exchange_strong(&active_until_ms, &expected, 0);
+    return 0;
+}
+void xip_power_activate(uint32_t ms)
+{
+    if (!ms) return;
+    if (ms > INT32_MAX) ms = INT32_MAX;
+    uint32_t now = activity_now_ms(), next = now + ms;
+    if (!next) next = 1; /* zero is the inactive sentinel */
+    unsigned current = atomic_load(&active_until_ms);
+    for (;;) {
+        if (current && (int32_t)(current - now) > 0 && (int32_t)(current - next) >= 0) return;
+        if (atomic_compare_exchange_weak(&active_until_ms, &current, next)) return;
+    }
+}
+void xip_power_clear_activity(void) { atomic_store(&active_until_ms, 0); }
+/* END ACTIVITY WINDOW */
+
 uint32_t esp_clk_cpu_freq(void);
 static xip_power_radio radio;
 static atomic_bool busy;
@@ -184,6 +211,7 @@ int xip_power_get_info(xip_power_info *i)
     memset(i, 0, sizeof(*i));
     i->size = size;
     i->state = atomic_load(&state_now);
+    i->active_window = xip_power_active_remaining_ms() != 0;
     i->cycles_left = atomic_load(&left);
     i->wake_cause = atomic_load(&wake_cause);
         i->soft_sleep = atomic_load(&soft_now);       /* how the last sleep was done */

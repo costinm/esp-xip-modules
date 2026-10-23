@@ -87,12 +87,13 @@ pub const ALARM_CONNECTED: u32 = 2;
 pub const ALARM_WINDOW: u32 = 4;
 
 // PKT: Packets: the unit of every message between modules, and between a module and the application. A packet is a fixed buffer from the host's pool with room in front of the payload for whoever frames it next (a network header, an envelope) and behind it for a tag; a module writes only the payload window. The numbers are the contract of every host, whatever its pool (the C pool of this repository, QUIC-lite's pool in a Rust host): see `docs/packets.md`.
+/// Ethernet II + IPv6 + UDP require 62 bytes (66 with one VLAN tag), within this reserve.
 /// Bytes in front of the payload window: 80 for link and relay headers, 13 short header, 3 frame header, 36 tagged-CBOR envelope, rounded up to 16.
 pub const PKT_HEADROOM: u32 = 144;
 /// Largest payload a module can write or send. Larger records are refused with `ERR_SIZE`.
-pub const PKT_MAX: u32 = 1000;
+pub const PKT_MAX: u32 = 1500;
 /// Smallest pool slot that holds `HEADROOM`, `MAX` and a 60-byte tail (AEAD tag, FCS).
-pub const PKT_SLOT_MIN: u32 = 1204;
+pub const PKT_SLOT_MIN: u32 = 1704;
 
 // ADDR: Where a packet is sent. A module is addressed by its component (the slot tag), which is also the `from` of what it sends.
 /// The application (its packet hook). As `from`: the message came from the application, or the sender cannot be answered.
@@ -407,7 +408,7 @@ pub struct Host {
     ///
     /// # Returns
     ///
-    /// `int` — `OK` (the packet is now held, like one from `pkt_alloc`), `ERR_ARG`, `ERR_BUSY` when the module holds its quota.
+    /// `int` — `OK` (the packet lifetime is now held), `ERR_ARG`, `ERR_BUSY` when the module holds its quota. Retained receive references remain read borrows until unique: mutable access and link TX return `ERR_BUSY` while another reader exists; there is no implicit clone.
     ///
     /// # Arguments
     ///
@@ -551,13 +552,15 @@ pub struct Host {
     /// * `out` (`uint8_t *`): Buffer for the value that is read.
     /// * `capacity` (`size_t`): Its size.
     pub nv: Option<unsafe extern "C" fn(user: *mut c_void, key: *const u8, key_len: usize, value: *const u8, value_len: usize, out: *mut u8, capacity: usize) -> core::ffi::c_int>,
-    /// Print where the memory is, to the device log.
+    /// Capture heap diagnostics to the device log or PPP records.
     ///
-    /// `heap_info` says how much is free; this says what is there. The output goes to the **device log** (the port's text output, never
-    /// into a reply), because it is long and for a person. `kind`: 0 the heap regions (size, free, largest block, block counts), 1 every block
+    /// `heap_info` says how much is free; this says what is there. Kinds 0..5 write the device log; kind 6 streams compact CBOR
+    /// records on the native module PPP console port (not the product QUIC wire). `kind`: 0 heap regions (size, free, largest block, block counts), 1 bounded blocks
     /// of the heap (address, size, free or used: the picture of fragmentation), 2 the tasks (name, priority, stack left; needs FreeRTOS
     /// trace facility), 3 start recording who allocates (`CONFIG_HEAP_TRACING_STANDALONE`; slows allocation, for a bench), 4 print what is
-    /// still allocated with the call sites (the owners: this is the one that answers "who holds the RAM"), 5 stop recording.
+    /// still allocated with the configured call-site depth, 5 stop recording, 6 bounded block snapshot over PPP.
+    /// Block descriptors are captured under allocator locks; output happens after unlocking.
+    /// The temporary snapshot buffer is reported in the header and freed after output.
     ///
     /// # Returns
     ///

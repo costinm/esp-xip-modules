@@ -67,6 +67,8 @@ mod wifi;
 pub use wifi::*;
 mod link;
 pub use link::*;
+mod serial;
+pub use serial::*;
 mod power;
 pub use power::*;
 mod hardware;

@@ -15,16 +15,22 @@
 //!
 //! # The intended state
 //!
-//! The radio is **off** or **on**. With the radio on, ESP-NOW is always available; on top of it a module chooses the
-//! station (join a network), the soft AP, both, or neither:
+//! The radio is **off** or **on**. With it on, three switches compose the state: the station (join a network),
+//! the soft AP, and ESP-NOW:
 //!
-//! | `radio` | `sta` | `ap` | Result |
-//! |---:|---:|---:|---|
-//! | 0 | - | - | Radio off. |
-//! | 1 | 0 | 0 | ESP-NOW only. |
-//! | 1 | 1 | 0 | Station + ESP-NOW. |
-//! | 1 | 0 | 1 | Soft AP + ESP-NOW. |
-//! | 1 | 1 | 1 | Soft AP + station + ESP-NOW. |
+//! | `radio` | `sta` | `ap` | `now` | Result |
+//! |---:|---:|---:|---:|---|
+//! | 0 | - | - | - | Radio off. |
+//! | 1 | 0 | 0 | 1 | ESP-NOW only, unassociated (a receiver on the 6.0.2 driver is the next row: `ap` required). |
+//! | 1 | 0 | 1 | 1 | Soft AP + ESP-NOW. |
+//! | 1 | 1 | 0 | 1 | Station + ESP-NOW. |
+//! | 1 | 1 | 1 | 1 | Soft AP + station + ESP-NOW. |
+//! | 1 | 1 | 0 or 1 | 0 | Plain station, no ESP-NOW: the modem power save runs instead of the modem being held awake. |
+//! | 1 | 0 | 1 | 0 | Soft AP only (infrastructure clients, no ESP-NOW). |
+//!
+//! ESP-NOW needs the modem awake, so every state with `now` keeps the power save off; the plain station is the one
+//! on state where the modem sleeps, on the BSS beacon/DTIM schedule instead (ESPNOW.md "Radio states", the same
+//! states in DMesh's transport).
 //!
 //! [`Wifi::set`] replaces the whole intent: there is no merge and no special "off". A module that only wants another
 //! channel reads with `get`, edits the field, and writes it back. Acceptance is not completion: the join happens afterwards
@@ -77,12 +83,20 @@ pub const WIFI_VERSION: u32 = 1;
 pub struct WifiIntent {
     /// `sizeof(xip_wifi_intent)`, set by the caller; lets the struct grow.
     pub size: u32,
-    /// 0: the radio is off, 1: on (ESP-NOW included).
+    /// 0: the radio is off, 1: on.
     pub radio: u8,
     /// 1: join the station network (`sta_ssid`, or `bssid`) while the radio is on.
     pub sta: u8,
-    /// 1: run the soft AP (`ap_ssid`) while the radio is on.
+    /// 1: run the soft AP (`ap_ssid`) while the radio is on. The on states are AP+NOW, STA+NOW and AP+STA+NOW
+    /// (ESPNOW.md "Radio states", the same in DMesh's transport). The AP is a small extra: ESP-NOW already needs
+    /// power save off, the AP adds only its ~512 ms beacon. On the 6.0.2 driver the AP is also **required**: the
+    /// ESP-NOW receive hooks are delivered only with the AP interface up, so an unassociated receiver sets this
+    /// (`sta` 0, `ap` 1: the AP+NOW state).
     pub ap: u8,
+    /// 1: run ESP-NOW while the radio is on (the `espnow` link; it needs the modem awake, so it keeps the power
+    /// save off). 0: no ESP-NOW — joined, the station runs the modem power save instead (beacon/DTIM-anchored);
+    /// with the AP only, a plain infrastructure AP.
+    pub now: u8,
     /// 0: any, else 1..14. Applies to the AP and speeds up a join.
     pub channel: u8,
     /// Join this access point only; all zero: none. Together with `channel` it avoids a scan.
@@ -114,7 +128,7 @@ impl Default for WifiIntent {
     }
 }
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<WifiIntent>() == 212);
+const _: () = assert!(core::mem::size_of::<WifiIntent>() == 216);
 
 impl WifiIntent {
     /// The rules of the component, and nothing else (the same as every host applies): `ERR_ARG` for a name or passphrase of the
@@ -124,7 +138,7 @@ impl WifiIntent {
             let n = n as usize;
             n <= max && n <= s.len() && (n == 0 || n >= min) && !s[..n].contains(&0)
         };
-        if (self.size as usize) < core::mem::size_of::<WifiIntent>() || self.radio > 1 || self.sta > 1 || self.ap > 1 || self.channel > 14 {
+        if (self.size as usize) < core::mem::size_of::<WifiIntent>() || self.radio > 1 || self.sta > 1 || self.ap > 1 || self.now > 1 || self.channel > 14 {
             return Err(crate::ERR_ARG);
         }
         if !text(&self.sta_ssid, self.sta_ssid_len, 32, 1) || !text(&self.ap_ssid, self.ap_ssid_len, 32, 1)
@@ -231,7 +245,9 @@ pub struct Wifi {
     /// `ERR_ARG` for an invalid intent: a name or passphrase of the wrong length, a channel above 14, or `sta` with neither
     /// an SSID nor a BSSID. An identical intent keeps the generation and wakes nobody. Acceptance is not completion: the
     /// host joins afterwards, so read `state`. With the radio on, ESP-NOW is on: with `sta` and `ap` both 0 the radio is
-    /// unassociated on `channel` (6 when 0) and only ESP-NOW runs (the `espnow` link of the `link` component).
+    /// unassociated on `channel` (6 when 0) and only ESP-NOW runs (the `espnow` link of the `link` component); on the 6.0.2
+    /// driver that state sends but does not receive NOW (the hooks are delivered only with the AP up), so an unassociated
+    /// receiver sets `ap` (the AP+NOW state, ESPNOW.md "Radio states").
     pub set: Option<unsafe extern "C" fn(ctx: *mut c_void, intent: *const WifiIntent, generation: *mut u32) -> c_int>,
     /// Read the intended state and its generation (set `intent.size` first). `ERR_SIZE` if `size` is too small.
     pub get: Option<unsafe extern "C" fn(ctx: *mut c_void, intent: *mut WifiIntent, generation: *mut u32) -> c_int>,
@@ -293,8 +309,10 @@ pub struct WifiTuning {
     pub bssid_check: u8,
     /// Raw transmit rate (driver rate code); 0: the driver default. Rust host only.
     pub raw_tx_rate: u8,
+    /// Espressif long-range protocol alongside 11b/g/n. Default: off.
+    pub lr: u8,
     /// Zero.
-    pub reserved: [u8; 2],
+    pub reserved: u8,
     /// Static receive buffers, 2..64 (the `wl` settings give the boot default).
     pub rx_static: u16,
     /// Dynamic receive buffers, 2..128.
@@ -318,7 +336,7 @@ impl WifiTuning {
     pub fn validate(&self) -> Result<(), i32> {
         let ok = |v: u16, lo: u16, hi: u16| v == 0 || (lo..=hi).contains(&v);
         if (self.size as usize) < core::mem::size_of::<WifiTuning>()
-            || [self.ampdu, self.rates_11b, self.raw_rx, self.driver_tx, self.bssid_check].iter().any(|v| *v > TUNE_OFF)
+            || [self.ampdu, self.rates_11b, self.raw_rx, self.driver_tx, self.bssid_check, self.lr].iter().any(|v| *v > TUNE_OFF)
             || !(ok(self.rx_static, 2, 64) && ok(self.rx_dynamic, 2, 128) && ok(self.tx_dynamic, 4, 128) && ok(self.rx_ba, 2, 64)) {
             return Err(crate::ERR_ARG);
         }
@@ -328,7 +346,7 @@ impl WifiTuning {
     pub fn normalized(&self) -> WifiTuning {
         let mut t = *self;
         t.size = core::mem::size_of::<WifiTuning>() as u32;
-        t.reserved = [0; 2];
+        t.reserved = 0;
         t
     }
     /// True when a setting only a host with the raw UDP6 path has (`raw_rx`, `driver_tx`, `raw_tx_rate`) is not left at the default.
@@ -340,7 +358,7 @@ impl PartialEq for WifiTuning {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (self.normalized(), other.normalized());
         a.ampdu == b.ampdu && a.rates_11b == b.rates_11b && a.raw_rx == b.raw_rx && a.driver_tx == b.driver_tx
-            && a.bssid_check == b.bssid_check && a.raw_tx_rate == b.raw_tx_rate && a.rx_static == b.rx_static
+            && a.lr == b.lr && a.bssid_check == b.bssid_check && a.raw_tx_rate == b.raw_tx_rate && a.rx_static == b.rx_static
             && a.rx_dynamic == b.rx_dynamic && a.tx_dynamic == b.tx_dynamic && a.rx_ba == b.rx_ba
     }
 }
@@ -371,7 +389,12 @@ mod tests {
         assert_eq!(i.validate(), Ok(()));
         i.radio = 1; i.sta = 1;
         assert_eq!(i.validate(), Err(crate::ERR_ARG), "sta needs a name or a BSSID");
+        i.now = 2;
+        assert_eq!(i.validate(), Err(crate::ERR_ARG), "now is 0 or 1");
+        i.now = 1;
         i.bssid = [1, 2, 3, 4, 5, 6];
+        assert_eq!(i.validate(), Ok(()));
+        i.now = 0;                     // the plain station: no ESP-NOW, the same name rules
         assert_eq!(i.validate(), Ok(()));
         i.sta_ssid_len = 33;
         assert_eq!(i.validate(), Err(crate::ERR_ARG));
@@ -389,6 +412,9 @@ mod tests {
         let mut b = WifiIntent::default();
         a.reserved = [1, 2];
         assert!(a == b, "reserved is not content");
+        b.now = 1;
+        assert!(a != b, "now is content");
+        b.now = 0;
         b.sta_ssid[0] = b'x'; b.sta_ssid_len = 1;
         assert!(a != b);
     }

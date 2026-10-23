@@ -1,4 +1,4 @@
-/* The wanted Wi-Fi state of the C host (the `wifi` component). Rust applications replace these hooks. */
+/* Shared generic wanted Wi-Fi state. Product applications may replace these hooks. */
 #include <string.h>
 #include "xip_runtime.h"
 #include "freertos/FreeRTOS.h"
@@ -17,7 +17,7 @@ static bool text_ok(const uint8_t *s, size_t n, size_t max, size_t min)
 /* The rules of the component, and nothing else: lengths, channel, and a name to join. */
 static int valid(const xip_wifi_intent *i)
 {
-    if (i->size < sizeof(*i) || i->radio > 1 || i->sta > 1 || i->ap > 1) return XIP_ERR_ARG;
+    if (i->size < sizeof(*i) || i->radio > 1 || i->sta > 1 || i->ap > 1 || i->now > 1) return XIP_ERR_ARG;
     if (i->channel > 14) return XIP_ERR_ARG;
     if (!text_ok(i->sta_ssid, i->sta_ssid_len, 32, 1) || !text_ok(i->ap_ssid, i->ap_ssid_len, 32, 1)) return XIP_ERR_ARG;
     if (!text_ok(i->sta_psk, i->sta_psk_len, 63, 8) || !text_ok(i->ap_psk, i->ap_psk_len, 63, 8)) return XIP_ERR_ARG;
@@ -55,7 +55,7 @@ static int set(const xip_wifi_intent *i, uint32_t *gen)
 static int tuning_valid(const xip_wifi_tuning *t)
 {
     if (t->size < sizeof(*t)) return XIP_ERR_ARG;
-    if (t->ampdu > XIP_TUNE_OFF || t->rates_11b > XIP_TUNE_OFF || t->bssid_check > XIP_TUNE_OFF) return XIP_ERR_ARG;
+    if (t->ampdu > XIP_TUNE_OFF || t->rates_11b > XIP_TUNE_OFF || t->bssid_check > XIP_TUNE_OFF || t->lr > XIP_TUNE_OFF) return XIP_ERR_ARG;
     if (t->raw_rx || t->driver_tx || t->raw_tx_rate) return XIP_ERR_UNSUPPORTED;
     if ((t->rx_static && (t->rx_static < 2 || t->rx_static > 64)) || (t->rx_dynamic && (t->rx_dynamic < 2 || t->rx_dynamic > 128)) ||
         (t->tx_dynamic && (t->tx_dynamic < 4 || t->tx_dynamic > 128)) || (t->rx_ba && (t->rx_ba < 2 || t->rx_ba > 64)))
@@ -71,6 +71,7 @@ static int tuning_get(xip_wifi_tuning *t)
     *t = tuning;
     portEXIT_CRITICAL(&lock);
     /* the switches this host has report their value in force, DMesh's defaults: A-MPDU on, 802.11b rates off, BSSID check off */
+    t->lr = t->lr == XIP_TUNE_ON ? XIP_TUNE_ON : XIP_TUNE_OFF;
     t->ampdu = t->ampdu == XIP_TUNE_OFF ? XIP_TUNE_OFF : XIP_TUNE_ON;
     t->rates_11b = t->rates_11b == XIP_TUNE_ON ? XIP_TUNE_ON : XIP_TUNE_OFF;
     t->bssid_check = t->bssid_check == XIP_TUNE_ON ? XIP_TUNE_ON : XIP_TUNE_OFF;
@@ -80,7 +81,7 @@ static int tuning_get(xip_wifi_tuning *t)
 static int tuning_set(const xip_wifi_tuning *t)
 {
     int rc = t ? tuning_valid(t) : XIP_ERR_ARG; if (rc) return rc;
-    xip_wifi_tuning next = *t; next.size = sizeof(next); memset(next.reserved, 0, sizeof(next.reserved));
+    xip_wifi_tuning next = *t; next.size = sizeof(next); next.reserved = 0;
     uint32_t gen = 0;
     portENTER_CRITICAL(&lock);
     bool changed = memcmp(&tuning, &next, sizeof(next)) != 0;
@@ -109,7 +110,8 @@ void xip_wifi_intent_install(xip_host_hooks_t *h)
                 if (rc == ESP_OK && m >= 9 && m <= sizeof(psk)) {
                     memcpy(desired.sta_ssid, name, n - 1); desired.sta_ssid_len = n - 1;
                     memcpy(desired.sta_psk, psk, m - 1); desired.sta_psk_len = m - 1;
-                    desired.radio = 1; desired.sta = 1;
+                    /* the saved credentials predate the `now` flag: keep the station + ESP-NOW the radio ran with */
+                    desired.radio = 1; desired.sta = 1; desired.now = 1;
                 }
             }
         }

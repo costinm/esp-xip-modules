@@ -15,7 +15,7 @@
 //! writes its own envelope in front without moving the payload (a relay sends the same packet on another link).
 //!
 //! * **Receive.** A subscriber gets every frame as a packet call `(component, method)` it chose in [`Link::open`]: `call.from`
-//!   is the link's address, `call.data` the frame, `call.pkt` its packet (keep it with `pkt_keep` or pass it on with `send`),
+//!   is the link's address, `call.data` the frame, `call.pkt` its packet (use `pkt_keep` before retaining it or sending it to a link),
 //!   `call.id` the source token, `call.value` the signal ([`signal`]), `call.time_us` the receive time (low 32 bits of the
 //!   microsecond clock, taken by the driver, not at delivery). `call.flags` has [`CALL_LINK`], which also says `id` is an
 //!   address and not a request to answer.
