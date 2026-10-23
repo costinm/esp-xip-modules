@@ -260,3 +260,54 @@ fn alarm_periodic_is_rearmed_from_the_schedule() {
 
 #[allow(dead_code)]
 fn _keep(_: *mut c_void) {}
+
+#[test]
+fn now_bench_rejects_truncated_or_corrupt_payloads_and_generates_full_response() {
+    use xip_abi::cbor;
+    let rt = Runtime::default();
+    rt.add_native_link("espnow", PKT_MAX, xip_runtime_host::NativeTx::Done);
+    let m = rt.add_module(module("mod_rtest"), 512).unwrap();
+    m.set_component(2);
+    m.start(b"now listen size=1500 secs=60");
+    rt.run(0);
+    let mut payload = vec![0u8; 1500];
+    payload[..4].copy_from_slice(b"NOWP");
+    payload[4..8].copy_from_slice(&37u32.to_le_bytes());
+    payload[8..12].copy_from_slice(&1500u32.to_le_bytes());
+    for (i, b) in payload.iter_mut().enumerate().skip(12) {
+        *b = (37u32.rotate_left((i % 32) as u32) ^ (i as u32).wrapping_mul(73) ^ ((i as u32) >> 8)) as u8;
+    }
+    assert_eq!(rt.inject_frame("espnow", 0x060504030201, 0, &payload), 0);
+    rt.run(0);
+    let sent = rt.take_link_tx("espnow");
+    assert_eq!(sent.len(), 1);
+    let mut expected = payload.clone(); expected[..4].copy_from_slice(b"NOWQ");
+    assert_eq!(sent[0].1, expected);
+    // Header still declares 1500: truncation cannot be accepted as a shorter packet.
+    assert_eq!(rt.inject_frame("espnow", 0x060504030201, 0, &payload[..1499]), 0);
+    rt.run(0);
+    payload[1499] ^= 1;
+    assert_eq!(rt.inject_frame("espnow", 0x060504030201, 0, &payload), 0);
+    rt.run(0);
+    assert!(rt.take_link_tx("espnow").is_empty());
+    let info = m.request(2, 2, &[0xa0]).unwrap();
+    assert_eq!(cbor::get_int(&info, 7).unwrap(), Some(1));
+    assert_eq!(cbor::get_int(&info, 10).unwrap(), Some(2));
+    assert_eq!(cbor::get_int(&info, 11).unwrap(), Some(1500));
+    m.stop(); rt.run(0);
+    assert_eq!(rt.wifi_intent().0.radio, 0, "restore radio intent on cancellation");
+    let rt = Runtime::default();
+    rt.add_native_link("espnow", PKT_MAX, xip_runtime_host::NativeTx::Done);
+    let m = rt.add_module(module("mod_rtest"), 512).unwrap(); m.set_component(2);
+    m.start(b"now listen rxonly size=1500 secs=60"); rt.run(0);
+    payload[1499] ^= 1;
+    assert_eq!(rt.inject_frame("espnow", 0x060504030201, 0, &payload), 0); rt.run(0);
+    assert!(rt.take_link_tx("espnow").is_empty(), "RX-only must not generate an echo");
+    let info = m.request(2, 2, &[0xa0]).unwrap();
+    assert_eq!(cbor::get_int(&info, 7).unwrap(), Some(1));
+    assert_eq!(cbor::get_int(&info, 9).unwrap(), Some(0));
+    m.stop(); rt.run(0);
+    let bad = rt.add_module(module("mod_rtest"), 512).unwrap();
+    bad.start(format!("now size={}", PKT_MAX + 1).as_bytes()); rt.run(0);
+    assert!(bad.ended() && bad.result() == ERR_SIZE, "normal ABI cap is independent of radio capability");
+}

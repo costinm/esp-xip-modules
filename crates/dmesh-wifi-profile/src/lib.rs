@@ -12,6 +12,10 @@ pub fn to_intent(profile: &TransportProfile) -> WifiIntent {
     i.radio = u8::from(on);
     i.sta = u8::from(on && profile.requested_transport == Some(Sta));
     i.ap = u8::from(on && profile.ap != 0);
+    // DMesh's `now` is 0 = on by default, 1 = on, 2 = off (the raw-UDP6 baseline); the intent carries the on/off bit:
+    // the NOW action path runs while the radio is up unless it is spelled off with no discovery window to run instead
+    // (the same test as the transport's wants_sta_extensions)
+    i.now = u8::from(on && (profile.now != 2 || profile.nan_dw_interval != 0));
     i.channel = profile.sta_channel;
     if profile.sta_bssid_set { i.bssid = profile.sta_bssid; }
     i.sta_ssid_len = profile.ssid_len as u8;
@@ -27,7 +31,7 @@ pub fn to_intent(profile: &TransportProfile) -> WifiIntent {
 
 /// Replace the Wi-Fi part of the profile with an intent; `None` when the intent is not valid.
 pub fn apply_intent(profile: &mut TransportProfile, i: &WifiIntent) -> Option<()> {
-    if (i.size as usize) < core::mem::size_of::<WifiIntent>() || i.radio > 1 || i.sta > 1 || i.ap > 1 { return None; }
+    if (i.size as usize) < core::mem::size_of::<WifiIntent>() || i.radio > 1 || i.sta > 1 || i.ap > 1 || i.now > 1 { return None; }
     let (sn, pn, an, ap) = (i.sta_ssid_len as usize, i.sta_psk_len as usize, i.ap_ssid_len as usize, i.ap_psk_len as usize);
     if sn > 32 || pn > 63 || an > 32 || ap > 63 || (i.channel != 0 && !(1..=14).contains(&i.channel)) { return None; }
     let bssid_set = i.bssid != [0; 6];
@@ -43,6 +47,14 @@ pub fn apply_intent(profile: &mut TransportProfile, i: &WifiIntent) -> Option<()
     p.ap_passphrase = [0; 64]; p.ap_passphrase[..ap].copy_from_slice(&i.ap_psk[..ap]); p.ap_passphrase_len = ap;
     p.sta_channel = i.channel; p.sta_bssid_set = bssid_set; p.sta_bssid = i.bssid;
     p.ap = i.ap;
+    // The intent carries the on/off bit; the profile keeps its spelled value (0 = on by default, 1 = explicit,
+    // 2 = off): a write-back of the same bit keeps the spelling, and off clears the discovery-window interval,
+    // which would otherwise leave the extensions on (wants_sta_extensions)
+    let now_on = i.now == 1;
+    if now_on != (p.now != 2 || p.nan_dw_interval != 0) {
+        p.now = if now_on { 0 } else { 2 };
+        if !now_on { p.nan_dw_interval = 0; }
+    }
     if i.radio == 0 {
         p.requested_transport = None; p.run_requested = false;
     } else {
@@ -95,13 +107,16 @@ mod tests {
     fn the_wifi_intent_round_trips_and_is_validated() {
         let mut p = TransportProfile::new();
         let mut i = WifiIntent::default();
-        i.radio = 1; i.sta = 1; i.ap = 1; i.channel = 6; i.bssid = [1, 2, 3, 4, 5, 6];
+        i.radio = 1; i.sta = 1; i.ap = 1; i.now = 1; i.channel = 6; i.bssid = [1, 2, 3, 4, 5, 6];
         i.sta_ssid[..4].copy_from_slice(b"home"); i.sta_ssid_len = 4;
         i.sta_psk[..8].copy_from_slice(b"password"); i.sta_psk_len = 8;
         assert!(apply_intent(&mut p, &i).is_some());
         let back = to_intent(&p);
-        assert_eq!((back.radio, back.sta, back.ap, back.channel, back.bssid), (1, 1, 1, 6, [1, 2, 3, 4, 5, 6]));
+        assert_eq!((back.radio, back.sta, back.ap, back.now, back.channel, back.bssid), (1, 1, 1, 1, 6, [1, 2, 3, 4, 5, 6]));
         assert_eq!(&back.sta_ssid[..4], b"home");
+        i.now = 2;
+        assert!(apply_intent(&mut p, &i).is_none());    // the flag is 0 or 1
+        i.now = 1;
         i.sta_psk_len = 4;                       // a passphrase of 4 bytes is not valid
         assert!(apply_intent(&mut p, &i).is_none());
         i.sta_psk_len = 0; i.sta_ssid_len = 0; i.bssid = [0; 6];
@@ -111,6 +126,17 @@ mod tests {
         assert_eq!((p.requested_transport, p.run_requested), (Some(TransportKind::Nan), true));
         i.radio = 0;
         assert!(apply_intent(&mut p, &i).is_some() && to_intent(&p).radio == 0 && p.requested_transport.is_none());
+        /* The plain station: the bit off is the profile's now-off spelling, and clears the discovery window,
+         * which would otherwise leave the extensions on; back on takes the default on spelling again. */
+        i.radio = 1; i.sta = 1; i.ap = 0; i.now = 0;
+        i.sta_ssid[..4].copy_from_slice(b"home"); i.sta_ssid_len = 4;
+        assert!(apply_intent(&mut p, &i).is_some());
+        assert_eq!((p.now, p.nan_dw_interval, p.ap), (2, 0, 0));
+        let back = to_intent(&p);
+        assert_eq!((back.radio, back.sta, back.ap, back.now), (1, 1, 0, 0));
+        i.now = 1;
+        assert!(apply_intent(&mut p, &i).is_some());
+        assert_eq!((p.now, p.nan_dw_interval, to_intent(&p).now), (0, 0, 1));
     }
     #[test]
     fn the_wifi_tuning_maps_onto_the_profile() {

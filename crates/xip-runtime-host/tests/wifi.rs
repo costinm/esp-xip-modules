@@ -13,7 +13,7 @@ unsafe extern "C" fn module(host: *const Host, _state: *mut u8, call: *const Cal
     if call.component != HOST_COMPONENT as i32 { return RET_CONTINUE as i32; }
     if call.method == HOST_START as i32 {
         let mut i = WifiIntent::default();
-        i.radio = 1; i.sta = 1; i.ap = 1; i.channel = 11; i.bssid = [1, 2, 3, 4, 5, 6];
+        i.radio = 1; i.sta = 1; i.ap = 1; i.now = 1; i.channel = 11; i.bssid = [1, 2, 3, 4, 5, 6];
         i.sta_ssid[..4].copy_from_slice(b"home"); i.sta_ssid_len = 4;
         i.sta_psk[..8].copy_from_slice(b"password"); i.sta_psk_len = 8;
         let mut generation = 0;
@@ -22,6 +22,8 @@ unsafe extern "C" fn module(host: *const Host, _state: *mut u8, call: *const Cal
         i.channel = 15;
         assert_eq!((wifi.set.unwrap())(h.user, &i, &mut generation), ERR_ARG);
         i.channel = 11; i.sta_psk_len = 3;
+        assert_eq!((wifi.set.unwrap())(h.user, &i, &mut generation), ERR_ARG);
+        i.sta_psk_len = 8; i.now = 2;
         assert_eq!((wifi.set.unwrap())(h.user, &i, &mut generation), ERR_ARG);
     } else if call.method == HOST_WIFI as i32 {
         let g = (call.value as u64).to_le_bytes();
@@ -44,7 +46,7 @@ fn a_module_sets_the_wanted_state_and_every_module_is_told() {
     rt.run(0);
     let (wanted, generation) = rt.wifi_intent();
     assert_eq!(generation, 1);
-    assert_eq!((wanted.radio, wanted.sta, wanted.ap, wanted.channel, wanted.bssid), (1, 1, 1, 11, [1, 2, 3, 4, 5, 6]));
+    assert_eq!((wanted.radio, wanted.sta, wanted.ap, wanted.now, wanted.channel, wanted.bssid), (1, 1, 1, 1, 11, [1, 2, 3, 4, 5, 6]));
     assert_eq!(&wanted.sta_ssid[..4], b"home");
     // both instances got HOST_WIFI with the generation, and the default fixture joined
     for m in [&a, &b] {
@@ -76,8 +78,11 @@ unsafe extern "C" fn tuning_module(host: *const Host, _state: *mut u8, call: *co
     let mut t = WifiTuning::default();
     assert_eq!((tuner.get.unwrap())(h.user, &mut t), 0);
     assert_eq!((t.ampdu, t.rx_static), (TUNE_DEFAULT, 0));
-    t.ampdu = TUNE_OFF; t.rx_static = 12;
+    t.ampdu = TUNE_OFF; t.rx_static = 12; t.lr = TUNE_ON;
     assert_eq!((tuner.set.unwrap())(h.user, &t), 0);
+    t.lr = 3;
+    assert_eq!((tuner.set.unwrap())(h.user, &t), ERR_ARG);
+    t.lr = TUNE_ON;
     t.rx_static = 1;
     assert_eq!((tuner.set.unwrap())(h.user, &t), ERR_ARG);
     t.rx_static = 12; t.ampdu = 3;
@@ -92,5 +97,5 @@ fn a_module_tunes_the_driver_and_the_refused_values_change_nothing() {
     a.start(b"");
     rt.run(0);
     let t = rt.wifi_tuning();
-    assert_eq!((t.ampdu, t.rx_static), (TUNE_OFF, 12));
+    assert_eq!((t.ampdu, t.rx_static, t.lr), (TUNE_OFF, 12, TUNE_ON));
 }

@@ -82,6 +82,12 @@ pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), 
     {
         return crate::http::run(&arguments);
     }
+    if arguments
+        .first()
+        .is_some_and(|target| target == "console")
+    {
+        return run_xip_console(&arguments);
+    }
     if arguments.as_slice() == ["devices", "check"] {
         return run_devices_check();
     }
@@ -526,6 +532,33 @@ fn append_catalog_uart_baud(arguments: &mut Vec<String>, profile: &DeviceProfile
         arguments.push("--baud".to_owned());
         arguments.push(profile.uart_baud.expect("checked above").to_string());
     }
+}
+
+/// The board's console over the runtime's record wire (`xip_wire`): the words go out as one
+/// record to the console port and the wire is read for the window.
+///
+/// `dmesh-cli console PATH [WORD ...] [--port N] [--seconds N]`
+fn run_xip_console(arguments: &[String]) -> Result<(), String> {
+    let Some(path) = arguments.get(1) else {
+        return Err("console needs a serial path: dmesh-cli console PATH [WORD ...] [--port N] [--seconds N]".into());
+    };
+    let (mut words, mut port, mut seconds) = (Vec::new(), crate::xip_wire::PORT_CONSOLE, 6.0);
+    let mut i = 2;
+    while i < arguments.len() {
+        match arguments[i].as_str() {
+            "--port" => {
+                i += 1;
+                port = arguments.get(i).ok_or("--port needs a value")?.parse::<u32>().map_err(|e| e.to_string())?;
+            }
+            "--seconds" => {
+                i += 1;
+                seconds = arguments.get(i).ok_or("--seconds needs a value")?.parse::<f64>().map_err(|e| e.to_string())?;
+            }
+            word => words.push(word.to_owned()),
+        }
+        i += 1;
+    }
+    crate::xip_wire::console_session(path, &words, port, seconds)
 }
 
 fn run_serial_direct_discovery(path: &str, baud: Option<u32>) -> Result<(), String> {

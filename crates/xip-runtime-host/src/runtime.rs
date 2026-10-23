@@ -245,10 +245,13 @@ impl Runtime {
         Runtime { sh }
     }
 
-    /// Create an instance for a module loaded from a shared object. `state_bytes` is the size the image header would ask for.
+    /// Create an instance for a module loaded from a shared object. `state_bytes` is the size the image header would ask for;
+    /// when the module ships its generated metadata, its `state_bytes` is the floor (a stale caller value must not truncate
+    /// the module's state block).
     pub fn add_module(&self, path: impl AsRef<std::path::Path>, state_bytes: usize) -> Result<Instance, String> {
         let loaded = Loaded::open(path.as_ref())?;
         let name = path.as_ref().file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let state_bytes = loaded.metadata.as_ref().map_or(state_bytes, |m| m.state_bytes.max(state_bytes));
         Ok(self.add_loaded(&name, loaded, state_bytes))
     }
 

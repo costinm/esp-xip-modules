@@ -40,9 +40,26 @@ where
 {
     let (client, driver) =
         TokioNodeDriver::new(node, quic_lite::AssociationLimits::host().connection);
+    let observer = client.clone();
+    let operation = async move {
+        let result = operation(client).await?;
+        // finish() retires the association, but an accepted async bearer still
+        // owns its CLOSE packet. Keep the driver alive until those physical
+        // submissions complete instead of canceling them at operation return.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (_, bearers) = observer.rows().await.ok_or("QUIC driver stopped while draining sends")?;
+                if bearers.iter().all(|bearer| bearer.in_flight_packets == 0) {
+                    return Ok::<(), &str>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.map_err(|_| "physical send completion timed out")??;
+        Ok(result)
+    };
     tokio::select! {
         result = driver.run() => Err(format!("QUIC node driver stopped: {result:?}")),
-        result = operation(client) => result,
+        result = operation => result,
     }
 }
 
@@ -404,6 +421,48 @@ mod tests {
 
     type TestPool = PacketPool<16, { quic_lite::DEFAULT_PACKET_POOL_SLOT_SIZE }>;
     type TestNode = QuicNode<TestPool>;
+
+    #[tokio::test]
+    async fn one_shot_client_keeps_driver_until_accepted_send_completes() {
+        use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+        use quic_lite::{BearerContext, BearerInfo, BearerName, EgressSubmission,
+            PacketBearer, PacketEgress, PacketMeta, PacketPool, PacketSendOutcome,
+            PacketSubmitError, PeerL2Address};
+        type Lease = <super::Pool as PacketPool>::Buffer;
+        struct Held(Arc<Mutex<Option<EgressSubmission<Lease>>>>);
+        impl PacketEgress<Lease> for Held {
+            fn submit(&mut self, _: PeerL2Address, packet: EgressSubmission<Lease>) -> Result<(), PacketSubmitError<Lease>> {
+                assert!(self.0.lock().unwrap().replace(packet).is_none());
+                Ok(())
+            }
+        }
+        impl PacketBearer<super::Pool> for Held {
+            type AttachError = ();
+            fn info(&self) -> BearerInfo {
+                BearerInfo { name: BearerName::new("held").unwrap(), max_packet_size: quic_lite::DEFAULT_MAX_PACKET_SIZE,
+                    prefix_required: 0, suffix_required: 0, requires_packet_encryption: false,
+                    secure_link: true, nominal_bitrate_bps: 0, local_mac: None }
+            }
+            fn attach(&mut self, _: BearerContext<super::Pool>) -> Result<(), ()> { Ok(()) }
+        }
+        static POOL: super::Pool = super::Pool::new();
+        let pending = Arc::new(Mutex::new(None));
+        let complete = Arc::new(AtomicBool::new(false));
+        let mut node = super::Node::new(&POOL);
+        let bearer = node.add_bearer(Held(pending.clone())).unwrap();
+        node.associate(PacketMeta { bearer, peer_l2_address: PeerL2Address::new(1).unwrap(), received_at_us: 0 }, 0).unwrap();
+        assert!(pending.lock().unwrap().is_some());
+        let finished = complete.clone();
+        let worker = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            pending.lock().unwrap().take().unwrap().complete(PacketSendOutcome::Sent, 0);
+            finished.store(true, Ordering::Release);
+        });
+        let result = super::run_node(node, |_| async { Ok(42) }).await.unwrap();
+        assert_eq!(result, 42);
+        assert!(complete.load(Ordering::Acquire), "operation returned while the bearer still owned its packet");
+        worker.await.unwrap();
+    }
 
     #[tokio::test]
     async fn uart_probe_linger_is_outside_success_deadline() {

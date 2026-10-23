@@ -65,7 +65,7 @@ fn text_ok(s: &[u8], n: u8, max: usize, min: usize) -> bool {
 unsafe extern "C" fn set(_ctx: *mut c_void, intent: *const WifiIntent, generation: *mut u32) -> c_int {
     if intent.is_null() || generation.is_null() { return ERR_ARG; }
     let i = unsafe { *intent };
-    if (i.size as usize) < core::mem::size_of::<WifiIntent>() || i.radio > 1 || i.sta > 1 || i.ap > 1 || i.channel > 14 { return ERR_ARG; }
+    if (i.size as usize) < core::mem::size_of::<WifiIntent>() || i.radio > 1 || i.sta > 1 || i.ap > 1 || i.now > 1 || i.channel > 14 { return ERR_ARG; }
     if !text_ok(&i.sta_ssid, i.sta_ssid_len, 32, 1) || !text_ok(&i.ap_ssid, i.ap_ssid_len, 32, 1)
         || !text_ok(&i.sta_psk, i.sta_psk_len, 63, 8) || !text_ok(&i.ap_psk, i.ap_psk_len, 63, 8) { return ERR_ARG; }
     if i.sta == 1 && i.sta_ssid_len == 0 && i.bssid == [0; 6] { return ERR_ARG; }
@@ -74,7 +74,7 @@ unsafe extern "C" fn set(_ctx: *mut c_void, intent: *const WifiIntent, generatio
         let mut next = i;
         next.size = core::mem::size_of::<WifiIntent>() as u32;
         next.reserved = [0; 2];
-        let same = f.intent.radio == next.radio && f.intent.sta == next.sta && f.intent.ap == next.ap && f.intent.channel == next.channel
+        let same = f.intent.radio == next.radio && f.intent.sta == next.sta && f.intent.ap == next.ap && f.intent.now == next.now && f.intent.channel == next.channel
             && f.intent.bssid == next.bssid && f.intent.sta_ssid == next.sta_ssid && f.intent.sta_ssid_len == next.sta_ssid_len
             && f.intent.sta_psk == next.sta_psk && f.intent.sta_psk_len == next.sta_psk_len && f.intent.ap_ssid == next.ap_ssid
             && f.intent.ap_ssid_len == next.ap_ssid_len && f.intent.ap_psk == next.ap_psk && f.intent.ap_psk_len == next.ap_psk_len;
@@ -146,10 +146,10 @@ unsafe extern "C" fn tuning_set(_ctx: *mut c_void, t: *const WifiTuning) -> c_in
     let mut t = unsafe { *t };
     let ok = |v: u16, lo: u16, hi: u16| v == 0 || (lo..=hi).contains(&v);
     if (t.size as usize) < core::mem::size_of::<WifiTuning>()
-        || [t.ampdu, t.rates_11b, t.raw_rx, t.driver_tx, t.bssid_check].iter().any(|v| *v > TUNE_OFF)
+        || [t.ampdu, t.rates_11b, t.raw_rx, t.driver_tx, t.bssid_check, t.lr].iter().any(|v| *v > TUNE_OFF)
         || !(ok(t.rx_static, 2, 64) && ok(t.rx_dynamic, 2, 128) && ok(t.tx_dynamic, 4, 128) && ok(t.rx_ba, 2, 64)) { return ERR_ARG; }
     t.size = core::mem::size_of::<WifiTuning>() as u32;
-    t.reserved = [0; 2];
+    t.reserved = 0;
     let changed = TUNING.with(|c| {
         let mut c = c.borrow_mut();
         let same = c.to_bytes() == t.to_bytes();

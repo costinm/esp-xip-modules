@@ -51,34 +51,29 @@ async fn declared_udp_and_async_stream_echo_use_real_sockets() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn console_tcp_lines_second_connection_and_udp_reply() {
+async fn console_tcp_admission_and_stop_close_connections_without_commands() {
     let rt = Runtime::default();
     let m = rt.load_module(module("mod_con")).unwrap();
-    let ports = m
-        .listen_network(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
-        .await
-        .unwrap();
+    let ports = m.listen_network(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).await.unwrap();
     m.start(b"");
     let client = async {
         let mut first = TcpStream::connect(ports.stream.unwrap()).await.unwrap();
-        first.write_all(b"he\x08elp\n").await.unwrap();
-        let mut buf = [0; 4096];
-        let n = first.read(&mut buf).await.unwrap();
-        assert!(String::from_utf8_lossy(&buf[..n]).contains("status"));
         let mut second = TcpStream::connect(ports.stream.unwrap()).await.unwrap();
-        assert_eq!(second.read(&mut buf).await.unwrap(), 0);
-        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        udp.send_to(b"help", ports.datagram.unwrap()).await.unwrap();
-        let (n, _) = udp.recv_from(&mut buf).await.unwrap();
-        assert!(String::from_utf8_lossy(&buf[..n]).contains("status"));
+        let mut byte = [0];
+        assert_eq!(second.read(&mut byte).await.unwrap(), 0);
+        // Admission and cleanup are valuable regardless of the console's command parser.
+        assert!(tokio::time::timeout(Duration::from_millis(30), first.read(&mut byte)).await.is_err());
         m.stop();
+        assert_eq!(first.read(&mut byte).await.unwrap(), 0);
     };
     tokio::select! {
-        _ = rt.run_realtime(Duration::from_secs(3)) => panic!("network test timed out"),
+        _ = rt.run_realtime(Duration::from_secs(3)) => panic!("connection admission test timed out"),
         _ = client => {},
     }
     rt.run(0);
     assert!(m.ended());
+    assert_eq!(m.mem_leaked(), 0);
+    assert!(std::net::TcpListener::bind(ports.stream.unwrap()).is_ok());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -371,7 +366,7 @@ async fn udp_peer_churn_beyond_capacity_keeps_reply_tokens_correct() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cli_defaults_serve_console_and_async_echo() {
+async fn cli_defaults_bind_declared_ports_and_serve_async_echo() {
     use tokio::io::AsyncBufReadExt;
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xip-host"))
         .kill_on_drop(true)
@@ -395,11 +390,6 @@ async fn cli_defaults_serve_console_and_async_echo() {
         let mut reply = [0; 9];
         echo.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, b"CLI async");
-        let console = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        console.send_to(b"help", "127.0.0.1:5226").await.unwrap();
-        let mut answer = [0; 1024];
-        let (n, _) = console.recv_from(&mut answer).await.unwrap();
-        assert!(String::from_utf8_lossy(&answer[..n]).contains("status"));
     })
     .await;
     child.kill().await.unwrap();
@@ -408,50 +398,51 @@ async fn cli_defaults_serve_console_and_async_echo() {
 }
 
 #[test]
-fn console_reports_registered_modules_and_stops_real_instance() {
+fn binary_console_reports_registered_modules_and_controls_real_instance() {
+    use xip_abi::{cbor::{self, Item, Reader, Writer}, ERR_UNSUPPORTED};
     let rt = Runtime::default();
-    rt.add_native_link("serial", 256, xip_runtime_host::NativeTx::Done);
     let console = rt.load_module(module("mod_con")).unwrap();
     let test = rt.load_module(module("mod_rtest")).unwrap();
     console.start(b"");
     test.start(b"async");
     rt.run(0);
-    rt.inject_frame("serial", 0, 0, b"status");
-    rt.run(0);
-    let text: Vec<_> = rt
-        .take_link_tx("serial")
-        .into_iter()
-        .flat_map(|(_, v)| v)
-        .collect();
-    let text = String::from_utf8_lossy(&text);
-    assert!(
-        text.contains("console") && text.contains("test") && text.contains("4:true"),
-        "{text}"
-    );
-    rt.inject_frame("serial", 0, 0, b"test.echo value=registry");
+    let status = console.request(20, 5, &[0xa0]).unwrap();
+    let mut slots = cbor::get(&status, 4).unwrap().expect("module list");
+    let Some(Item::Array(count)) = slots.next() else { panic!("module list must be an array") };
+    let mut names = Vec::new();
+    for _ in 0..count {
+        let slot = slots.rest();
+        names.push(cbor::get_text(slot, 1).unwrap().unwrap().to_vec());
+        if names.last().unwrap() == b"test" {
+            assert_eq!(cbor::get(slot, 4).unwrap().unwrap().next(), Some(Item::Bool(true)));
+        }
+        assert!(slots.skip());
+    }
+    assert!(names.iter().any(|n| n == b"console"));
+    assert!(names.iter().any(|n| n == b"test"));
+
+    // Assert the exact structured result rather than a rendered line.
+    let echo = b"\xa1\x01\x68registry";
+    assert_eq!(test.send(2, 1, 1234, echo), 0);
     rt.run(6);
-    let text: Vec<_> = rt
-        .take_link_tx("serial")
-        .into_iter()
-        .flat_map(|(_, v)| v)
-        .collect();
-    assert!(String::from_utf8_lossy(&text).contains("registry"));
-    rt.inject_frame("serial", 0, 0, b"stop test");
+    {
+        let state = rt.state();
+        let reply = state.main.iter().find(|msg| msg.component == 2 && msg.method == 1 && msg.id == 1234)
+            .expect("correlated async echo");
+        assert_eq!(cbor::get_text(&reply.data, 1).unwrap(), Some(b"registry".as_slice()));
+    }
+
+    let name = b"\xa1\x01\x64test";
+    assert_eq!(console.request(20, 7, name).unwrap(), [0xa0]);
     rt.run(0);
     assert!(test.ended());
     assert_eq!(test.mem_leaked(), 0);
-    rt.take_link_tx("serial");
-    rt.inject_frame("serial", 0, 0, b"start test async");
-    rt.run(0);
-    let text: Vec<_> = rt
-        .take_link_tx("serial")
-        .into_iter()
-        .flat_map(|(_, v)| v)
-        .collect();
-    assert!(
-        String::from_utf8_lossy(&text).contains("error"),
-        "restart must not report fake success"
-    );
+    // Host native instances cannot currently restart in place; retain this regression.
+    let mut buf = [0; 64];
+    let mut w = Writer::new(&mut buf);
+    w.map(2).uint(1).text("test").uint(2).bytes(b"async");
+    let restart = console.request(20, 6, w.finish().unwrap()).unwrap();
+    assert_eq!(Reader::new(&restart).next().and_then(|item| item.as_int()), Some(ERR_UNSUPPORTED as i64));
     console.stop();
     rt.run(0);
     assert_eq!(console.mem_leaked(), 0);

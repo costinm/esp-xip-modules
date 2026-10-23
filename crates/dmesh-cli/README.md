@@ -135,6 +135,12 @@ dmesh-cli DEVICE probe.start --bytes=65536 --packet_size=1024 --parallel_streams
 dmesh-cli DEVICE probe.start --peer=udp://HOST:3339 --bytes=65536 # DEVICE probes HOST.
 ~~~
 
+Host-initiated probes work over ESP STA UDP6/QUIC in both transfer directions.
+A device-originated `probe.start --peer=...` needs that device's client resolver:
+current ESP firmware accepts `espnow://MAC` peers only. The UDP `--peer` example
+above applies to runtimes implementing UDP peer initiation; it currently returns
+an error result on ESP even when host-to-ESP UDP probes succeed.
+
 probe reports bytes and timing; it does not prove that a separate application
 request was admitted. wifi.scan --fresh=true starts a scan and may wake a
 radio. Radio metrics help separate TX submission, raw reception, semantic
@@ -167,7 +173,7 @@ dmesh-cli DEVICE settings.set --key=quic.pool --value=32 # Larger per-device pac
 These controls change device state; choose values for the selected device:
 
 ~~~sh
-dmesh-cli DEVICE transport.set --mode=nan --now=1 --nan_dw_interval=1 # Replace the radio profile.
+dmesh-cli DEVICE transport.set --mode=6 --now=1 --nan_dw_interval=1 # Replace the radio profile.
 dmesh-cli DEVICE radio.control --channel=6                      # Change raw radio control.
 dmesh-cli DEVICE radio.reset_counters                          # Clear radio counters.
 dmesh-cli DEVICE runtime.reset                                 # Reset runtime state.
@@ -219,3 +225,29 @@ For a direct bootstrap diagnostic while owning a local serial port:
 
 Normal API calls use tagged service streams over QUIC, including relay paths.
 The direct tagged control record is reserved for bootstrap diagnostics.
+
+## Device memory checks
+
+Build the structured heap diagnostic and select a device explicitly:
+
+```sh
+. ./env.sh
+cargo build --manifest-path crates/Cargo.toml -p dmesh-cli --example xip_heap
+crates/target/debug/examples/xip_heap "$PORT" --fw
+```
+
+Use `--fw` for DMesh firmware; omit it for generic C/Rust Main. On native module
+PPP, `--dump 6` captures a binary heap snapshot; `--dump 2` lists tasks. See the
+[console API](../../modules/mod_con/API.md) for diagnostics.
+
+To check repeated session cleanup, run against no-BLE FW Main:
+
+```sh
+XIP_HEAP_PORT="$PORT" cargo test --manifest-path crates/Cargo.toml \
+  -p dmesh-cli --test heap_device -- --ignored
+```
+
+Set `XIP_HEAP_ARTIFACT_DIR` to retain captures, or `XIP_HEAP_CLI` to select an
+example executable from a custom target directory. The test checks heap growth
+across eight fresh associations. It is compiled by CI and requires a board to
+run. Detailed measurements are in [notes/](../../notes/ai/2026-10-23-serial-memory.md).

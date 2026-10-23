@@ -314,7 +314,7 @@ unsafe extern "C" fn h_heap_info(user: *mut c_void, out: *mut u8, cap: usize) ->
 
 unsafe extern "C" fn h_heap_dump(user: *mut c_void, kind: i32) -> i32 {
     let _ = cx!(user, "heap_dump");
-    if (0..=5).contains(&kind) { 0 } else { ERR_ARG }
+    if (0..=6).contains(&kind) { 0 } else { ERR_ARG }
 }
 
 unsafe extern "C" fn h_nv(user: *mut c_void, key: *const u8, kn: usize, value: *const u8, vn: usize, out: *mut u8, cap: usize) -> i32 {

@@ -2383,6 +2383,7 @@ name = "xip-runtime-esp"
 version = "0.1.0"
 dependencies = [
  "esp-idf-sys",
+ "libloading",
  "xip-abi",
 ]
 
