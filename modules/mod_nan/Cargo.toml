@@ -3,7 +3,7 @@ name = "esp-mod-nan"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "NAN discovery-window bench module: sleep, a short promiscuous window, the Wi-Fi comeback (the first shape of mod_nan)"
+description = "NAN and NAN-over-NOW synchronization and service discovery"
 publish = false
 
 # Standalone: built by tools/mkmod.py --cargo (scripts/build.sh), not as part of a cargo workspace.
@@ -11,10 +11,16 @@ publish = false
 
 [dependencies]
 xip-abi = { path = "../../crates/xip-abi" }
+dmesh-server = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+dmesh-rawnan = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+
+[dev-dependencies]
+sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdsa"] }
 
 [package.metadata]
-# Options for tools/mkmod.py (scripts/build.sh). Its component number is 46 (it has no API.md yet).
-mkmod = "--name nan --tag 46 --stack 4096 --state 512"
+# Options for tools/mkmod.py (scripts/build.sh). Virtual NAN port 0xf6.
+mkmod = "--name nan --tag 46 --stack 12288 --state 8 --port 246"
 
 [features]
 flat-image = ["xip-abi/global-alloc"]
@@ -32,4 +38,5 @@ debug = false
 lto = true
 opt-level = "s"
 panic = "abort"
-strip = "symbols"
+# Symbols stay in the ELF for size audits; mkmod packages only loadable bytes.
+strip = "none"

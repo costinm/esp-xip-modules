@@ -6,4 +6,6 @@ use core::panic::PanicInfo;
 esp_mod_nan::export!();
 
 #[panic_handler]
-fn panic(_: &PanicInfo) -> ! { loop {} }
+fn panic(_: &PanicInfo) -> ! {
+    loop {}
+}
