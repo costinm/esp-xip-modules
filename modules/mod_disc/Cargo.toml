@@ -1,0 +1,38 @@
+[package]
+name = "esp-mod-disc"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Optional discovery announcement supplier for companion-less experiments"
+publish = false
+
+[workspace]
+
+[dependencies]
+xip-abi = { path = "../../crates/xip-abi" }
+dmesh-server = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+
+[dev-dependencies]
+sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdsa"] }
+
+[package.metadata]
+mkmod = "--name disc --tag 47 --stack 8192 --state 8 --port 245"
+
+[features]
+flat-image = ["xip-abi/global-alloc"]
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "mod_disc"
+required-features = ["flat-image"]
+
+[profile.release]
+codegen-units = 1
+debug = false
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = "none"
