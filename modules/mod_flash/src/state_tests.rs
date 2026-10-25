@@ -165,3 +165,59 @@ fn signed_packages_made_by_the_loader_tools_parse_and_verify() {
     assert_eq!((p.verify(), p.header.name()), (None, &b"lora"[..]));
     assert_eq!(p.header.target, target::MODULE);
 }
+
+#[test]
+fn all_page_floors_survive_compaction_and_interruption_without_format_change() {
+    let mut log = StateLog::open(Mem::blank());
+    for page in 0..256 {assert!(log.append_module_version(page as u8,page as u32+7));}
+    assert!(log.append_module_version(255,u32::MAX));
+    while log.fits(216) {assert!(log.append(state::REC_HEADER,&[42;216]));}
+    let snapshot=log.flash_snapshot();
+    for cut in [1,2,4,64,128,255,260,265] {
+        let mut l=StateLog::open(Mem {data:snapshot.clone(),fail_at:Some(cut),..Default::default()});
+        let _=l.append(state::REC_HEADER,&[43;216]);
+        let mut healed=StateLog::open(Mem {data:std::mem::take(&mut l.ops().data),..Default::default()});
+        for page in 0..256 {assert_eq!(healed.view.minver_module[page],Some(if page==255{u32::MAX}else{page as u32+7}),"page {page}, cut {cut}");}
+        assert!(healed.append_u32(state::REC_MINVER_LOADER,123));
+    }
+}
+
+#[test]
+fn expanded_page_journal_compacts_between_c_and_rust_readers() {
+    use std::{fs,process::Command};
+    let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir=std::env::temp_dir().join(std::format!("xip-journal-{}",std::process::id()));fs::create_dir_all(&dir).unwrap();
+    let source=dir.join("journal.c");
+    fs::write(&source,r#"
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include "esp_wifi_loader_state.h"
+static unsigned char bytes[8192];
+static int read_mem(void*c,uint32_t at,void*out,size_t n){(void)c;memcpy(out,bytes+at,n);return 0;}
+static int write_mem(void*c,uint32_t at,const void*in,size_t n){(void)c;for(size_t i=0;i<n;i++)bytes[at+i]&=((const unsigned char*)in)[i];return 0;}
+static int erase_mem(void*c,uint32_t at){(void)c;memset(bytes+at,255,4096);return 0;}
+int main(int argc,char**argv){
+ assert(argc==3);wl_flash_ops_t ops={0,read_mem,write_mem,erase_mem};wl_state_t state;
+ if(!strcmp(argv[1],"write")){
+  memset(bytes,255,sizeof bytes);wl_state_open(&state,&ops);
+  for(unsigned i=0;i<256;i++){unsigned char p[5]={(unsigned char)i};uint32_t v=i+7;memcpy(p+1,&v,4);assert(!wl_state_append(&state,WL_REC_MINVER_MODULE,p,5));}
+ }else{
+  FILE*f=fopen(argv[2],"rb");assert(f);assert(fread(bytes,1,sizeof bytes,f)==sizeof bytes);fclose(f);wl_state_open(&state,&ops);
+  for(unsigned i=0;i<256;i++){assert(wl_state_has_module(&state.view,i));assert(state.view.minver_module[i]==(i==255?UINT32_MAX:i+7));}
+ }
+ unsigned char h[WL_HEADER_SIZE]={42};for(int i=0;i<40;i++)assert(!wl_state_append(&state,WL_REC_HEADER,h,sizeof h));
+ FILE*f=fopen(argv[2],"wb");assert(f);assert(fwrite(bytes,1,sizeof bytes,f)==sizeof bytes);fclose(f);return 0;
+}
+"#).unwrap();
+    let bin=dir.join("journal");
+    let status=Command::new("cc").args(["-std=c11","-Wall","-Wextra","-Werror","-I"]).arg(root.join("boot/bootloader_components/main"))
+        .arg(&source).arg(root.join("boot/bootloader_components/main/state_core.c")).arg("-o").arg(&bin).status().unwrap();assert!(status.success());
+    let image=dir.join("state.bin");assert!(Command::new(&bin).arg("write").arg(&image).status().unwrap().success());
+    let mut log=StateLog::open(Mem {data:fs::read(&image).unwrap(),..Default::default()});
+    for page in 0..256 {assert_eq!(log.view.minver_module[page],Some(page as u32+7));}
+    assert!(log.append_module_version(255,u32::MAX));for _ in 0..40 {assert!(log.append(state::REC_HEADER,&[99;216]));}
+    fs::write(&image,log.flash_snapshot()).unwrap();assert!(Command::new(&bin).arg("read").arg(&image).status().unwrap().success());
+    let log=StateLog::open(Mem {data:fs::read(&image).unwrap(),..Default::default()});assert_eq!(log.view.minver_module[255],Some(u32::MAX));
+    fs::remove_dir_all(&dir).unwrap();
+}

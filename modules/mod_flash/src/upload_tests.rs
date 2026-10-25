@@ -63,6 +63,7 @@ fn partial_reads_pause_for_flash_and_commit_before_head() {
                 name,
                 image_size,
                 dry,
+                ..
             }) => {
                 assert_eq!(
                     (target, name, image_size, dry),

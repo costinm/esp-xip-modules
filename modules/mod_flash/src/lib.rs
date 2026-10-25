@@ -98,39 +98,181 @@ fn layout(hw: Hw) -> Result<Layout, Reject> {
 fn le32(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
-/// The page of the module partition that holds the module `name` (and its component number), else the first page that
-/// is not a module (the loader's rule: a page that starts with the image header is a module) with number 0.
-/// The page number also indexes the module version entries of the loader state journal (eight, as the partition has eight pages).
-fn module_page(hw: Hw, l: &Layout, name: &[u8]) -> Result<(usize, u16), Reject> {
-    let mut free = None;
+/// What a page of the module partition holds: nothing (`None`: the page does not start with the image header, the loader's rule), or an
+/// image with its identity from the front of its manifest `{1: name, 8: version, ...}` (key 8 absent: version 0).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Image {
+    name: [u8; 32],
+    name_len: usize,
+    version: u32,
+    tag: u16,
+    first: usize,
+    span: usize,
+}
+impl Image {
+    fn name(&self) -> &[u8] {
+        &self.name[..self.name_len]
+    }
+}
+type Pages = Vec<Option<Image>>;
+#[derive(Clone, Copy, Default)]
+struct PageSet([u32; state::MODULE_SLOTS / 32]);
+impl PageSet {
+    fn insert(&mut self, page: usize) { if page < state::MODULE_SLOTS { self.0[page / 32] |= 1 << (page % 32); } }
+    fn contains(&self, page: usize) -> bool { page < state::MODULE_SLOTS && self.0[page / 32] & (1 << (page % 32)) != 0 }
+    #[cfg(test)]
+    fn low(bits: u32) -> Self { let mut s=Self::default();s.0[0]=bits;s }
+}
+
+/// The name and the version at the front of a manifest (`tools/mkmod.py` writes `8: version` right behind the name; an older manifest has
+/// none, which is version 0). `None` when the manifest does not start `{1: name`.
+fn manifest_ident(m: &[u8]) -> Option<(&[u8], u32)> {
+    let mut r = cbor::Reader::new(m);
+    let (Some(cbor::Item::Map(_)), Some(cbor::Item::Uint(1)), Some(cbor::Item::Text(name))) = (r.next(), r.next(), r.next()) else {
+        return None;
+    };
+    let mut peek = r;
+    let version = match (peek.next(), peek.next()) {
+        (Some(cbor::Item::Uint(8)), Some(cbor::Item::Uint(v))) if v <= u32::MAX as u64 => v as u32,
+        _ => 0,
+    };
+    Some((name, version))
+}
+
+/// Read the first `Pages` pages of the module partition.
+fn read_pages(hw: Hw, l: &Layout) -> Result<Pages, Reject> {
+    let count=(l.data_size / PAGE).min(state::MODULE_SLOTS as u32) as usize;
+    let mut pages=Vec::new();pages.try_reserve_exact(count).map_err(|_|wire::FLASH)?;pages.resize(count,None);
     for page in 0..(l.data_size / PAGE).min(state::MODULE_SLOTS as u32) {
+        if pages[page as usize].is_some() {continue;} // continuation of a prior image
         let mut h = [0u8; 64];
         if hw.flash_read(l.data, page * PAGE, &mut h) != 64 {
             return Err(wire::FLASH);
         }
         if h[..4] != *b"DMOD" {
-            free.get_or_insert(page as usize);
             continue;
         }
-        // the manifest starts {1: name, ...}
+        let image_size=le32(&h[12..16]);
+        let claimed=image_size.checked_add(PAGE-1).map(|s|s/PAGE);
+        let valid=image_size>64 && claimed.is_some_and(|n|n!=0 && n<=(l.data_size/PAGE).min(state::MODULE_SLOTS as u32)-page);
+        let span=if valid {claimed.unwrap()} else {1};
+        if !valid {
+            // Interrupted/invalid headers occupy only their known page. Do
+            // not globally block recovery or trust an overflowing extent.
+            pages[page as usize]=Some(Image {name:[0;32],name_len:0,version:0,tag:0,first:page as usize,span:1});
+            continue;
+        }
+        let mut image = Image { name: [0; 32], name_len: 0, version: 0, tag: u16::from_le_bytes([h[16], h[17]]),first:page as usize,span:span as usize };
         let (at, len) = (le32(&h[44..48]), le32(&h[48..52]) as usize);
         let mut m = [0u8; 48];
         let n = len.min(m.len());
-        if at < 64 || hw.flash_read(l.data, page * PAGE + at, &mut m[..n]) != n as i32 {
-            continue;
+        if at >= 64 && n > 0 && hw.flash_read(l.data, page * PAGE + at, &mut m[..n]) == n as i32 {
+            if let Some((name, version)) = manifest_ident(&m[..n]) {
+                if name.len() <= image.name.len() {
+                    image.name[..name.len()].copy_from_slice(name);
+                    image.name_len = name.len();
+                    image.version = version;
+                }
+            }
         }
-        let mut r = cbor::Reader::new(&m[..n]);
-        if let (Some(cbor::Item::Map(_)), Some(cbor::Item::Uint(1)), Some(cbor::Item::Text(t))) = (r.next(), r.next(), r.next()) {
-            if t == name {
-                return Ok((page as usize, u16::from_le_bytes([h[16], h[17]])));
+        for p in page..page+span {pages[p as usize]=Some(image);}
+    }
+    Ok(pages)
+}
+
+/// The pages the loader runs: per name the highest version, the lowest page among equal versions (`xip_select` in components/xip_loader).
+/// An image with no name is its own module.
+fn is_active(pages: &Pages, page: usize) -> bool {
+    let Some(me) = &pages[page] else { return false };
+    if me.first!=page {return false;}
+    if me.name_len == 0 {
+        return true;
+    }
+    !pages.iter().enumerate().any(|(other, p)| {
+        p.as_ref().is_some_and(|p| {
+            p.first==other && p.name() == me.name() && (p.version > me.version || (p.version == me.version && other < page))
+        })
+    })
+}
+
+/// Where the module `name` at `version` goes, and its component number (0 for a name not installed yet):
+///  1. a version that is not higher than the installed one is refused (`rollback`): there is no in-place re-upload;
+///  2. the first free page;
+///  3. else the shadowed page (a version of some module that has a newer one) with the lowest version, then the lowest page;
+///  4. else `wrong-chip-or-target`.
+/// `protected` marks the pages that must not be reused: those of running modules (the flasher's own among them). The active image of a name
+/// is never taken. The loader state journal entry of the page follows the image (`append_module_version(page, ..)`).
+#[cfg(test)]
+fn choose_page(pages: &Pages, name: &[u8], version: u32, protected: u32) -> Result<(usize, u16), Reject> {
+    choose_span(pages,name,version,PageSet::low(protected),1,pages.len())
+}
+fn choose_span(pages: &Pages, name: &[u8], version: u32, protected: PageSet, needed: usize, limit: usize) -> Result<(usize,u16),Reject> {
+    if needed==0 || needed>limit || limit>pages.len() {return Err(wire::WRONG_TARGET);}
+    let mut tag=0;
+    for (page,p) in pages.iter().enumerate().take(limit) {
+        if let Some(p)=p.filter(|p|p.first==page) {
+            if p.name()==name && is_active(pages,page) {
+                if version<=p.version {return Err(wire::ROLLBACK);}
+                tag=p.tag;
             }
         }
     }
-    free.map(|p| (p, 0)).ok_or(wire::WRONG_TARGET)
+    let mut best:Option<(u32,usize)>=None;
+    for start in 0..=limit-needed {
+        let mut oldest=None;
+        let usable=(start..start+needed).all(|page| {
+            if protected.contains(page) {return false;}
+            match pages[page] {
+                None=>true,
+                Some(p)=>{
+                    if p.first<start || p.first+p.span>start+needed || is_active(pages,p.first) || protected.contains(p.first) {return false;}
+                    oldest=Some(oldest.map_or(p.version,|v:u32|v.min(p.version)));true
+                }
+            }
+        });
+        if !usable {continue;}
+        match oldest {
+            None=>return Ok((start,tag)),
+            Some(version)=>if best.map_or(true,|b|(version,start)<b) {best=Some((version,start));},
+        }
+    }
+    best.map(|(_,page)|(page,tag)).ok_or(wire::WRONG_TARGET)
 }
-/// `f(name, component, running)` for every module the host lists; false when the list cannot be read.
-fn for_modules(hw: Hw, mut f: impl FnMut(&[u8], u64, bool)) -> bool {
-    let mut bytes = [0u8; 1536];
+
+/// The pages of the modules that run now (`modules_info` key 12, running key 4), as a bit set: not to be reused.
+fn running_pages(hw: Hw) -> Result<PageSet, Reject> {
+    let mut set = PageSet::default();
+    if for_modules(hw, |_, _, running, page| {
+        if let (true, Some(page)) = (running, page) {
+            set.insert(page as usize);
+        }
+    }) {
+        Ok(set)
+    } else {
+        Err(wire::FLASH)
+    }
+}
+
+fn module_page(hw: Hw, l: &Layout, name: &[u8], version: u32, image_size: u32) -> Result<(usize, u16), Reject> {
+    let pages = read_pages(hw, l)?;
+    let needed=image_size.checked_add(PAGE-1).ok_or(wire::BAD_LENGTH)? / PAGE;
+    choose_span(&pages,name,version,running_pages(hw)?,needed as usize,(l.data_size/PAGE).min(state::MODULE_SLOTS as u32) as usize)
+}
+
+/// The anti-rollback floor of the module `name`: the highest version the loader state journal recorded for a page that holds it.
+fn module_floor(hw: Hw, l: &Layout, view: &state::View, name: &[u8]) -> Result<Option<u32>, Reject> {
+    let pages = read_pages(hw, l)?;
+    Ok(pages
+        .iter()
+        .enumerate()
+        .filter(|(page, p)| p.as_ref().is_some_and(|p| p.first==*page && p.name() == name))
+        .filter_map(|(page, _)| view.minver_module[page])
+        .max())
+}
+/// `f(name, component, running, page)` for every module the host lists (`page`: the flash page of the image, key 12, when the host says);
+/// false when the list cannot be read.
+fn for_modules(hw: Hw, mut f: impl FnMut(&[u8], u64, bool, Option<u64>)) -> bool {
+    let mut bytes = [0u8; 2048];
     let n = hw.modules_info(&mut bytes);
     if n < 0 {
         return false;
@@ -143,26 +285,33 @@ fn for_modules(hw: Hw, mut f: impl FnMut(&[u8], u64, bool)) -> bool {
         let Some(cbor::Item::Map(fields)) = r.next() else {
             return false;
         };
-        let (mut tag, mut running, mut name) = (0, false, &[][..]);
+        let (mut tag, mut running, mut name, mut page) = (0, false, &[][..], None);
         for _ in 0..fields {
             let Some(cbor::Item::Uint(key)) = r.next() else {
                 return false;
             };
-            match (key, r.next()) {
-                (1, Some(cbor::Item::Text(v))) => name = v,
-                (2, Some(cbor::Item::Uint(v))) => tag = v,
-                (4, Some(cbor::Item::Bool(v))) => running = v,
-                (1 | 2 | 4, _) => return false,
-                (_, Some(_)) => {}
-                _ => return false,
+            match key {
+                1 | 2 | 4 | 12 => match (key, r.next()) {
+                    (1, Some(cbor::Item::Text(v))) => name = v,
+                    (2, Some(cbor::Item::Uint(v))) => tag = v,
+                    (4, Some(cbor::Item::Bool(v))) => running = v,
+                    (12, Some(cbor::Item::Uint(v))) => page = Some(v),
+                    _ => return false,
+                },
+                // everything else (the shadowed list, key 13, is nested) is skipped whole
+                _ => {
+                    if !r.skip() {
+                        return false;
+                    }
+                }
             }
         }
-        f(name, tag, running);
+        f(name, tag, running, page);
     }
     true
 }
-/// The request text of `start flash [REQUEST]` (not persistent: a reboot starts it strict again, `--autostart` has no request):
-/// empty = signed by the pinned key; `unsigned` = signatures are not checked; 130 hex digits = a public key (uncompressed
+/// The explicit request of `start flash [REQUEST]` overrides NV for this activation:
+/// `strict` = signed by the pinned key; `unsigned` = signatures are not checked; 130 hex digits = a public key (uncompressed
 /// P-256 point) accepted instead of the pinned key. For development.
 fn parse_auth(request: &[u8]) -> Auth {
     if request == b"unsigned" {
@@ -180,6 +329,19 @@ fn parse_auth(request: &[u8]) -> Auth {
         return Auth::Key(key);
     }
     Auth::Strict
+}
+/// Read policy only at activation. Missing/unsupported/invalid NV fails closed;
+/// an explicit `strict` request can override a persistent development setting.
+fn start_auth(hw: Hw, request: &[u8]) -> Auth {
+    if !request.is_empty() {
+        return parse_auth(request);
+    }
+    let mut mode = [0u8; 8];
+    if hw.nv(b"flash.auth", None, &mut mode) == 8 && mode == *b"unsigned" {
+        Auth::Unsigned
+    } else {
+        Auth::Strict
+    }
 }
 /// The flash range (offset, size) of the application that is running this module (`device_info` keys 5 and 6 of the first map),
 /// None when the host does not say.
@@ -290,11 +452,8 @@ impl Policy for Rules<'_> {
             target::FLASH => None,
             target::LOADER => self.view.minver_loader,
             target::STAGE2 => self.view.minver_stage2,
-            // the journal keeps eight module entries: one per page of the module partition
-            target::MODULE => {
-                let (page, _) = module_page(self.hw, &self.layout, name)?;
-                self.view.minver_module[page]
-            }
+            // the journal keeps eight module entries, one per page of the module partition: the floor of a name is the highest of its pages
+            target::MODULE => module_floor(self.hw, &self.layout, self.view, name)?,
             _ => self.view.minver,
         })
     }
@@ -357,6 +516,8 @@ struct Connection {
     fed: usize,
     page: usize,
     tag: u16,
+    /// The version of the module being installed (the package version, equal to its manifest's key 8).
+    version: u32,
     name: [u8; 32],
     name_len: usize,
     auth: Auth,
@@ -398,6 +559,7 @@ impl Connection {
             fed: 0,
             page: 0,
             tag: 0,
+            version: 0,
             name: [0; 32],
             name_len: 0,
             auth,
@@ -432,7 +594,7 @@ impl Connection {
         self.reply.text(b"\n");
     }
     #[inline(always)]
-    fn open(&mut self, hw: Hw, t: u8, name: &[u8], size: u32, dry: bool) -> Result<(), Reject> {
+    fn open(&mut self, hw: Hw, t: u8, name: &[u8], size: u32, version: u32, dry: bool) -> Result<(), Reject> {
         self.target = t;
         self.size = size;
         self.dry = dry;
@@ -455,15 +617,16 @@ impl Connection {
                 (b, 0x8000 - b)
             }
             target::MODULE => {
-                let (page, tag) = module_page(hw, &self.layout, name)?;
+                let (page, tag) = module_page(hw, &self.layout, name, version,size)?;
                 if tag == COMPONENT as u16 || name.len() > self.name.len() {
                     return Err(wire::WRONG_TARGET);
                 }
                 self.page = page;
                 self.tag = tag;
+                self.version = version;
                 self.name[..name.len()].copy_from_slice(name);
                 self.name_len = name.len();
-                (self.layout.data + page as u32 * PAGE, PAGE)
+                (self.layout.data + page as u32 * PAGE, size.checked_add(PAGE-1).ok_or(wire::BAD_LENGTH)? / PAGE * PAGE)
             }
             _ => return Err(wire::WRONG_TARGET),
         };
@@ -491,7 +654,7 @@ impl Connection {
         } else {
             // a module is stopped before its page is erased; Main, the loader and Stage2 need every other module stopped
             let mut failed = false;
-            let listed = for_modules(hw, |name, tag, _| {
+            let listed = for_modules(hw, |name, tag, _, _| {
                 if tag != COMPONENT as u64 && (t != target::MODULE || name == &self.name[..self.name_len]) {
                     let rc = hw.module_stop(name);
                     failed |= rc < 0 && rc != xip_abi::ERR_NOTFOUND;
@@ -506,7 +669,7 @@ impl Connection {
     }
     fn stopped(&self, hw: Hw) -> bool {
         let mut busy = false;
-        let listed = for_modules(hw, |name, tag, running| {
+        let listed = for_modules(hw, |name, tag, running, _| {
             busy |= running
                 && tag != COMPONENT as u64
                 && (self.target != target::MODULE || name == &self.name[..self.name_len]);
@@ -596,6 +759,11 @@ impl Connection {
                     self.work = Work::None;
                     // base had been temporarily moved to the block address.
                     if let Some((_, size)) = self.session.done() {
+                        if self.target == target::MODULE {
+                            // the new page becomes the module (its version is the highest) and the old one is shadowed; a host without
+                            // a loader says ERR_UNSUPPORTED and the next boot does the same
+                            let _ = hw.module_rescan();
+                        }
                         self.reply.ok(size, false);
                         self.reboot = matches!(self.target, target::MAIN | target::LOADER | target::STAGE2);
                     }
@@ -611,6 +779,28 @@ impl Connection {
                             || (self.tag != 0 && u16::from_le_bytes([bytes[16], bytes[17]]) != self.tag)
                         {
                             return Err(wire::BAD_IMAGE_HEADER);
+                        }
+                        // the package says which module and version this is: the image must say the same, or the loader would
+                        // run it under another name or order (manifest keys 1 and 8, in this block or already written)
+                        let (at, len) = (
+                            u32::from_le_bytes(bytes[44..48].try_into().unwrap()) as usize,
+                            u32::from_le_bytes(bytes[48..52].try_into().unwrap()) as usize,
+                        );
+                        if len != 0 {
+                            let mut m = [0u8; 48];
+                            let n = len.min(m.len());
+                            let read = if at >= 64 && at.saturating_add(n) <= bytes.len() {
+                                m[..n].copy_from_slice(&bytes[at..at + n]);
+                                true
+                            } else {
+                                at >= 64
+                                    && at.saturating_add(n) <= self.size as usize
+                                    && hw.flash_read(self.layout.data, self.page as u32 * PAGE + at as u32, &mut m[..n]) == n as i32
+                            };
+                            match manifest_ident(&m[..n]) {
+                                Some((name, v)) if read && name == &self.name[..self.name_len] && v == self.version => {}
+                                _ => return Err(wire::BAD_IMAGE_HEADER),
+                            }
                         }
                     }
                     let bytes = unsafe {
@@ -762,12 +952,13 @@ impl Connection {
                 target,
                 name,
                 image_size,
+                version,
                 dry,
             }) => {
                 let mut nm = [0; 128];
                 let len = name.len();
                 nm[..len].copy_from_slice(name);
-                self.open(hw, target, &nm[..len], image_size, dry)?;
+                self.open(hw, target, &nm[..len], image_size, version, dry)?;
             }
             Some(Action::Write { index, bytes }) => {
                 self.write = bytes.as_ptr();
@@ -906,7 +1097,7 @@ impl Module for State {
             if self.alarm < 0 {
                 return self.alarm;
             }
-            self.auth = parse_auth(call.data);
+            self.auth = start_auth(*hw, call.data);
             self.started = true;
             self.publish_status(*hw);
             return 0;

@@ -33,14 +33,22 @@ struct Fake {
     fail_commit: bool,
     /// the request of `start flash`
     auth: Auth,
+    nv_auth: Option<Vec<u8>>,
     /// `device_info` says Main (0xf0000) is the running application, as when mod_flash runs inside Main
     running: bool,
+    /// pages of running modules `modules_info` lists (key 12), each with a nested shadowed list
+    running_pages: Vec<u8>,
+    rescans: u32,
 }
 impl Fake {
     fn new(image: &[u8], target: u8, dry: bool) -> Self {
         Self::named(image, target, dry, b"test")
     }
     fn named(image: &[u8], target: u8, dry: bool, name: &[u8]) -> Self {
+        Self::versioned(image, target, dry, name, 2)
+    }
+    /// A package of `name` at package version `version`.
+    fn versioned(image: &[u8], target: u8, dry: bool, name: &[u8], version: u32) -> Self {
         let key = SigningKey::from_slice(&[7; 32]).unwrap();
         let pubkey: [u8; 65] = key
             .verifying_key()
@@ -50,7 +58,7 @@ impl Fake {
             .unwrap();
         let mut state = StateLog::open(Raw(vec![255; 8192]));
         assert!(state.append(state::REC_PIN, &pubkey));
-        let header = wire::Header::build(CPU, target, 2, image, name);
+        let header = wire::Header::build(CPU, target, version, image, name);
         let sig: Signature = key.sign(&header);
         let mut input = wire::Transport::encode(dry, false).to_vec();
         input.extend_from_slice(&pubkey);
@@ -89,7 +97,10 @@ impl Fake {
             read_size: 37,
             fail_commit: false,
             auth: Auth::Strict,
+            nv_auth: None,
             running: false,
+            running_pages: Vec::new(),
+            rescans: 0,
         }
     }
     fn host(&mut self) -> xip_abi::Host {
@@ -110,9 +121,46 @@ impl Fake {
         h.socket_write = Some(socket_write);
         h.module_stop = Some(stop);
         h.modules_info = Some(info);
+        h.module_rescan = Some(rescan);
         h.device_info = Some(device_info);
+        h.nv = Some(nv);
         h
     }
+}
+unsafe extern "C" fn nv(u: *mut core::ffi::c_void, key: *const u8, kn: usize,
+    _: *const u8, _: usize, out: *mut u8, cap: usize) -> i32 {
+    if core::slice::from_raw_parts(key, kn) != b"flash.auth" { return xip_abi::ERR_NOTFOUND; }
+    match &f(u).nv_auth {
+        Some(v) if v.len() <= cap => { core::ptr::copy_nonoverlapping(v.as_ptr(), out, v.len()); v.len() as i32 }
+        Some(_) => xip_abi::ERR_SIZE,
+        None => xip_abi::ERR_NOTFOUND,
+    }
+}
+#[test]
+fn activation_auth_uses_nv_and_explicit_requests_override_it() {
+    let mut fake = Fake::new(&module_image(), target::MODULE, false);
+    for (stored, expected) in [
+        (None, Auth::Strict),
+        (Some(b"strict".as_slice()), Auth::Strict),
+        (Some(b"unsigned".as_slice()), Auth::Unsigned),
+        (Some(b"garbage".as_slice()), Auth::Strict),
+        (Some(b"unsigned trailing".as_slice()), Auth::Strict),
+    ] {
+        fake.nv_auth = stored.map(|v| v.to_vec());
+        let h = fake.host();
+        let hw = unsafe { Hw::new(&h) }.unwrap();
+        assert_eq!(start_auth(hw, b""), expected);
+        assert_eq!(start_auth(hw, b"strict"), Auth::Strict);
+        assert_eq!(start_auth(hw, b"unsigned"), Auth::Unsigned);
+        assert_eq!(start_auth(hw, b"invalid"), Auth::Strict);
+    }
+    // Exercise the real signature/hash acceptance path with the NV-selected mode.
+    fake.nv_auth = Some(b"unsigned".to_vec());
+    let h = fake.host();
+    fake.auth = start_auth(unsafe { Hw::new(&h) }.unwrap(), b"");
+    unsigned(&mut fake);
+    let (_, done) = run(&mut fake);
+    assert!(done && fake.out.starts_with(b"OK"));
 }
 unsafe fn f<'a>(u: *mut core::ffi::c_void) -> &'a mut Fake {
     &mut *(u as *mut Fake)
@@ -244,11 +292,20 @@ unsafe extern "C" fn device_info(u: *mut core::ffi::c_void, out: *mut u8, n: usi
 unsafe extern "C" fn stop(_: *mut core::ffi::c_void, _: *const u8, _: usize) -> i32 {
     0
 }
-unsafe extern "C" fn info(_: *mut core::ffi::c_void, out: *mut u8, n: usize) -> i32 {
+unsafe extern "C" fn info(u: *mut core::ffi::c_void, out: *mut u8, n: usize) -> i32 {
     let b = core::slice::from_raw_parts_mut(out, n);
     let mut w = cbor::Writer::new(b);
-    w.array(1).map(3).uint(1).text("test").uint(2).uint(2).uint(4).boolean(false);
+    w.array(1 + f(u).running_pages.len()).map(3).uint(1).text("test").uint(2).uint(2).uint(4).boolean(false);
+    for &page in &f(u).running_pages {
+        // a running module with the fields a newer loader adds: its page (12) and a nested list of shadowed images (13)
+        w.map(5).uint(1).text("busy").uint(2).uint(50 + page as u64).uint(4).boolean(true).uint(12).uint(page as u64);
+        w.uint(13).array(1).map(3).uint(1).uint(7).uint(2).uint(1).uint(3).boolean(false);
+    }
     w.finish().unwrap().len() as i32
+}
+unsafe extern "C" fn rescan(u: *mut core::ffi::c_void) -> i32 {
+    f(u).rescans += 1;
+    1
 }
 fn run(f: &mut Fake) -> (Connection, bool) {
     let h = f.host();
@@ -285,6 +342,7 @@ fn module_image() -> Vec<u8> {
     let size = data.len() as u32;
     data[12..16].copy_from_slice(&size.to_le_bytes());
     data[16..18].copy_from_slice(&2u16.to_le_bytes());
+    data[44..52].fill(0); // no manifest
     data
 }
 #[test]
@@ -474,6 +532,7 @@ fn large_main_drains_buffered_input_between_async_completions() {
 fn module_on_page(f: &mut Fake, page: usize, name: &[u8], tag: u16) {
     let at = 0x380000 + page * 0x10000;
     f.flash[at..at + 4].copy_from_slice(b"DMOD");
+    f.flash[at+12..at+16].copy_from_slice(&256u32.to_le_bytes());
     f.flash[at + 16..at + 18].copy_from_slice(&tag.to_le_bytes());
     f.flash[at + 44..at + 48].copy_from_slice(&64u32.to_le_bytes());
     let mut m = vec![0xa2, 1, 0x60 + name.len() as u8];
@@ -482,25 +541,200 @@ fn module_on_page(f: &mut Fake, page: usize, name: &[u8], tag: u16) {
     f.flash[at + 48..at + 52].copy_from_slice(&(m.len() as u32).to_le_bytes());
     f.flash[at + 64..at + 64 + m.len()].copy_from_slice(&m);
 }
+/// `module_on_page` for a module with a version (manifest `{1: name, 8: version, 2: tag}`).
+fn module_v(f: &mut Fake, page: usize, name: &[u8], tag: u16, version: u8) {
+    let at = 0x380000 + page * 0x10000;
+    f.flash[at..at + 4].copy_from_slice(b"DMOD");
+    f.flash[at+12..at+16].copy_from_slice(&256u32.to_le_bytes());
+    f.flash[at + 16..at + 18].copy_from_slice(&tag.to_le_bytes());
+    f.flash[at + 44..at + 48].copy_from_slice(&64u32.to_le_bytes());
+    let mut m = vec![if version > 0 { 0xa3 } else { 0xa2 }, 1, 0x60 + name.len() as u8];
+    m.extend_from_slice(name);
+    if version > 0 {
+        m.extend_from_slice(&[8, version]);
+    }
+    m.extend_from_slice(&[2, tag as u8]);
+    f.flash[at + 48..at + 52].copy_from_slice(&(m.len() as u32).to_le_bytes());
+    f.flash[at + 64..at + 64 + m.len()].copy_from_slice(&m);
+}
+fn written_page(f: &Fake, page: usize, image: &[u8]) -> bool {
+    f.flash[0x380000 + page * 0x10000..][..image.len()] == *image
+}
 #[test]
-fn a_module_goes_to_its_own_page_or_the_first_free_one() {
-    let image = module_image(); // tag 2
-    // pages 0 and 1 are other modules, "test" lives on page 3
+fn a_module_goes_to_the_first_free_page_never_over_its_installed_version() {
+    let image = module_image(); // tag 2, package version 2
+    // pages 0 and 1 are other modules, "test" (version 1) lives on page 3: the new version takes the free page 2, page 3 stays
     let mut f = Fake::new(&image, target::MODULE, false);
     module_on_page(&mut f, 0, b"a", 5);
     module_on_page(&mut f, 1, b"b", 6);
-    module_on_page(&mut f, 3, b"test", 2);
+    module_v(&mut f, 3, b"test", 2, 1);
+    let old = f.flash[0x380000 + 3 * 0x10000..][..80].to_vec();
     let (_, done) = run(&mut f);
     assert!(done, "{:?}", f.out);
-    assert_eq!(&f.flash[0x380000 + 3 * 0x10000..][..image.len()], &image);
+    assert!(written_page(&f, 2, &image));
+    assert_eq!(&f.flash[0x380000 + 3 * 0x10000..][..80], old.as_slice(), "the installed version is not touched");
     let persisted = StateLog::open(Raw(f.flash[0xee000..0xf0000].to_vec()));
-    assert_eq!(persisted.view.minver_module[3], Some(2));
+    assert_eq!(persisted.view.minver_module[2], Some(2), "the journal entry follows the page of the image");
+    assert_eq!(persisted.view.minver_module[3], None);
+    assert_eq!(f.rescans, 1, "the loader is asked to look again after the commit");
     // a new module takes the first page that is not a module
     let mut f = Fake::new(&image, target::MODULE, false);
     module_on_page(&mut f, 0, b"a", 5);
     let (_, done) = run(&mut f);
     assert!(done);
-    assert_eq!(&f.flash[0x380000 + 0x10000..][..image.len()], &image);
+    assert!(written_page(&f, 1, &image));
+}
+#[test]
+fn an_equal_or_lower_version_is_refused_before_anything_is_erased() {
+    let image = module_image();
+    for installed in [2u8, 3, 9] {
+        let mut f = Fake::new(&image, target::MODULE, false); // package version 2
+        module_v(&mut f, 1, b"test", 2, installed);
+        run(&mut f);
+        assert!(f.out.starts_with(b"ERR 9 "), "installed {installed}: {:?}", f.out);
+        assert!(f.writes.is_empty());
+        assert_eq!(f.rescans, 0);
+    }
+    // the dry run says the same
+    let mut f = Fake::new(&image, target::MODULE, true);
+    module_v(&mut f, 1, b"test", 2, 2);
+    run(&mut f);
+    assert!(f.out.starts_with(b"ERR 9 "), "{:?}", f.out);
+    // an installed version 0 (no key 8) is older than any version above 0, equal to 0
+    let mut f = Fake::new(&image, target::MODULE, false);
+    module_on_page(&mut f, 1, b"test", 2);
+    let (_, done) = run(&mut f);
+    assert!(done, "{:?}", f.out);
+    let mut f = Fake::versioned(&image, target::MODULE, false, b"test", 0);
+    module_on_page(&mut f, 1, b"test", 2);
+    run(&mut f);
+    assert!(f.out.starts_with(b"ERR 9 "), "{:?}", f.out);
+}
+#[test]
+fn with_no_free_page_the_oldest_shadowed_page_is_reused() {
+    let image = module_image(); // "test" 2
+    let mut f = Fake::versioned(&image, target::MODULE, false, b"test", 5);
+    // eight pages: test v4 active (page 6) over v1 (page 2) and v3 (page 4); b v7 (page 0) over b v2 (page 7); a, c alone
+    module_v(&mut f, 0, b"b", 6, 7);
+    module_v(&mut f, 1, b"a", 5, 1);
+    module_v(&mut f, 2, b"test", 2, 1);
+    module_v(&mut f, 3, b"c", 7, 1);
+    module_v(&mut f, 4, b"test", 2, 3);
+    module_v(&mut f, 5, b"d", 8, 1);
+    module_v(&mut f, 6, b"test", 2, 4);
+    module_v(&mut f, 7, b"b", 6, 2);
+    let (_, done) = run(&mut f);
+    assert!(done, "{:?}", f.out);
+    assert!(written_page(&f, 2, &image), "the lowest shadowed version (test v1) goes first");
+    let persisted = StateLog::open(Raw(f.flash[0xee000..0xf0000].to_vec()));
+    assert_eq!(persisted.view.minver_module[2], Some(5));
+    // the next one: test v3 on page 4 is now the lowest shadowed version of all (b v2 is 2, below it)
+    let pages = read_pages_of(&f);
+    assert_eq!(choose_page(&pages, b"test", 6, 0).unwrap().0, 7, "b v2 (page 7) is the oldest shadowed image now");
+}
+#[test]
+fn nothing_is_reused_when_every_page_is_active_or_running() {
+    let image = module_image();
+    let mut f = Fake::versioned(&image, target::MODULE, false, b"test", 5);
+    for p in 0..8 {
+        module_v(&mut f, p, &[b'a' + p as u8], 20 + p as u16, 1);
+    }
+    run(&mut f);
+    assert!(f.out.starts_with(b"ERR 10 "), "{:?}", f.out);
+    assert!(f.writes.is_empty());
+    // shadowed pages of running modules are not offered: protected pages are skipped
+    let mut f = Fake::versioned(&image, target::MODULE, false, b"test", 5);
+    for p in 0..8 {
+        module_v(&mut f, p, if p < 4 { b"x" } else { b"y" }, 20, (p % 4) as u8 + 1);
+    }
+    let pages = read_pages_of(&f);
+    // x: v1..v4 on pages 0..3, active page 3; y active page 7. Shadowed pages 0,1,2,4,5,6
+    // oldest version first (v1 on pages 0 and 4: the lower page), the active pages 3 and 7 never
+    assert_eq!(choose_page(&pages, b"new", 1, 0).unwrap().0, 0);
+    assert_eq!(choose_page(&pages, b"new", 1, 1 << 0).unwrap().0, 4);
+    assert_eq!(choose_page(&pages, b"new", 1, 1 << 0 | 1 << 4).unwrap().0, 1);
+    assert_eq!(choose_page(&pages, b"new", 1, 1 << 0 | 1 << 4 | 1 << 1).unwrap().0, 5);
+    assert_eq!(choose_page(&pages, b"new", 1, 0b0011_0011).unwrap().0, 2, "v3 is the newest shadowed one, still not the active v4");
+    assert!(choose_page(&pages, b"new", 1, 0b0111_0111).is_err());
+    // a running module's page comes from modules_info (key 12) and is protected
+    let mut f = Fake::versioned(&image, target::MODULE, false, b"test", 5);
+    for p in 0..8 {
+        module_v(&mut f, p, if p < 4 { b"x" } else { b"y" }, 20, (p % 4) as u8 + 1);
+    }
+    f.running_pages = vec![0, 1, 2];
+    let (_, done) = run(&mut f);
+    assert!(done, "{:?}", f.out);
+    assert!(written_page(&f, 4, &image), "pages 0-2 run: the oldest shadowed page left is 4 (v1); page 3 is active");
+}
+fn read_pages_of(f: &Fake) -> Pages {
+    let mut pages: Pages = vec![None; 8];
+    let mut f2 = Fake::new(&[1; 4], target::MODULE, true);
+    f2.flash.copy_from_slice(&f.flash);
+    let h = f2.host();
+    let hw = unsafe { Hw::new(&h) }.unwrap();
+    let l = layout(hw).unwrap();
+    pages.copy_from_slice(&read_pages(hw, &l).unwrap());
+    pages
+}
+#[test]
+fn the_active_page_of_a_name_is_the_highest_version_then_the_lowest_page() {
+    let image = module_image();
+    let mut f = Fake::new(&image, target::MODULE, true);
+    module_v(&mut f, 0, b"m", 9, 2);
+    module_v(&mut f, 1, b"m", 9, 5);
+    module_v(&mut f, 2, b"m", 9, 5);
+    module_v(&mut f, 3, b"m", 9, 0);
+    let pages = read_pages_of(&f);
+    let active: Vec<bool> = (0..4).map(|p| is_active(&pages, p)).collect();
+    assert_eq!(active, [false, true, false, false]);
+    assert!(!is_active(&pages, 7), "a free page is nothing");
+    assert_eq!(pages[1].unwrap().version, 5);
+}
+#[test]
+fn the_package_and_its_image_say_the_same_name_and_version() {
+    // Manifest {1: "test", 8: 2} in block zero, a later block, or the second flash page.
+    let make = |size: usize, name: &[u8], version: u8| {
+        let mut data = vec![42u8; size];
+        data[..4].copy_from_slice(b"DMOD");
+        data[6..8].copy_from_slice(&64u16.to_le_bytes());
+        data[12..16].copy_from_slice(&(size as u32).to_le_bytes());
+        data[16..18].copy_from_slice(&2u16.to_le_bytes());
+        let mut m = vec![0xa2, 1, 0x60 + name.len() as u8];
+        m.extend_from_slice(name);
+        m.extend_from_slice(&[8, version]);
+        let at = size - m.len() - size % 4;
+        data[44..48].copy_from_slice(&(at as u32).to_le_bytes());
+        data[48..52].copy_from_slice(&(m.len() as u32).to_le_bytes());
+        data[at..at + m.len()].copy_from_slice(&m);
+        data
+    };
+    for size in [300, 4096 + 700, 65536 + 700] {
+        let image = make(size, b"test", 2);
+        let mut f = Fake::versioned(&image, target::MODULE, false, b"test", 2);
+        let (_, done) = run(&mut f);
+        assert!(done, "size {size}: {:?}", f.out);
+        assert!(written_page(&f, 0, &image));
+        for (what, image) in [("version", make(size, b"test", 3)), ("name", make(size, b"other", 2))] {
+            let mut f = Fake::versioned(&image, target::MODULE, false, b"test", 2);
+            run(&mut f);
+            assert!(f.out.starts_with(b"ERR 4 "), "size {size}, other {what}: {:?}", f.out);
+            assert!(!f.writes.iter().any(|(a, _)| *a == 0x380000), "block zero (the header) is never written: the page stays free");
+            assert_eq!(f.rescans, 0);
+        }
+    }
+}
+#[test]
+fn the_rollback_floor_of_a_name_is_the_highest_journal_entry_of_its_pages() {
+    let image = module_image();
+    let mut f = Fake::versioned(&image, target::MODULE, false, b"test", 3);
+    module_v(&mut f, 0, b"test", 2, 1);
+    module_v(&mut f, 1, b"test", 2, 2);
+    // the journal says page 1 holds a package of version 4 (the log keeps the highest it was told)
+    let mut state = StateLog::open(Raw(f.flash[0xee000..0xf0000].to_vec()));
+    assert!(state.append_module_version(1, 4));
+    f.flash[0xee000..0xf0000].copy_from_slice(&state.ops().0);
+    run(&mut f);
+    assert!(f.out.starts_with(b"ERR 9 "), "{:?}", f.out);
 }
 #[test]
 fn the_flasher_never_replaces_itself_or_a_module_with_another_number() {
@@ -516,7 +750,7 @@ fn the_flasher_never_replaces_itself_or_a_module_with_another_number() {
     module_on_page(&mut f, 1, b"test", 9);
     run(&mut f);
     assert!(f.out.starts_with(b"ERR 4 "), "{:?}", f.out);
-    assert!(!f.writes.iter().any(|(a, _)| *a == 0x390000));
+    assert!(!f.writes.iter().any(|(a, _)| *a == 0x380000 || *a == 0x390000));
 }
 /// An unsigned package: zero key and signature.
 fn unsigned(f: &mut Fake) {
@@ -594,4 +828,49 @@ fn a_signed_package_made_by_the_loader_tools_is_installed_over_the_socket_protoc
     assert!(f.out.starts_with(b"OK ") && f.out.ends_with(b"\n"), "{:?}", f.out);
     let log = StateLog::open(Raw(f.flash[0xee000..0xf0000].to_vec()));
     assert_eq!(log.view.minver_loader, Some(9));
+}
+
+#[test]
+fn multi_page_images_protect_tails_and_require_contiguous_space() {
+    let image=module_image();let mut f=Fake::new(&image,target::MODULE,false);
+    module_v(&mut f,0,b"nan",46,1);
+    f.flash[0x380000+12..0x380000+16].copy_from_slice(&(65536u32+100).to_le_bytes());
+    let pages=read_pages_of(&f);
+    assert_eq!(pages[1].unwrap().first,0);
+    assert!(is_active(&pages,0));assert!(!is_active(&pages,1));
+    assert_eq!(choose_span(&pages,b"other",1,PageSet::low(0),2,8).unwrap().0,2);
+    assert_eq!(choose_page(&pages,b"other",1,0).unwrap().0,2,"active continuation cannot be reused");
+    assert!(choose_span(&pages,b"other",1,PageSet::low(0),2,2).is_err());
+    assert!(choose_span(&pages,b"nan",1,PageSet::low(0),2,8).is_err(),"rollback still refused");
+    module_v(&mut f,4,b"nan",46,2);let pages=read_pages_of(&f);
+    assert_eq!(choose_span(&pages,b"other",1,PageSet::low(0),2,2).unwrap().0,0,"whole shadowed extent may be reused");
+    assert!(choose_span(&pages,b"other",1,PageSet::low(1),2,2).is_err(),"running old head protects its complete extent");
+}
+
+#[test]
+fn expanded_module_partition_admits_and_protects_high_pages() {
+    let mut f=Fake::new(&module_image(),target::MODULE,false);
+    // Same 4 MiB flash, with the C-only 1.5 MiB module partition.
+    f.flash[0x8000+32+4..0x8000+32+8].copy_from_slice(&0x280000u32.to_le_bytes());
+    f.flash[0x8000+32+8..0x8000+32+12].copy_from_slice(&0x180000u32.to_le_bytes());
+    f.flash[0x8000+64+8..0x8000+64+12].copy_from_slice(&0x190000u32.to_le_bytes());
+    for page in 0..20 {
+        let name=std::format!("active{page}");module_v(&mut f,0,name.as_bytes(),2,1);
+        let header=f.flash[0x380000..0x380000+256].to_vec();
+        let at=0x280000+page*65536;f.flash[at..at+256].copy_from_slice(&header);
+    }
+    let h=f.host();let hw=unsafe {Hw::new(&h)}.unwrap();let l=layout(hw).unwrap();
+    let pages=read_pages(hw,&l).unwrap();assert_eq!(pages.len(),24);
+    assert_eq!(choose_span(&pages,b"quic",1,PageSet::default(),4,24).unwrap().0,20);
+    module_v(&mut f,0,b"quic",48,1);let mut header=f.flash[0x380000..0x380000+256].to_vec();
+    header[12..16].copy_from_slice(&(3*65536u32+100).to_le_bytes());
+    f.flash[0x3c0000..0x3c0000+256].copy_from_slice(&header);
+    module_v(&mut f,0,b"quic",48,2);let header=f.flash[0x380000..0x380000+256].to_vec();
+    f.flash[0x280000..0x280000+256].copy_from_slice(&header);
+    let pages=read_pages(hw,&l).unwrap();assert_eq!(pages[23].unwrap().first,20);
+    assert_eq!(choose_span(&pages,b"other",1,PageSet::default(),4,24).unwrap().0,20);
+    f.running_pages=vec![20];let protected=running_pages(hw).unwrap();
+    assert!(choose_span(&pages,b"other",1,protected,4,24).is_err(),"running high-page head protects its entire four-page image");
+    let mut journal=StateLog::open(Raw(vec![255;8192]));assert!(journal.append_module_version(20,77));
+    assert_eq!(module_floor(hw,&l,&journal.view,b"quic").unwrap(),Some(77));
 }

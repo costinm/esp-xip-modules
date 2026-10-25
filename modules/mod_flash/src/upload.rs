@@ -54,6 +54,8 @@ pub(crate) enum Action<'a> {
         target: u8,
         name: &'a [u8],
         image_size: u32,
+        /// The signed package version: for a module, its version (manifest key 8).
+        version: u32,
         dry: bool,
     },
     Write {
@@ -271,6 +273,7 @@ impl Session {
                             target: h.target,
                             name: h.name(),
                             image_size: h.image_size,
+                            version: h.version,
                             dry: self.dry(),
                         }),
                     });

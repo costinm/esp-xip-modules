@@ -22,7 +22,8 @@ pub(crate) const REC_MINVER_LOADER: u8 = 5;
 pub(crate) const REC_MINVER_STAGE2: u8 = 6;
 /// One module slot: `slot u8` + `u32` minimum version.
 pub(crate) const REC_MINVER_MODULE: u8 = 7;
-pub(crate) const MODULE_SLOTS: usize = 8;
+// The existing wire page index is u8: all 256 values fit, without a new record.
+pub(crate) const MODULE_SLOTS: usize = 256;
 
 const MAGIC: u32 = 0x3153_4c57; // "WLS1"
 const ACTIVE: u32 = 0xa5a5_a5a5;
@@ -37,7 +38,7 @@ pub(crate) trait FlashOps {
 }
 
 /// The latest value of every record.
-#[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct View {
     pub(crate) pin: Option<[u8; PUBKEY_SIZE]>,
     pub(crate) minver: Option<u32>,
@@ -47,6 +48,13 @@ pub(crate) struct View {
     pub(crate) header: Option<[u8; HEADER_SIZE]>,
     /// 0 none, 1 QIO ok, 2 DIO only.
     pub(crate) qio: u8,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self { pin:None,minver:None,minver_loader:None,minver_stage2:None,
+            minver_module:[None;MODULE_SLOTS],header:None,qio:0 }
+    }
 }
 
 impl View {
