@@ -1,7 +1,7 @@
 {
   "components": [
     {
-      "doc": "The radio of the device, as the network-facing (CBOR, JSON, text) view of the `wifi` and `wifi-tuning` components. The C\nstructs modules use are in `crates/xip-abi/src/wifi.rs` (`xip_wifi_intent`, `xip_wifi_state`, `xip_wifi_tuning`); this file\nnames and numbers the same fields for consoles, gateways and tools. The mapping is one to one: `get` and `set` carry a\n`WifiIntent`, `state` a `WifiState` and `tuning` / `set_tuning` a `WifiTuning`, with names and passphrases as text instead\nof byte arrays with lengths.\n\nThe model is an **intended state**: a caller says what the radio should do and the device makes it true (joins, retries,\nfollows a channel change). There is no start or stop. With the radio on, `sta`, `ap` and `now` compose the state\n(ESPNOW.md \"Radio states\"): soft AP + ESP-NOW, station + ESP-NOW, both, and off (the radio stops and is woken only by\na NAN/NOW discovery window, for sync); with `now` absent, the plain station — the one on state where the modem power\nsave runs instead, on the BSS beacon/DTIM schedule. Every state with ESP-NOW keeps the modem awake (ESP-NOW cannot run\nagainst a sleeping modem), so the soft AP is a small extra cost — its ~512 ms beacon, which doubles as the soft-NAN\ntiming anchor. NOW-only operation (`sta=0, ap=0, now=1`) also receives without AP:\nthe radio owner registers a connectionless receive-window vote independently of ordinary modem sleep.",
+      "doc": "The radio of the device, as the network-facing (CBOR/JSON) view of the `wifi` and `wifi-tuning` components. The C\nstructs modules use are in `crates/xip-abi/src/wifi.rs` (`xip_wifi_intent`, `xip_wifi_state`, `xip_wifi_tuning`); this file\nnames and numbers the same fields for consoles, gateways and tools. The mapping is one to one: `get` and `set` carry a\n`WifiIntent`, `state` a `WifiState` and `tuning` / `set_tuning` a `WifiTuning`, with names and passphrases as text instead\nof byte arrays with lengths.\n\nThe model is an **intended state**: a caller says what the radio should do and the device makes it true (joins, retries,\nfollows a channel change). There is no start or stop. With the radio on, `sta`, `ap` and `now` compose the state\n(ESPNOW.md \"Radio states\"): soft AP + ESP-NOW, station + ESP-NOW, both, and off (the radio stops and is woken only by\na NAN/NOW discovery window, for sync); with `now` absent, the plain station — the one on state where the modem power\nsave runs instead, on the BSS beacon/DTIM schedule. Every state with ESP-NOW keeps the modem awake (ESP-NOW cannot run\nagainst a sleeping modem), so the soft AP is a small extra cost — its ~512 ms beacon, which doubles as the soft-NAN\ntiming anchor. NOW-only operation (`sta=0, ap=0, now=1`) also receives without AP:\nthe radio owner registers a connectionless receive-window vote independently of ordinary modem sleep.",
       "index": 10,
       "name": "wifi"
     }
@@ -108,7 +108,7 @@
     {
       "access": "authenticated",
       "component": "wifi",
-      "doc": "Everything is absent while the radio is off. This is the CBOR form of `wifi.state`.",
+      "doc": "The role and radio flags remain present while off; local MACs are included when known. Joined SSID, IP and RSSI are omitted until associated. `mod_con` encodes this snapshot from the host Wi-Fi table; it never starts another Wi-Fi owner.",
       "index": 3,
       "method": "state",
       "name": "wifi.state",
@@ -152,6 +152,36 @@
             "name": "channel",
             "tag": 6,
             "type": "u8"
+          },
+          {
+            "description": "Actual local station MAC, six bytes.",
+            "name": "sta_mac",
+            "tag": 8,
+            "type": "bytes"
+          },
+          {
+            "description": "Actual local AP MAC, six bytes.",
+            "name": "ap_mac",
+            "tag": 9,
+            "type": "bytes"
+          },
+          {
+            "description": "Driver is running independently of association.",
+            "name": "radio",
+            "tag": 10,
+            "type": "bool"
+          },
+          {
+            "description": "Actual promiscuous receive state.",
+            "name": "monitoring",
+            "tag": 11,
+            "type": "bool"
+          },
+          {
+            "description": "Native NOW enabled for this epoch.",
+            "name": "now",
+            "tag": 12,
+            "type": "bool"
           }
         ]
       },
@@ -161,7 +191,7 @@
     {
       "access": "authenticated",
       "component": "wifi",
-      "doc": "Never blocks: a scan takes seconds and a handler has a budget of milliseconds. The first call starts the scan and returns\n`unavailable` with `retry`; poll about once a second and the call that finds it done returns the answer, once. It works in\nevery radio mode (station, ESP-NOW only, soft AP, joined); with the radio off it is switched on for the scan and off again.\nA scan leaves the channel for about two seconds, so ESP-NOW and a soft AP do not hear their channel meanwhile; the radio is put\nback on its channel afterwards. While the driver is busy joining the call returns `unavailable`. A network in range that is\nnot listed was missed (a scan can); scan again. A module gets the same list from the `scan` function of the `wifi` component.",
+      "doc": "Never blocks: a scan takes seconds and a handler has a budget of milliseconds. The first call starts the scan and returns\n`unavailable` with `retry`; poll about once a second and the call that finds it done returns the answer, once. It works in\nevery radio mode (station, ESP-NOW only, soft AP, joined); with the radio off it is switched on for the scan and off again.\nA scan leaves the channel for about two seconds, so ESP-NOW and a soft AP do not hear their channel meanwhile; the radio is put\nback on its channel afterwards. While the driver is busy joining the call returns `unavailable`. A network in range that is\nnot listed was missed (a scan can); scan again. A module gets the same list from the `scan` function of the `wifi` component.\n\n`mod_con` calls the host scan table and encodes the result. `ERR_BUSY` (-5) means retry; no private scan task or result cache is added.",
       "execution": "non-blocking",
       "index": 4,
       "method": "scan",

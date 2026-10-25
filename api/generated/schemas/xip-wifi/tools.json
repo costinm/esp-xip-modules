@@ -179,6 +179,11 @@
     "name": "wifi.state",
     "outputSchema": {
       "properties": {
+        "ap_mac": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "bytes"
+        },
         "ap_up": {
           "type": "boolean",
           "x-protobuf-index": 5,
@@ -194,6 +199,21 @@
           "x-protobuf-index": 3,
           "x-protobuf-type": "string"
         },
+        "monitoring": {
+          "type": "boolean",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "bool"
+        },
+        "now": {
+          "type": "boolean",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "bool"
+        },
+        "radio": {
+          "type": "boolean",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "bool"
+        },
         "rssi": {
           "type": "integer",
           "x-protobuf-index": 4,
@@ -208,6 +228,11 @@
           "type": "string",
           "x-protobuf-index": 1,
           "x-protobuf-type": "StaState"
+        },
+        "sta_mac": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "bytes"
         }
       },
       "required": [],

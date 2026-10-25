@@ -147,6 +147,12 @@
           "name": "partition_size",
           "tag": 6,
           "type": "u32"
+        },
+        {
+          "description": "Factory Wi-Fi station MAC, six bytes.",
+          "name": "mac",
+          "tag": 7,
+          "type": "bytes"
         }
       ],
       "kind": "row",
@@ -359,7 +365,7 @@
           "type": "bool"
         },
         {
-          "description": "Of the installed package.",
+          "description": "Of the active image: its manifest version (key 8, 0 without one); higher is newer.",
           "name": "version",
           "tag": 5,
           "type": "u32"
@@ -399,10 +405,46 @@
           "name": "reboot",
           "tag": 11,
           "type": "bool"
+        },
+        {
+          "description": "The 64 KiB page of the module partition the active image sits on.",
+          "name": "page",
+          "tag": 12,
+          "type": "u32"
+        },
+        {
+          "description": "The other installed images of this module name: lower versions (kept for recovery, the first pages to be reused) and duplicates. Empty when none.",
+          "name": "shadowed",
+          "tag": 13,
+          "type": "Shadowed[]"
         }
       ],
       "kind": "row",
       "name": "Slot"
+    },
+    {
+      "fields": [
+        {
+          "description": "The page of the shadowed image.",
+          "name": "page",
+          "tag": 1,
+          "type": "u32"
+        },
+        {
+          "description": "Its version (manifest key 8).",
+          "name": "version",
+          "tag": 2,
+          "type": "u32"
+        },
+        {
+          "description": "The same version as the active image (the lowest page is the active one) instead of a lower one.",
+          "name": "duplicate",
+          "tag": 3,
+          "type": "bool"
+        }
+      ],
+      "kind": "row",
+      "name": "Shadowed"
     }
   ]
 }

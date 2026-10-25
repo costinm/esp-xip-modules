@@ -1,187 +1,5 @@
 [
   {
-    "description": "text line to request",
-    "inputSchema": {
-      "properties": {
-        "line": {
-          "type": "string",
-          "x-protobuf-index": 1,
-          "x-protobuf-type": "string"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "console.parse",
-    "outputSchema": {
-      "properties": {
-        "component": {
-          "type": "string",
-          "x-protobuf-index": 1,
-          "x-protobuf-type": "uint"
-        },
-        "fields": {
-          "type": "string",
-          "x-protobuf-index": 5,
-          "x-protobuf-type": "map"
-        },
-        "local": {
-          "type": "string",
-          "x-protobuf-index": 12,
-          "x-protobuf-type": "string"
-        },
-        "method": {
-          "type": "string",
-          "x-protobuf-index": 2,
-          "x-protobuf-type": "uint"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "x-component-index": 20,
-    "x-method-index": 1,
-    "x-standard-errors": [
-      "unauthenticated",
-      "permission_denied",
-      "timeout",
-      "remote_exception",
-      "invalid_argument",
-      "not_found",
-      "conflict",
-      "unavailable",
-      "internal"
-    ]
-  },
-  {
-    "description": "answer to text",
-    "inputSchema": {
-      "properties": {
-        "component": {
-          "type": "string",
-          "x-protobuf-index": 1,
-          "x-protobuf-type": "uint"
-        },
-        "error": {
-          "type": "string",
-          "x-protobuf-index": 7,
-          "x-protobuf-type": "string"
-        },
-        "method": {
-          "type": "string",
-          "x-protobuf-index": 2,
-          "x-protobuf-type": "uint"
-        },
-        "result": {
-          "type": "string",
-          "x-protobuf-index": 6,
-          "x-protobuf-type": "map"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "console.render",
-    "outputSchema": {
-      "properties": {
-        "text": {
-          "type": "string",
-          "x-protobuf-index": 1,
-          "x-protobuf-type": "string"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "x-component-index": 20,
-    "x-method-index": 2,
-    "x-standard-errors": [
-      "unauthenticated",
-      "permission_denied",
-      "timeout",
-      "remote_exception",
-      "invalid_argument",
-      "not_found",
-      "conflict",
-      "unavailable",
-      "internal"
-    ]
-  },
-  {
-    "description": "binary envelope to binary answer",
-    "inputSchema": {
-      "properties": {
-        "component": {
-          "type": "string",
-          "x-protobuf-index": 1,
-          "x-protobuf-type": "uint"
-        },
-        "fields": {
-          "type": "string",
-          "x-protobuf-index": 5,
-          "x-protobuf-type": "map"
-        },
-        "id": {
-          "type": "string",
-          "x-protobuf-index": 3,
-          "x-protobuf-type": "uint"
-        },
-        "method": {
-          "type": "string",
-          "x-protobuf-index": 2,
-          "x-protobuf-type": "uint"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "console.dispatch",
-    "outputSchema": {
-      "properties": {
-        "component": {
-          "type": "string",
-          "x-protobuf-index": 1,
-          "x-protobuf-type": "uint"
-        },
-        "error": {
-          "type": "string",
-          "x-protobuf-index": 7,
-          "x-protobuf-type": "int"
-        },
-        "id": {
-          "type": "string",
-          "x-protobuf-index": 3,
-          "x-protobuf-type": "uint"
-        },
-        "method": {
-          "type": "string",
-          "x-protobuf-index": 2,
-          "x-protobuf-type": "uint"
-        },
-        "result": {
-          "type": "string",
-          "x-protobuf-index": 6,
-          "x-protobuf-type": "map"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "x-component-index": 20,
-    "x-method-index": 4,
-    "x-standard-errors": [
-      "unauthenticated",
-      "permission_denied",
-      "timeout",
-      "remote_exception",
-      "invalid_argument",
-      "not_found",
-      "conflict",
-      "unavailable",
-      "internal"
-    ]
-  },
-  {
     "description": "device snapshot",
     "inputSchema": {
       "properties": {},
@@ -428,6 +246,49 @@
     },
     "x-component-index": 20,
     "x-method-index": 10,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "DEBUG ONLY: send one packet on a link",
+    "inputSchema": {
+      "properties": {
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        },
+        "link": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "token": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "console.link.send",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 20,
+    "x-method-index": 11,
     "x-standard-errors": [
       "unauthenticated",
       "permission_denied",

@@ -1,6 +1,6 @@
 # `wifi` API (10)
 
-The radio of the device, as the network-facing (CBOR, JSON, text) view of the `wifi` and `wifi-tuning` components. The C
+The radio of the device, as the network-facing (CBOR/JSON) view of the `wifi` and `wifi-tuning` components. The C
 structs modules use are in `crates/xip-abi/src/wifi.rs` (`xip_wifi_intent`, `xip_wifi_state`, `xip_wifi_tuning`); this file
 names and numbers the same fields for consoles, gateways and tools. The mapping is one to one: `get` and `set` carry a
 `WifiIntent`, `state` a `WifiState` and `tuning` / `set_tuning` a `WifiTuning`, with names and passphrases as text instead
@@ -49,7 +49,7 @@ ESP-NOW, `channel` 0, no names). To change only the channel, `get`, edit and `se
 
 ## 3. `state` — What is true now
 
-Everything is absent while the radio is off. This is the CBOR form of `wifi.state`.
+The role and radio flags remain present while off; local MACs are included when known. Joined SSID, IP and RSSI are omitted until associated. `mod_con` encodes this snapshot from the host Wi-Fi table; it never starts another Wi-Fi owner.
 
 **Access:** authenticated
 
@@ -63,6 +63,11 @@ Everything is absent while the radio is off. This is the CBOR form of `wifi.stat
 | 4 | `rssi` | `i8` | Signal of the joined network in dBm; present when `sta` is `up`. |
 | 5 | `ap_up` | `bool` | The soft AP is running. |
 | 6 | `channel` | `u8` | The channel in use; present when the radio is on. |
+| 8 | `sta_mac` | `bytes` | Actual local station MAC, six bytes. |
+| 9 | `ap_mac` | `bytes` | Actual local AP MAC, six bytes. |
+| 10 | `radio` | `bool` | Driver is running independently of association. |
+| 11 | `monitoring` | `bool` | Actual promiscuous receive state. |
+| 12 | `now` | `bool` | Native NOW enabled for this epoch. |
 
 ## 4. `scan` — The networks in range
 
@@ -72,6 +77,8 @@ every radio mode (station, ESP-NOW only, soft AP, joined); with the radio off it
 A scan leaves the channel for about two seconds, so ESP-NOW and a soft AP do not hear their channel meanwhile; the radio is put
 back on its channel afterwards. While the driver is busy joining the call returns `unavailable`. A network in range that is
 not listed was missed (a scan can); scan again. A module gets the same list from the `scan` function of the `wifi` component.
+
+`mod_con` calls the host scan table and encodes the result. `ERR_BUSY` (-5) means retry; no private scan task or result cache is added.
 
 **Execution:** non-blocking
 **Access:** authenticated
@@ -229,3 +236,16 @@ C runtime, and `raw_rx`, `driver_tx` and `raw_tx_rate` need the `udp6` link, whi
 | 0 | `default` | The device's own default. |
 | 1 | `on` | Enabled. |
 | 2 | `off` | Disabled. |
+
+## Native Wi-Fi version 2
+
+WifiState appends actual STA/AP MACs and radio/monitor/NOW flags. The original
+52-byte prefix remains readable on the C runtime. `sta=up` now means associated;
+`ip4` is zero until IPv4 is ready.
+
+`auto_reconnect(ctx, enabled)` returns the previous boolean and lets a module
+own retry policy. `scan_channels(ctx, out, max, bitmap, dwell_ms)` is a bounded
+non-blocking scan, with the normal scan completion contract. Bitmap bits 1..14
+select channels; dwell is 10..120 ms per selected channel. Modules restore the
+previous native reconnect policy on stop. These mechanisms do not prescribe a
+particular AP, retry cadence or NAN policy.

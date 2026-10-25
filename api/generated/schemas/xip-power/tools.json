@@ -104,6 +104,11 @@
           "x-protobuf-index": 21,
           "x-protobuf-type": "u32"
         },
+        "ip_sockets": {
+          "type": "integer",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "u8"
+        },
         "last_duration_us": {
           "type": "integer",
           "x-protobuf-index": 16,

@@ -50,6 +50,7 @@ This call never invokes another module. No console module is needed. No partial 
 | 4 | `partition_label` | `string` | The running partition; omitted when the platform cannot identify it. |
 | 5 | `partition_address` | `u32` | Its address. |
 | 6 | `partition_size` | `u32` | Its size. |
+| 7 | `mac` | `bytes` | Factory Wi-Fi station MAC, six bytes. |
 
 `WifiStatus` fields:
 
@@ -101,10 +102,29 @@ This call never invokes another module. No console module is needed. No partial 
 | 2 | `tag` | `u16` | The component number of the module. |
 | 3 | `installed` | `bool` | A module is installed. |
 | 4 | `running` | `bool` | The module is running. |
-| 5 | `version` | `u32` | Of the installed package. |
+| 5 | `version` | `u32` | Of the active image: its manifest version (key 8, 0 without one); higher is newer. |
 | 6 | `last` | `i32` | What the module returned the last time. |
 | 7 | `runs` | `u32` | Handler calls so far. |
 | 8 | `ms` | `u32` | Duration of the last run. |
 | 9 | `stack_free` | `u32` | Worker stack high-water mark. |
 | 10 | `check` | `i32` | Result of the last start attempt's image check. |
 | 11 | `reboot` | `bool` | The module stopped with memory it had not freed: it cannot be replaced until the device restarts. |
+| 12 | `page` | `u32` | The 64 KiB page of the module partition the active image sits on. |
+| 13 | `shadowed` | `Shadowed[]` | The other installed images of this module name: lower versions (kept for recovery, the first pages to be reused) and duplicates. Empty when none. |
+
+`Shadowed` fields:
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `page` | `u32` | The page of the shadowed image. |
+| 2 | `version` | `u32` | Its version (manifest key 8). |
+| 3 | `duplicate` | `bool` | The same version as the active image (the lowest page is the active one) instead of a lower one. |
+
+
+The native `identity` component is available to trusted modules through
+`get_component("identity")`. Its Rust declaration is `xip_abi::Identity` and C
+layout is generated in `include/xip.h`. It exposes the persistent device P-256
+public key, message signing, and SEC1 signature verification. Private key bytes
+never enter module or console responses. This is a native component, with no
+remote console signing method; announcement wire format and caching policy
+belong to its module caller.
