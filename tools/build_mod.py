@@ -14,7 +14,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
     parser.add_argument('--chip', default='esp32c6', choices=tuple(mkmod.CHIPS))
-    parser.add_argument('--offset', default='0', help='module-partition page offset: selects a RAM cell; Xtensa also links code for this page (multiple of 0x10000)')
+    parser.add_argument('--slot', type=int, help='the module slot (default: modules/SLOTS): its RAM cell; Xtensa also links code for its 64 KiB window. Not a flash page')
+    parser.add_argument('--version', type=int, default=0, help='the manifest version of the module (higher is newer; 0: none)')
     parser.add_argument('--out', type=Path)
     parser.add_argument('--host-metadata', type=Path, help='write canonical native module metadata without compiling an image')
     args = parser.parse_args()
@@ -39,12 +40,15 @@ def main():
             env['XIP_RUST_ESP_BIN'] = str(rust_bin)
     env.setdefault('CARGO_TARGET_DIR', str(directory / 'target' / 'cargo'))
     features = 'flat-image' + (',' + args.chip if chip_feature else '')
-    command = ['python3', str(Path(mkmod.ROOT) / 'tools' / 'mkmod.py'), *options,
+    command = ['python3', str(Path(mkmod.ROOT) / 'tools' / 'mkmod.py'), *options, *(['--version', str(args.version)] if args.version else []),
                '--cargo', f'{manifest}:{name}:{features}']
     if args.host_metadata:
         command += ['--host-metadata', str(args.host_metadata)]
     else:
-        command += ['--chip', args.chip, '--offset', args.offset, '--elf', str(out / f'{name}.elf'), '--out', str(out / f'{name}.dmod')]
+        slot = args.slot if args.slot is not None else mkmod.read_slots().get(directory.name)
+        if slot is None:
+            parser.error(f'{directory.name} has no slot: add it to modules/SLOTS')
+        command += ['--chip', args.chip, '--slot', str(slot), '--elf', str(out / f'{name}.elf'), '--out', str(out / f'{name}.dmod')]
     subprocess.run(command, env=env, check=True)
 
 

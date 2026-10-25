@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Send an image to the mod_flash module (TCP 5227) as an UNSIGNED package (the device needs `nv flash.auth=unsigned`).
+"""Send an image to the mod_flash module (TCP 5227) as an UNSIGNED package (requires NV `flash.auth=unsigned` or an `unsigned` flash start request).
   flash_upload.py HOST main FILE | module NAME FILE | loader FILE | stage2 FILE | flash 0xADDR FILE   [--chip esp32c6] [--version N] [--dry]
 The package format is the loader project's (docs/development.md, "Formats"); key and signature are zero."""
-import argparse, hashlib, socket, struct, sys
+import argparse, hashlib, os, socket, struct, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 CPU = {"esp32": 0, "esp32s3": 9, "esp32c6": 13}
 TARGET = {"main": 1, "loader": 2, "stage2": 3, "module": 4, "flash": 5}
@@ -22,6 +24,13 @@ def package(image: bytes, target: int, name: bytes, cpu: int, version: int = 1, 
     h[88:88 + len(name)] = name
     transport = b"WLU1" + bytes([1, 2 if dry else 0, 0, 0]) + bytes(8)
     return transport + bytes(65) + bytes(64) + bytes(h) + table + image
+
+
+def module_version(image: bytes) -> int:
+    """The version of a module image: manifest key 8, 0 without one. The package version of a module must be this number (mod_flash checks)."""
+    import dmod, mkmod
+    manifest = dmod.manifest_of(image)
+    return mkmod._cbor_item(manifest, 0)[0].get(8, 0) if manifest else 0
 
 
 def send(host: str, data: bytes, port: int = 5227) -> str:
@@ -50,7 +59,7 @@ def main():
     ap.add_argument("kind", choices=sorted(TARGET))
     ap.add_argument("args", nargs="+", help="[NAME|ADDRESS] FILE")
     ap.add_argument("--chip", default="esp32c6", choices=sorted(CPU))
-    ap.add_argument("--version", type=int, default=1)
+    ap.add_argument("--version", type=int, default=None, help="package version (default: a module's manifest version, else 1)")
     ap.add_argument("--dry", action="store_true")
     a = ap.parse_args()
     name = b""
@@ -61,7 +70,8 @@ def main():
     elif len(a.args) != 1:
         sys.exit(f"{a.kind} needs FILE")
     image = open(a.args[-1], "rb").read()
-    reply = send(a.host, package(image, TARGET[a.kind], name, CPU[a.chip], a.version, a.dry))
+    version = a.version if a.version is not None else (module_version(image) if a.kind == "module" else 1)
+    reply = send(a.host, package(image, TARGET[a.kind], name, CPU[a.chip], version, a.dry))
     print(reply)
     sys.exit(0 if reply.startswith("OK") else 1)
 

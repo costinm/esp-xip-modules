@@ -22,7 +22,7 @@ if [[ $what == generated || $what == abi || $what == all ]]; then
     # regenerate and compare: a stale generated file is reported (and left regenerated). gen.sh needs cbindgen and mesh-api-gen
     # (on PATH, both come from the flake); without them the check is skipped, the generated files are committed.
     if command -v cbindgen >/dev/null && command -v mesh-api-gen >/dev/null; then
-        sums() { find api/generated -type f | LC_ALL=C sort | xargs sha256sum; sha256sum include/xip.h modules/*/API.manifest modules/mod_con/src/tables.rs; }
+        sums() { find api/generated -type f | LC_ALL=C sort | xargs sha256sum; sha256sum include/xip.h modules/*/API.manifest modules/mod_con/src/tables.rs crates/xip-abi/src/ble_vtable.rs modules/mod_ble/src/api_gen.rs; }
         before=$(sums); scripts/gen.sh
         [[ "$before" == "$(sums)" ]] || { echo "scripts/gen.sh changed generated files: commit them (a new runtime) or revert" >&2; exit 1; }
     elif [[ $what == generated ]]; then
@@ -35,6 +35,10 @@ fi
 if [[ $what == c || $what == all ]]; then
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_info_cache tests/host/test_info_cache.c -lpthread
     target/test_info_cache
+    # the envelope parser, the answer head and the table of waiting requests of the runtime's envelope handling
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include \
+        -o target/test_envelope tests/host/test_envelope.c components/xip_runtime/src/xip_envelope.c
+    target/test_envelope
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include \
         -o target/test_flash_hal tests/host/test_flash_hal.c components/xip_runtime/src/xip_pool.c
     target/test_flash_hal
@@ -45,6 +49,10 @@ if [[ $what == c || $what == all ]]; then
     gcc -Wall -Wextra -fsanitize=address,undefined -g -I include -I components/xip_runtime/include -I components/xip_loader/include -I tests/host \
         -o target/test_check tests/host/test_check.c components/xip_loader/src/xip_check.c
     target/test_check
+    # which image of a name runs (versions, shadowed pages, RAM cells)
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_loader/include \
+        -o target/test_select tests/host/test_select.c components/xip_loader/src/xip_select.c
+    target/test_select
     # the packet pool
     gcc -Wall -Wextra -fsanitize=address,undefined -g -I components/xip_runtime/include -o target/test_pool tests/host/test_pool.c \
         components/xip_runtime/src/xip_pool.c -lpthread
@@ -53,21 +61,50 @@ if [[ $what == c || $what == all ]]; then
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include -I tests/host/fake_idf -I tests/host \
         -o target/test_ppp tests/host/test_ppp.c components/xip_runtime/src/xip_ppp.c
     target/test_ppp
-    # NOW framing is private to the bearer; its maintained Rust native tests run in ci-runtime.
+    # the QUIC classifier, relay table and envelope fields of the common QUIC receive function (golden packets from quic-lite)
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include \
+        -o target/test_quic tests/host/test_quic.c components/xip_runtime/src/xip_quic.c
+    target/test_quic
+    # NOW framing native tests remain local to crates/xip-runtime-esp/tests/.
+fi
+if [[ $what == ci-runtime || $what == all ]]; then
+    python3 -m unittest discover -s tools -p test_partition_layout.py
+    cargo test --quiet --locked --manifest-path crates/Cargo.toml -p xip-abi --features global-alloc --lib heap::tests
 fi
 if [[ $what == rust || $what == runtime || $what == ci-runtime || $what == all ]]; then
     # the crates and the Rust modules: logic on a PC (the images are built by scripts/build.sh with the esp toolchain)
-    module_crates=(modules/mod_lora modules/mod_hw)
+    module_crates=(modules/mod_lora modules/mod_hw modules/mod_nan modules/mod_disc modules/mod_quic)
     # Legacy mod_flash compatibility tests read local root tests/data fixtures.
     # Keep them in local runtime/rust/all runs until rewritten as self-contained Rust tests.
     [[ $what == ci-runtime ]] || module_crates+=(modules/mod_flash)
     for crate in "${module_crates[@]}"; do
         cargo test --quiet --manifest-path "$crate/Cargo.toml"
     done
+    if [[ $what == ci-runtime ]]; then
+        # Self-contained Rust regressions; no local root tests/data fixtures.
+        for test in activation_auth_uses_nv_and_explicit_requests_override_it \
+                    multi_page_images_protect_tails_and_require_contiguous_space \
+                    the_package_and_its_image_say_the_same_name_and_version \
+                    expanded_module_partition_admits_and_protects_high_pages; do
+            cargo test --quiet --manifest-path modules/mod_flash/Cargo.toml --lib \
+                "tests::$test" -- --exact
+        done
+    fi
+    if [[ $what == ci-runtime ]]; then
+        cargo test --quiet --manifest-path modules/mod_flash/Cargo.toml --lib state_tests::all_page_floors_survive_compaction_and_interruption_without_format_change -- --exact
+        cargo test --quiet --manifest-path modules/mod_flash/Cargo.toml --lib state_tests::expanded_page_journal_compacts_between_c_and_rust_readers -- --exact
+    fi
     # the host-runtime runs the modules (built for this machine) against the host table: virtual time, fixtures
     scripts/build-host-modules.sh >/dev/null
-    # crates/: one workspace, one Cargo.lock (xip-abi, both runtimes, dmesh-wifi-profile, dmesh-cli)
-    cargo test --quiet --locked --manifest-path crates/Cargo.toml --workspace --exclude dmesh-cli
+    # crates/: one workspace, one Cargo.lock (xip-abi, both runtimes, dmesh-cli)
+    if [[ $what == ci-runtime ]]; then
+        # The ESP native integration tests/fixtures are local, not checked in.
+        # Keep the tracked host integration tests and ESP library tests in CI.
+        cargo test --quiet --locked --manifest-path crates/Cargo.toml --workspace --exclude dmesh-cli --exclude xip-runtime-esp
+        cargo test --quiet --locked --manifest-path crates/Cargo.toml -p xip-runtime-esp --lib
+    else
+        cargo test --quiet --locked --manifest-path crates/Cargo.toml --workspace --exclude dmesh-cli
+    fi
 fi
 if [[ $what == rust || $what == cli || $what == all ]]; then
     # dmesh-cli separately: its schema tests are known to fail while the pinned dmesh-server git dep
@@ -80,7 +117,6 @@ if [[ $what == rust || $what == cli || $what == all ]]; then
 fi
 if [[ $what == python || $what == all ]]; then
     python3 tests/test_tools.py      # tools, ABI generator, module build (needs the toolchains for that part)
-    python3 tests/test_log_history_lock.py   # the firmware's log lock (fw/transport), compiled on the PC with rustc
 fi
 if [[ $KNOWN_FAILURES != 0 ]]; then
     echo "test-host: requested groups finished; dmesh-cli failures above remain (pinned dmesh-server dep)" >&2

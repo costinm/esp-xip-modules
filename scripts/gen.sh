@@ -9,13 +9,20 @@
 # From api/*.API.md and modules/*/API.md (mesh-api-gen) and the layout of the types (rustdoc's JSON of xip-abi):
 #   api/generated/<name>.api.json         the full-fidelity form of each API (docs, enums, the C layout of types and functions)
 #   modules/<name>/API.manifest           the compact catalog a module image carries (tools/mkmod.py packs it)
-#   modules/mod_con/src/tables.rs         the console's tables: the methods by name, and where the native functions of the host components are
+#   modules/mod_con/src/tables.rs         the console's native component layouts and functions
+# From modules/*/API.md and the C types in xip-abi (tools/gen_vtables.py), before the header: the vtable of a hosted component and its glue
+#   crates/xip-abi/src/ble_vtable.rs      modules/mod_ble/src/api_gen.rs
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 gen=$(command -v mesh-api-gen || true)
 [ -n "$gen" ] || { echo "mesh-api-gen not found: run scripts/esp-deps.sh (nix build --out-link target/nix/deps) and . ./env.sh" >&2; exit 1; }
+
+# the table of each component a module hosts, and the module's glue for it, from the module's API.md and the C types it names
+#   crates/xip-abi/src/ble_vtable.rs, modules/mod_ble/src/api_gen.rs   (tools/gen_vtables.py)
+python3 tools/gen_vtables.py --api modules/mod_ble/API.md --types crates/xip-abi/src/ble.rs \
+    --abi-out crates/xip-abi/src/ble_vtable.rs --module-out modules/mod_ble/src/api_gen.rs
 
 # the C header
 (cd crates/xip-abi && cbindgen --config cbindgen.toml --crate xip-abi 2>/dev/null) | sed 's/\bxip_\([A-Z]\)/XIP_\1/g' > include/xip.h
@@ -30,11 +37,9 @@ for src in api/*.API.md; do
     "$gen" --api "$src" --rustdoc "$layout" --pointer-width 4 --out-api-json "api/generated/$(basename "$src" .API.md).api.json"
 done
 
-# the console: every API it can call (the host's own calls, api/host.API.md, are not for it)
-apis=(); for m in modules/*/API.md api/*.API.md; do [ "$m" = api/host.API.md ] || apis+=(--api "$m"); done
-"$gen" "${apis[@]}" --out-console-catalog "$tmp/catalog.h"
-"$gen" --api api/wifi.API.md --api api/power.API.md --rustdoc "$layout" --pointer-width 4 --out-console-native "$tmp/native.h"
-python3 tools/catalog_rs.py "$tmp/catalog.h" "$tmp/native.h" > modules/mod_con/src/tables.rs
+# The binary console needs native component layouts, not a text/name catalog.
+"$gen" --api api/wifi.API.md --api api/power.API.md --api api/ip.API.md --rustdoc "$layout" --pointer-width 4 --out-console-native "$tmp/native.h"
+python3 tools/catalog_rs.py "$tmp/native.h" > modules/mod_con/src/tables.rs
 
 for api in modules/*/API.md; do
     "$gen" --api "$api" --out-manifest "${api%.md}.manifest"

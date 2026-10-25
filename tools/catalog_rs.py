@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Turn the console's generated C tables (catalog.h from `mesh-api-gen --out-console-catalog`, native.h from `--out-console-native`) into Rust
-constants for modules/mod_con, until mesh-api-gen writes Rust for them itself. Only integers: a module image has no relocations.
+"""Convert generated C native-component tables into Rust constants for mod_con.
+Only integers: a module image has no relocations.
 
-    catalog_rs.py catalog.h native.h > src/tables.rs
+    catalog_rs.py native.h > src/tables.rs
 """
 import re
 import sys

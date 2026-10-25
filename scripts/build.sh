@@ -1,41 +1,91 @@
 #!/usr/bin/env bash
 # Build the runtime image (the C main: an example, and the host for the modules) and the Rust modules.   . ./env.sh && scripts/build.sh [esp32|esp32s3|esp32c6|all]
+# XIP_FLASH_MB=<4|8|16> selects the partition table (boot/partitions/<n>mb.csv) and the flash size setting
+# of Main and Stage2, for boards with that much flash. Default: the 4 MB table and the per-chip Stage2 size.
+# For the S3 16 MB build it also enables the 8 MB octal PSRAM (XIP_PSRAM=0 opts out).
 # Output:
-#   target/out/<cpu>/main.bin             the runtime image
-#   target/out/<cpu>/stage2-4mb.bin, partition-table-4mb.bin   Stage2 and its partition table (boot/)
-#   target/out/<cpu>/modules/<name>.dmod  module images; modules.txt: the page (offset in the module partition) each was built for
+#   target/out/<cpu>/main.bin             the runtime image (BLE standard by default)
+#   target/out/<cpu>/loader.bin           the same runtime without BLE, for recovery
+#   target/out/<cpu>/stage2-4mb.bin, partition-table-4mb.bin   Stage2 bootloader
+#       and partition table (-<n>mb with XIP_FLASH_MB), built from boot/
+#   target/out/<cpu>/modules/<name>.dmod  module images; modules.txt: name, page offset to flash it at, slot
 # Nothing is signed or keyed here.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cpus="${1:-all}"
 [[ $cpus == all ]] && cpus="esp32 esp32s3 esp32c6"
+table=4mb; flashsize=""
+case "${XIP_FLASH_MB:-}" in
+    "") ;;
+    4|8|16) table=${XIP_FLASH_MB}mb; flashsize=CONFIG_ESPTOOLPY_FLASHSIZE_${XIP_FLASH_MB}MB=y;;
+    *) echo "XIP_FLASH_MB: 4, 8 or 16 (got ${XIP_FLASH_MB})" >&2; exit 2;;
+esac
+[[ -f boot/partitions/$table.csv ]] || { echo "no partition table: boot/partitions/$table.csv" >&2; exit 2; }
+[[ -n $flashsize ]] && { mkdir -p target/out; echo "$flashsize" > "target/out/flashsize-$table.defaults"; }
+# Octal PSRAM on the 16 MB S3 lab modules (N16R8, 8 MB AP3406). The 8 MB S3 boards have none,
+# so the setting follows the table; XIP_PSRAM=0 opts out. IGNORE_NOTFOUND keeps the image
+# bootable on a no-PSRAM board (Wi-Fi falls back to the no-PSRAM buffer config).
+if [[ $table == 16mb ]]; then
+    mkdir -p target/out
+    printf 'CONFIG_SPIRAM=y\nCONFIG_SPIRAM_MODE_OCT=y\nCONFIG_SPIRAM_TYPE_AUTO=y\nCONFIG_SPIRAM_SPEED_80M=y\nCONFIG_SPIRAM_IGNORE_NOTFOUND=y\n' > "target/out/psram-$table.defaults"
+fi
 
 for cpu in $cpus; do
     out=target/out/$cpu
     mkdir -p $out/modules
     defaults="$PWD/sdkconfig.defaults"
     [[ -f sdkconfig.$cpu.defaults ]] && defaults="$defaults;$PWD/sdkconfig.$cpu.defaults"
-    rm -f $out/main.sdkconfig
-    IDF_TARGET=$cpu idf.py -B $out/main-build -D SDKCONFIG=$PWD/$out/main.sdkconfig -D SDKCONFIG_DEFAULTS="$defaults" build
-    # Stage2 boots Main in DIO or QIO; the driver must stay DIO (boot/README.md).
-    grep -qxF 'CONFIG_ESPTOOLPY_FLASHMODE_DIO=y' $out/main.sdkconfig || { echo "$cpu: flash driver must be DIO" >&2; exit 1; }
-    cp $out/main-build/esp-xip-modules.bin $out/main.bin
-    # Stage2 (boot/, see boot/README.md): defaults of the chip with the 4 MB partition table
-    cfg=$out/stage2-4mb.sdkconfig
+    # The flash size of the board (XIP_FLASH_MB): the runtime caps the addressable flash at its configured size.
+    [[ -n $flashsize ]] && defaults="$defaults;$PWD/target/out/flashsize-$table.defaults"
+    # Octal PSRAM on the 16 MB S3 modules (XIP_PSRAM=0 opts out).
+    [[ $cpu == esp32s3 && $table == 16mb && ${XIP_PSRAM:-1} != 0 ]] && defaults="$defaults;$PWD/target/out/psram-$table.defaults"
+    # Main and recovery use distinct SDK configs/build directories. The recovery
+    # profile always disables BLE, even when Main uses a custom profile.
+    main_profile=${XIP_BLE_PROFILE:-standard}
+    [[ $main_profile == */* ]] && profile=$main_profile || profile=$PWD/components/xip_ble/profiles/$main_profile.defaults
+    [[ -f $profile ]] || { echo "missing BLE profile: $profile" >&2; exit 1; }
+    for image in main loader; do
+        image_profile=$profile
+        [[ $image != loader ]] || image_profile=$PWD/components/xip_ble/profiles/off.defaults
+        rm -f "$out/$image.sdkconfig"
+        IDF_TARGET=$cpu idf.py -B "$out/$image-build" -D SDKCONFIG="$PWD/$out/$image.sdkconfig" \
+            -D SDKCONFIG_DEFAULTS="$defaults;$image_profile" build
+        grep -qxF 'CONFIG_ESPTOOLPY_FLASHMODE_DIO=y' "$out/$image.sdkconfig" || { echo "$cpu $image: flash driver must be DIO" >&2; exit 1; }
+        if [[ $image == loader ]] && grep -qxF 'CONFIG_BT_ENABLED=y' "$out/$image.sdkconfig"; then
+            echo "$cpu: recovery image must not contain BLE" >&2; exit 1
+        fi
+        cp "$out/$image-build/esp-xip-modules.bin" "$out/$image.bin"
+    done
+    # Stage2 (boot/, see boot/README.md): defaults of the chip with the selected partition table;
+    # XIP_FLASH_MB also raises the flash size setting (the chip exposes only its configured size).
+    cfg=$out/stage2-$table.sdkconfig
     { if [[ $cpu == esp32 ]]; then cat boot/sdkconfig.defaults; else cat boot/sdkconfig.$cpu.defaults; fi
+      if [[ -n $flashsize ]]; then
+          echo "$flashsize"
+          echo "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/$table.csv\""
+      fi
     } > $cfg
-    rm -f $out/stage2-4mb.sdkconfig.gen
-    IDF_TARGET=$cpu idf.py -C boot -B $out/stage2-build -D SDKCONFIG=$PWD/$out/stage2-4mb.sdkconfig.gen -D SDKCONFIG_DEFAULTS=$PWD/$cfg build
-    cp $out/stage2-build/bootloader/bootloader.bin $out/stage2-4mb.bin
-    cp $out/stage2-build/partition_table/partition-table.bin $out/partition-table-4mb.bin
-    # the modules: the loader scans the module partition, so an image goes on any 64 KB page. The Xtensa chips link an image for one address, which
-    # is its page: the build gives each module the next one, and modules.txt says where (C6: the same order, any page would do).
+    rm -f $out/stage2-$table.sdkconfig.gen
+    IDF_TARGET=$cpu idf.py -C boot -B $out/stage2-build -D SDKCONFIG=$PWD/$out/stage2-$table.sdkconfig.gen -D SDKCONFIG_DEFAULTS=$PWD/$cfg build
+    cp $out/stage2-build/bootloader/bootloader.bin $out/stage2-$table.bin
+    cp $out/stage2-build/partition_table/partition-table.bin $out/partition-table-$table.bin
+    # the modules: the loader scans the module partition, so an image goes on any free 64 KB page. A module has a slot (modules/SLOTS: its RAM
+    # cell and, on the Xtensa chips, its link window), which is NOT its page. modules.txt: name, the page offset the flash script uses, the slot.
+    # XIP_MODULE_VERSIONS="mod_x=3 mod_y=2" builds those modules with that manifest version (default 0, no key).
     offset=0
     : > $out/modules.txt
     for dir in modules/mod_*/; do
-        python3 tools/build_mod.py $dir --chip $cpu --offset $offset --out $out/modules
-        echo "$(basename $dir) $offset" >> $out/modules.txt
-        offset=$((offset + 65536))
+        mod=$(basename $dir)
+        version=0
+        for kv in ${XIP_MODULE_VERSIONS:-}; do [[ ${kv%%=*} == $mod ]] && version=${kv#*=}; done
+        python3 tools/build_mod.py $dir --chip $cpu --out $out/modules --version $version
+        echo "$mod $offset $(python3 -c "import sys; sys.path.insert(0, 'tools'); import mkmod; print(mkmod.read_slots()['$mod'])")" >> $out/modules.txt
+        image_bytes=$(stat -c %s "$out/modules/$mod.dmod")
+        offset=$((offset + ((image_bytes + 65535) / 65536) * 65536))
     done
+    # Check actual rounded extents, including multi-page modules, against the
+    # exact table built above; never emit a layout beyond the board's flash.
+    python3 tools/partition_layout.py "$out/partition-table-$table.bin" \
+        --main-image "$out/main.bin" --loader-image "$out/loader.bin" --modules "$out/modules.txt" --images "$out/modules" >/dev/null
 done
 (cd target/out && find . -name '*.bin' -o -name '*.dmod' | sort | xargs sha256sum > SHA256SUMS)

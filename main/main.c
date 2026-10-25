@@ -4,13 +4,12 @@
  * Everything else is in the components. What a product built on this does differently: its slot table, its services and
  * what it does with module events. */
 #include <stdio.h>
-#include <string.h>
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "xip_runtime.h"
 #include "xip_loader.h"
 #include "xip_wifi.h"
+#include "xip_ble.h"
 
 static const char *TAG = "main";
 
@@ -27,10 +26,21 @@ void app_main(void)
     /* Module lifecycle and desired Wi-Fi state use the same hooks in either partition. */
     xip_host_hooks_t hooks = {
         .modules_info = xip_loader_modules_info, .module_start = xip_loader_start_named,
-        .module_stop = xip_loader_stop_named, .module_manifest = xip_loader_manifest_named,
+        .module_stop = xip_loader_stop_named, .module_manifest = xip_loader_manifest_named, .module_rescan = xip_loader_rescan, .component_start = xip_loader_start_hosting,
     };
     xip_wifi_install_hooks(&hooks);
     ESP_ERROR_CHECK(xip_host_init(&hooks));
+    /* Offers get_component("nimble") and the CoC channel as the link "ble" when the image has BLE (CONFIG_XIP_BLE); nothing starts until a request. */
+    (void)xip_ble_install();
+    /* Native relay classification remains enabled; endpoint modules explicitly
+     * attach their packet owner. No demonstration CIDs or consuming callbacks. */
+    xip_quic_classifier_enable(true);
+    /* The persistent setting ble.boot (module ble, method mode): 1 starts the service at boot. With RELEASE_WHEN_OFF a boot without it
+     * gives the controller memory back to the heap (BLE then needs a reboot with the setting on). */
+    {
+        uint8_t v[4] = {0};
+        xip_ble_configure_boot(xip_wifi_nv("ble.boot", 8, NULL, 0, v, sizeof v) > 0 && v[0] == '1');
+    }
     const xip_loader_config_t cfg = {.partition = "data", .default_stack_bytes = 8192};
     ESP_ERROR_CHECK(xip_loader_init(&cfg));
     /* What runs at boot is what is installed and asks for it in its manifest (the console module, if it is installed). */

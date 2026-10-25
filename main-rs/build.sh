@@ -32,12 +32,19 @@ case "$cpu" in
 esac
 # the partition table by absolute path: ESP-IDF resolves a relative one inside its generated project
 mkdir -p "$CARGO_TARGET_DIR"
-printf 'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="%s"\n' "$HERE/partitions.csv" > "$CARGO_TARGET_DIR/partition.defaults"
+printf 'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="%s"\n' "$XIP_REPO/partitions.csv" > "$CARGO_TARGET_DIR/partition.defaults"
 defaults="$XIP_REPO/sdkconfig.defaults"
 [ ! -f "$XIP_REPO/sdkconfig.$cpu.defaults" ] || defaults="$defaults;$XIP_REPO/sdkconfig.$cpu.defaults"
-export ESP_IDF_SDKCONFIG_DEFAULTS="$defaults;$CARGO_TARGET_DIR/partition.defaults"
+main_profile=${XIP_BLE_PROFILE:-standard}
+[[ $main_profile == */* ]] && profile=$main_profile || profile=$XIP_REPO/components/xip_ble/profiles/$main_profile.defaults
+[[ -f $profile ]] || { echo "missing BLE profile: $profile" >&2; exit 1; }
+profile=$(realpath "$profile")
+export ESP_IDF_SDKCONFIG_DEFAULTS="$defaults;$profile;$CARGO_TARGET_DIR/partition.defaults"
 cd "$HERE"
 cargo build --release --target "$target"
 python3 -m esptool --chip "${1:-esp32c6}" elf2image --flash-mode dio --flash-freq 80m \
     --flash-size 4MB --output "$CARGO_TARGET_DIR/$target/release/xip-main.bin" \
     "$CARGO_TARGET_DIR/$target/release/xip-main"
+
+python3 "$XIP_REPO/tools/partition_layout.py" "$XIP_REPO/partitions.csv" \
+    --main-image "$CARGO_TARGET_DIR/$target/release/xip-main.bin" >/dev/null

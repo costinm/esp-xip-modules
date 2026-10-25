@@ -9,6 +9,11 @@ fn main() {
 extern "C" {
     fn xip_log_to_rom();
     fn xip_wifi_boot_network();
+    fn xip_ble_install() -> i32;
+    fn xip_ble_configure_boot(enabled: bool);
+    fn xip_quic_classifier_enable(enabled: bool);
+    fn xip_wifi_nv(key: *const core::ffi::c_char, key_len: usize,
+        value: *const u8, value_len: usize, out: *mut u8, capacity: usize) -> i32;
     fn xip_heap_checkpoint(phase: *const core::ffi::c_char);
 }
 
@@ -35,6 +40,12 @@ pub extern "C" fn app_main() {
     }
     assert_eq!(init("data\0", Features { modules: true, ..Features::default() }, None), 0, "host and loader");
     unsafe {
+        let _ = xip_ble_install();
+        xip_quic_classifier_enable(true);
+        let mut boot = [0u8; 4];
+        let enabled = xip_wifi_nv(c"ble.boot".as_ptr(), 8, core::ptr::null(), 0,
+            boot.as_mut_ptr(), boot.len()) > 0 && boot[0] == b'1';
+        xip_ble_configure_boot(enabled);
         xip_heap_checkpoint(c"pre-network".as_ptr());
         xip_wifi_boot_network();
     }
