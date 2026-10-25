@@ -7,6 +7,7 @@ use std::rc::Rc;
 use xip_abi::*;
 
 use crate::hostcalls::ctx;
+use crate::quic::{self, QuicClass, QuicInfo, QuicKind, QuicPacket};
 use crate::pool::HELD_OWNED;
 use crate::runtime::{deliver, route, Inst, QItem, Runtime, Shared};
 
@@ -78,7 +79,14 @@ struct Pending {
 pub(crate) struct Links {
     list: Vec<Entry>,
     pending: Vec<Pending>,
+    /// The common QUIC receive function (`Runtime::set_quic_rx`): frames of port-less links are offered to it first.
+    quic_rx: Option<QuicRx>,
+    /// The classifier in front of it: local callback, relay table, counters, reply notes (`quic.rs`).
+    pub(crate) quic: crate::quic::QuicState,
 }
+
+/// `(link name, source token, signal, payload) -> taken`.
+pub type QuicRx = std::rc::Rc<std::cell::RefCell<dyn FnMut(&str, u64, i32, &[u8]) -> bool>>;
 
 impl Links {
     fn find(&self, name: &str) -> Option<usize> {
@@ -312,6 +320,14 @@ fn link_tx(sh: &Shared, dst: u32, slot: i32, start: u16, len: u16, token: u64, s
     rc
 }
 
+/// The module an envelope for `component` goes to: the module of the component if it has a datagram port (manifest key 9) or hosts a component, else the
+/// console module (component 20).
+pub(crate) fn envelope_target(sh: &Shared, component: i32) -> Option<Rc<Inst>> {
+    route(sh, component)
+        .filter(|t| xip_abi::cbor::get_int(&t.manifest, 9).ok().flatten().is_some_and(|p| p != 0) || !t.st.borrow().hosted.is_empty())
+        .or_else(|| route(sh, QUIC_CONSOLE_COMPONENT))
+}
+
 /// `send(dst = link address)`. `ERR_BUSY` is the one failure that leaves the packet with the sender.
 pub(crate) fn send(sh: &Shared, me: &Rc<Inst>, pkt: u32, len: usize, dst: u32, component: i32, method: i32, token: u64) -> i32 {
     let held = me.st.borrow_mut().held.get(pkt);
@@ -325,9 +341,60 @@ pub(crate) fn send(sh: &Shared, me: &Rc<Inst>, pkt: u32, len: usize, dst: u32, c
         sh.pool.release(slot);
         return ERR_SIZE;
     }
-    let rc = link_tx(sh, dst, slot, e.start, len as u16, token, component_of(me), component, method);
+    // The answer to an envelope request is wrapped here: {1: component, 2: method, 3: id, 6: the module's map} or, for a bare negative
+    // integer, {.., 7: error}. The head goes in front of the payload at the same start (the payload moves up); BUSY takes it off again.
+    let olen = len;
+    let more = method & SEND_MORE != 0; // another answer to an open envelope request (a subscription's events)
+    let method = method & !SEND_MORE;
+    let env = me.st.borrow().env.find(dst, token, component, method);
+    let (len, env_head) = match env {
+        Some(p) => {
+            let at = unsafe { std::slice::from_raw_parts_mut(sh.pool.slot(slot).add(e.start as usize), len) };
+            let failed = crate::envelope::is_error(at);
+            let head = crate::envelope::head(p.component, p.method, p.id, failed.unwrap_or(0));
+            if len + head.len() > PKT_MAX as usize || e.start as usize + len + head.len() > sh.pool.slot_size() as usize {
+                if !more {
+                    me.st.borrow_mut().env.done(&p);
+                }
+                me.st.borrow_mut().held.take(pkt);
+                sh.pool.release(slot);
+                return ERR_SIZE;
+            }
+            unsafe {
+                let base = sh.pool.slot(slot).add(e.start as usize);
+                std::ptr::copy(base, base.add(head.len()), len);
+                std::ptr::copy_nonoverlapping(head.as_ptr(), base, head.len());
+            }
+            (if failed.is_some() { head.len() } else { len + head.len() }, head.len())
+        }
+        None => (len, 0),
+    };
+    let (tx_start, tx_len, rid) = match quic_reply_prefix(sh, dst, token, slot, e.start, len) {
+        Ok(Some(w)) => w,
+        Ok(None) => (e.start, len as u16, 0),
+        Err(rc) => {
+            me.st.borrow_mut().held.take(pkt);
+            sh.pool.release(slot);
+            return rc;
+        }
+    };
+    let rc = link_tx(sh, dst, slot, tx_start, tx_len, token, component_of(me), component, method);
+    if rc != ERR_BUSY && !more && (tx_start, tx_len) != (e.start, len as u16) {
+        sh.links.borrow_mut().quic.done_reply(dst, token, rid);
+    }
     if rc == ERR_BUSY {
+        if tx_len as usize != len {
+            // the sender keeps the packet and retries: take the header off again
+            let hl = tx_len as usize - len;
+            unsafe { let at = sh.pool.slot(slot).add(e.start as usize); std::ptr::copy(at.add(hl), at, len); }
+        }
+        if env_head != 0 {
+            unsafe { let at = sh.pool.slot(slot).add(e.start as usize); std::ptr::copy(at.add(env_head), at, olen); }
+        }
         return rc;
+    }
+    if let Some(p) = env.filter(|_| !more) {
+        me.st.borrow_mut().env.done(&p);
     }
     me.st.borrow_mut().held.take(pkt);
     if rc != 0 {
@@ -406,10 +473,177 @@ fn link_route(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16) -> bool {
     !copy
 }
 
+/// The console module answers the envelopes that no other module serves (`QUIC_CONSOLE_COMPONENT`).
+const QUIC_CONSOLE_COMPONENT: i32 = 20;
+
+fn quic_active(links: &Links) -> bool {
+    links.quic_rx.is_some() || links.quic.local.is_some() || links.quic.classifier
+}
+
+/// The common QUIC receive function, the classifier part: true when the packet went to its one handler or was dropped and counted (the caller
+/// must not touch `slot`), false when it was declined (not a QUIC packet, or not a QUIC link) and routing goes on.
+fn quic_common_rx(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, source: u64, signal: i32, time_us: u32) -> bool {
+    let (name, short_cid_len, local) = {
+        let mut links = sh.links.borrow_mut();
+        if len == 0 || !links.quic.classifier {
+            return false;
+        }
+        let Some(name) = links.at(addr).map(|l| l.name.clone()) else { return false };
+        if !links.quic.is_quic_link(&name) {
+            return false;
+        }
+        (name, links.quic.short_cid_len, links.quic.local.clone())
+    };
+    let data = unsafe { std::slice::from_raw_parts(sh.pool.slot(slot).add(start as usize), len as usize) };
+    let (class, h) = quic::classify(data, short_cid_len);
+    let stat = |f: fn(&mut quic::QuicStats) -> &mut u32| {
+        let mut links = sh.links.borrow_mut();
+        *f(&mut links.quic.stats) += 1;
+    };
+    stat(|s| &mut s.rx);
+    match class {
+        QuicClass::NotQuic => {
+            stat(|s| &mut s.declined);
+            return false;
+        }
+        QuicClass::Malformed => {
+            stat(|s| &mut s.malformed);
+            sh.pool.release(slot);
+            return true;
+        }
+        _ => {}
+    }
+    if len as usize > quic::MAX_PACKET {
+        stat(|s| &mut s.oversize);
+        sh.pool.release(slot);
+        return true;
+    }
+    let info = QuicInfo { link: name, source, signal, header: h.clone() };
+    let give = |local: &quic::QuicLocal| (local.borrow_mut())(&info, QuicPacket { slot, start, len });
+    if class == QuicClass::Short {
+        let entry = sh.links.borrow().quic.table.get(&h.dcid).cloned();
+        match (entry, &local) {
+            (None, _) => stat(|s| &mut s.short_unknown),
+            (Some(e), _) if e.kind == QuicKind::Relay => {
+                // forward or drop, no queue: the DCID is replaced in the empty headroom, the same pool packet goes to the egress link and peer
+                let at = unsafe { sh.pool.slot(slot).add(start as usize) };
+                let shift = unsafe { quic::short_rewrite(at, len as usize, &h, &e.out_cid, start as usize) };
+                let rc = match shift {
+                    Ok(d) => link_tx(sh, e.egress, slot, (start as isize + d) as u16, (len as isize - d) as u16, e.token, 0, 0, 0),
+                    Err(rc) => rc,
+                };
+                if rc == 0 {
+                    stat(|s| &mut s.short_relay);
+                    return true;
+                }
+                stat(|s| &mut s.short_relay_failed);
+            }
+            (Some(_), None) => stat(|s| &mut s.short_no_handler),
+            (Some(_), Some(local)) => {
+                stat(|s| &mut s.short_local);
+                give(local);
+                return true;
+            }
+        }
+        sh.pool.release(slot);
+        return true;
+    }
+    if h.version != quic::VERSION_CBOR {
+        match &local {
+            Some(local) => {
+                stat(|s| &mut s.long_other);
+                give(local);
+            }
+            None => {
+                stat(|s| &mut s.long_other_dropped);
+                sh.pool.release(slot);
+            }
+        }
+        return true;
+    }
+    // a CBOR datagram: the envelope follows the SCID; routed like an envelope that arrives on a module's port
+    let envelope = &data[h.body..];
+    let Some((component, _method, _id, response)) = (!envelope.is_empty()).then(|| quic::envelope(envelope)).flatten() else {
+        stat(|s| &mut s.long_cbor_bad);
+        sh.pool.release(slot);
+        return true;
+    };
+    if response {
+        // an answer (field 6 or 7): to the local callback, which matches it by id, else dropped; never dispatched as a request
+        stat(|s| &mut s.long_cbor_response);
+        match &local {
+            Some(local) => give(local),
+            None => sh.pool.release(slot),
+        }
+        return true;
+    }
+    // a module that has a datagram port in its manifest (key 9) gets its envelopes like the ones that arrive on that port
+    let Some(t) = envelope_target(sh, component) else {
+        stat(|s| &mut s.long_cbor_no_target);
+        sh.pool.release(slot);
+        return true;
+    };
+    let now_ms = sh.st.borrow().now;
+    sh.links.borrow_mut().quic.note_reply(addr, source, _id.unwrap_or(0), &h, now_ms);
+    let target = component_of(&t);
+    if deliver(sh, &t, slot, start + h.body as u16, (len as usize - h.body) as u16, target, 0, addr, source, signal, CALL_LINK | CALL_ENVELOPE, time_us) != 0 {
+        let mut links = sh.links.borrow_mut();
+        links.quic.stats.long_cbor_no_target += 1; // its inbox is full
+        links.quic.done_reply(addr, source, _id.unwrap_or(0));
+        drop(links);
+        sh.pool.release(slot);
+        return true;
+    }
+    stat(|s| &mut s.long_cbor);
+    true
+}
+
+/// The answer to a CBOR datagram goes back as one: the long header (the request's CIDs swapped) is written into the empty headroom.
+/// Ok(None): no note for (link, token); Ok(Some((start, len))): prefixed; Err: it does not fit.
+fn quic_reply_prefix(sh: &Shared, dst: u32, token: u64, slot: i32, start: u16, len: usize) -> Result<Option<(u16, u16, u64)>, i32> {
+    // the answer must carry the request's id (field 3; absent = 0)
+    let payload = unsafe { std::slice::from_raw_parts(sh.pool.slot(slot).add(start as usize), len) };
+    let id = xip_abi::cbor::get_int(payload, 3).ok().flatten().filter(|i| *i >= 0).unwrap_or(0) as u64;
+    let now_ms = sh.st.borrow().now;
+    let header = {
+        let links = sh.links.borrow();
+        links.quic.find_reply(dst, token, id, now_ms).and_then(|r| quic::long_build(quic::VERSION_CBOR, &r.dcid, &r.scid))
+    };
+    let found = sh.links.borrow().quic.find_reply(dst, token, id, now_ms).is_some();
+    if !found {
+        return Ok(None);
+    }
+    let Some(header) = header.filter(|h| len + h.len() <= PKT_MAX as usize) else {
+        sh.links.borrow_mut().quic.done_reply(dst, token, id);
+        return Err(ERR_SIZE);
+    };
+    // the header goes in front of the payload at the same start (links need their headroom and alignment): the payload moves up
+    unsafe {
+        let at = sh.pool.slot(slot).add(start as usize);
+        std::ptr::copy(at, at.add(header.len()), len);
+        std::ptr::copy_nonoverlapping(header.as_ptr(), at, header.len());
+    }
+    Ok(Some((start, (len + header.len()) as u16, id)))
+}
+
 /// The packet in `slot` (one reference is the caller's) goes to the route or to every subscriber: one reference each.
 fn fanout(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, source: u64, signal: i32, time_us: u32) {
     if let Some(l) = sh.links.borrow_mut().at(addr) {
         l.received += 1;
+    }
+    // the classifier: exactly one handler gets a packet of a QUIC link (the local callback, a module, or the pool again)
+    if quic_common_rx(sh, addr, slot, start, len, source, signal, time_us) {
+        return;
+    }
+    // ownership, not fan-out: the QUIC receive function takes the frame (the packet returns to the pool here) or routing goes on
+    let app = sh.links.borrow().quic_rx.clone();
+    if let Some(app) = app {
+        let name = sh.links.borrow_mut().at(addr).map(|l| l.name.clone()).unwrap_or_default();
+        let payload = unsafe { std::slice::from_raw_parts(sh.pool.slot(slot).add(start as usize), len as usize) };
+        if len != 0 && (app.borrow_mut())(&name, source, signal, payload) {
+            sh.pool.release(slot);
+            return;
+        }
     }
     if link_route(sh, addr, slot, start, len) {
         return;
@@ -630,6 +864,96 @@ impl Runtime {
         }
     }
 
+    /// The common QUIC receive function: every frame of a link without a port is offered to it first, with the link's name, the source token,
+    /// the signal and the payload; returning true takes the frame (nobody else gets it), false lets routing go on. `None` clears.
+    pub fn set_quic_rx(&self, rx: Option<impl FnMut(&str, u64, i32, &[u8]) -> bool + 'static>) {
+        self.sh.links.borrow_mut().quic_rx = rx.map(|f| std::rc::Rc::new(std::cell::RefCell::new(f)) as QuicRx);
+    }
+
+    /// Switch the classifier on (off by default, so a stack that has not registered its DCIDs keeps its packets).
+    pub fn set_quic_classifier(&self, on: bool) {
+        self.sh.links.borrow_mut().quic.classifier = on;
+    }
+    /// The local-termination callback of the classifier (the QUIC stack of `fw/`): short packets whose DCID is a [`QuicKind::Local`] entry of
+    /// the relay table, and long packets of versions other than 0x444d0002, reach it with the pool packet, which it owns and must give back
+    /// ([`Runtime::quic_release`]) or pass on ([`Runtime::quic_send`]). `None` clears.
+    pub fn set_quic_local(&self, f: Option<impl FnMut(&QuicInfo, QuicPacket) + 'static>) {
+        self.sh.links.borrow_mut().quic.local = f.map(|f| std::rc::Rc::new(std::cell::RefCell::new(f)) as quic::QuicLocal);
+    }
+    /// The bytes of a packet the callback owns.
+    pub fn quic_bytes(&self, p: &QuicPacket) -> Vec<u8> {
+        unsafe { std::slice::from_raw_parts(self.sh.pool.slot(p.slot).add(p.start as usize), p.len as usize) }.to_vec()
+    }
+    /// Return the packet to the pool.
+    pub fn quic_release(&self, p: QuicPacket) {
+        self.sh.pool.release(p.slot);
+    }
+    /// Send the packet on the link `name` as it is. Consumed on success and on every failure except `ERR_BUSY` (returned in `Err` with the packet).
+    pub fn quic_send(&self, p: QuicPacket, name: &str, token: u64) -> Result<(), (i32, Option<QuicPacket>)> {
+        let sh = &*self.sh;
+        let Some(at) = sh.links.borrow().find(name) else {
+            sh.pool.release(p.slot);
+            return Err((ERR_NOTFOUND, None));
+        };
+        match link_tx(sh, addr_of(at), p.slot, p.start, p.len, token, 0, 0, 0) {
+            0 => Ok(()),
+            ERR_BUSY => Err((ERR_BUSY, Some(p))),
+            rc => {
+                sh.pool.release(p.slot);
+                Err((rc, None))
+            }
+        }
+    }
+    /// The address of the link `name` (0 when there is none), as `xip_link_find` reports it.
+    pub fn link_addr(&self, name: &str) -> u32 {
+        self.sh.links.borrow().find(name).map_or(0, addr_of)
+    }
+    /// The relay table (runtime-issued IDs): `cid` is 1 to 20 bytes as they appear in a short header (quic-lite: with the class tag).
+    pub fn quic_table_add(&self, cid: &[u8], kind: QuicKind, egress: u32, token: u64, out_cid: &[u8]) -> i32 {
+        let mut links = self.sh.links.borrow_mut();
+        let t = &mut links.quic.table;
+        if cid.is_empty() || cid.len() > quic::CID_MAX {
+            return ERR_ARG;
+        }
+        if !t.contains_key(cid) && t.len() >= quic::TABLE_MAX {
+            return ERR_NOMEM;
+        }
+        if kind == QuicKind::Relay && (out_cid.is_empty() || out_cid.len() > quic::CID_MAX) {
+            return ERR_ARG;
+        }
+        t.insert(cid.to_vec(), quic::QuicEntry { kind, egress, token, out_cid: out_cid.to_vec() });
+        0
+    }
+    /// The runtime issues the IDs: the lowest free quic-lite connection ID (1 byte for the first 127 entries), added and returned. Freed IDs are reused.
+    pub fn quic_table_alloc(&self, kind: QuicKind, egress: u32, token: u64, out_cid: &[u8]) -> Result<Vec<u8>, i32> {
+        let mut v = 1u64;
+        loop {
+            let cid = quic::cid_encode(v).ok_or(ERR_NOMEM)?;
+            if !self.sh.links.borrow().quic.table.contains_key(&cid) {
+                let rc = self.quic_table_add(&cid, kind, egress, token, out_cid);
+                return if rc == 0 { Ok(cid) } else { Err(rc) };
+            }
+            v += 1;
+        }
+    }
+    pub fn quic_table_remove(&self, cid: &[u8]) -> i32 {
+        if self.sh.links.borrow_mut().quic.table.remove(cid).is_some() { 0 } else { ERR_NOTFOUND }
+    }
+    pub fn quic_table_len(&self) -> usize {
+        self.sh.links.borrow().quic.table.len()
+    }
+    pub fn quic_stats(&self) -> quic::QuicStats {
+        self.sh.links.borrow().quic.stats
+    }
+    /// One more link (by name) whose frames are QUIC packets; `ble` and `udp` are by default.
+    pub fn quic_link_enable(&self, name: &str) {
+        self.sh.links.borrow_mut().quic.names.push(name.to_owned());
+    }
+    /// A fixed DCID length for short headers; 0 (default): the quic-lite class rule.
+    pub fn set_quic_short_cid_len(&self, n: usize) {
+        self.sh.links.borrow_mut().quic.short_cid_len = n;
+    }
+
     /// A frame arrives on the native link `name`: copied into a pool packet, stamped now, routed or delivered to the subscribers
     /// (nothing happens when nobody listens). Returns the usual result.
     pub fn inject_frame(&self, name: &str, source: u64, signal: i32, data: &[u8]) -> i32 {
@@ -639,7 +963,7 @@ impl Runtime {
         if data.len() > PKT_MAX as usize {
             return ERR_SIZE;
         }
-        if sh.links.borrow_mut().at(addr).is_some_and(|l| l.subs.is_empty() && l.routes.is_empty()) {
+        if !quic_active(&sh.links.borrow()) && sh.links.borrow_mut().at(addr).is_some_and(|l| l.subs.is_empty() && l.routes.is_empty()) {
             return 0;
         }
         let Some(slot) = sh.pool.acquire(0) else {

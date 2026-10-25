@@ -59,6 +59,7 @@
 extern crate std;
 
 pub mod cbor;
+pub mod fields;
 pub mod heap;
 pub mod task;
 mod host;
@@ -69,12 +70,24 @@ mod link;
 pub use link::*;
 mod serial;
 pub use serial::*;
+mod quic;
+pub use quic::*;
 mod power;
 pub use power::*;
+mod ble;
+pub use ble::*;
+mod ble_vtable;
+pub use ble_vtable::Ble;
+mod nimble;
+pub use nimble::*;
 mod hardware;
 pub use hardware::*;
 
 pub mod psa;
+mod ip;
+pub use ip::*;
+mod identity;
+pub use identity::*;
 
 /// Table access for a module. Copy it freely: it is a pointer.
 #[derive(Clone, Copy)]
@@ -111,6 +124,11 @@ impl Hw {
         Some(Hw { host })
     }
 
+    /// The raw table pointer, for a module that keeps it (the context of a hosted component).
+    pub fn as_ptr(&self) -> *const Host {
+        self.host
+    }
+
     fn table(&self) -> &Host {
         unsafe { &*self.host }
     }
@@ -139,6 +157,13 @@ impl Hw {
         let h = self.table();
         if (h.size as usize) < slot::NOW_MS + 4 { return 0; }
         match h.now_ms { Some(f) => unsafe { f(h.user) }, None => 0 }
+    }
+
+    /// Monotonic clock for radio synchronization; None on older runtimes.
+    pub fn now_us(&self) -> Option<u64> {
+        let h = self.table();
+        if (h.size as usize) < core::mem::offset_of!(Host, now_us) + core::mem::size_of::<usize>() { return None; }
+        h.now_us.map(|f| unsafe { f(h.user) })
     }
 
     /// `(headroom, max payload)` of this host's packets.
@@ -236,6 +261,29 @@ impl Hw {
         self.message(call.from, call.component, call.method, call.id, data)
     }
 
+    /// Answer `HOST_TABLE` for a hosted component: `table` is the module's table of functions (`{u32 version, u32 size, then one function pointer per
+    /// method}`, every function `int f(void *ctx, ...)` with at most five more words of arguments) and `ctx` the first argument it is called with. The
+    /// runtime hands callers a copy whose functions take the module's lock, call these with `ctx` and return `ERR_NOTFOUND` once the module has stopped.
+    pub fn provide_table(&self, call: &CallView, table: *const core::ffi::c_void, ctx: *mut core::ffi::c_void) -> i32 {
+        let mut bytes = [0u8; 2 * core::mem::size_of::<usize>()];
+        let (t, c) = bytes.split_at_mut(core::mem::size_of::<usize>());
+        t.copy_from_slice(&(table as usize).to_ne_bytes());
+        c.copy_from_slice(&(ctx as usize).to_ne_bytes());
+        self.reply(call, &bytes)
+    }
+
+    /// Answer a request with an error: a bare negative integer, which the runtime turns into `7: error` for an envelope ([`CALL_ENVELOPE`]). The
+    /// shape modules use to refuse a request, so that the caller sees one error form.
+    pub fn reply_error(&self, call: &CallView, rc: i32) -> i32 {
+        let mut buf = [0u8; 9];
+        let mut w = cbor::Writer::new(&mut buf);
+        w.int(rc as i64);
+        match w.finish() {
+            Some(bytes) => self.reply(call, bytes),
+            None => ERR_SIZE,
+        }
+    }
+
     /// Send `data` as a message to `dst` (`ADDR_MAIN`: the application, or a module's component): the pool packet is allocated, filled and sent in one go. What a
     /// module used to `emit` is a message to the application with its own component and the event number as the method.
     /// The helper releases its internal packet on a blocked link; retry using the original data.
@@ -269,6 +317,10 @@ impl Hw {
     /// The manifest of the installed module `name` (CBOR), or a negative error.
     pub fn module_manifest(&self, name: &[u8], out: &mut [u8]) -> i32 {
         call!(self, MODULE_MANIFEST, module_manifest(name.as_ptr(), name.len(), out.as_mut_ptr(), out.len()))
+    }
+    /// Rescan the module partition after an install: the highest version of each name becomes the module (`Host::module_rescan`).
+    pub fn module_rescan(&self) -> i32 {
+        call!(self, MODULE_RESCAN, module_rescan())
     }
     /// Free memory of the device, as CBOR.
     pub fn heap_info(&self, out: &mut [u8]) -> i32 {
@@ -311,6 +363,20 @@ impl Hw {
         if p.is_null() { return None; }
         let t = unsafe { &*p };
         (t.version == POWER_VERSION && t.size as usize >= core::mem::size_of::<Power>()).then_some(t)
+    }
+    /// The `ble` component (component 104; hosted by `mod_ble`), or None when no module hosts it.
+    pub fn ble(&self) -> Option<&'static Ble> {
+        let p = self.get_component(c"ble") as *const Ble;
+        if p.is_null() { return None; }
+        let t = unsafe { &*p };
+        (t.version == BLE_VERSION && t.size as usize >= core::mem::size_of::<Ble>()).then_some(t)
+    }
+    /// The `nimble` component (the NimBLE subset the runtime offers: advertising, scan, CoC, bonds), or None when this host has none.
+    pub fn nimble(&self) -> Option<&'static Nimble> {
+        let p = self.get_component(c"nimble") as *const Nimble;
+        if p.is_null() { return None; }
+        let t = unsafe { &*p };
+        (t.version == NIMBLE_VERSION && t.size as usize >= core::mem::size_of::<Nimble>()).then_some(t)
     }
     /// The `ctx` that the functions of the component tables take first (the `user` of the host table).
     pub fn ctx(&self) -> *mut core::ffi::c_void {
@@ -448,12 +514,18 @@ pub struct CallView<'a> {
     pub value: i32,
     pub flags: u32,
     pub data: &'a [u8],
+    /// Radio receive time, low 32 bits of the host microsecond clock.
+    pub time_us: u32,
     /// The packet `data` lives in (0: none), lent for this call: `Hw::pkt_keep` it or `Hw::send` it on.
     pub pkt: u32,
     /// Who sent it (`ADDR_MAIN` = 0: the application): answer with `Hw::send` to this address.
     pub from: u32,
     /// The sender's correlation number, returned in the answer.
     pub id: u64,
+    /// For a request that arrived as an envelope (`CALL_ENVELOPE`): the envelope's own id (field 3), `None` when it had none. `component`,
+    /// `method` and `data` (the fields) are the envelope's too; `id` stays the reply token. A module that keeps a request open (a subscription)
+    /// keys it by this.
+    pub request_id: Option<u64>,
 }
 
 impl<'a> CallView<'a> {
@@ -465,15 +537,22 @@ impl<'a> CallView<'a> {
             return None;
         }
         let c = &*call;
-        let has_packet = (c.size as usize) >= core::mem::size_of::<Call>();
+        let has_packet = (c.size as usize) >= core::mem::offset_of!(Call, request_id);
+        let has_request = (c.size as usize) >= core::mem::size_of::<Call>();
         let data = if c.len == 0 || c.data.is_null() { &[][..] } else { core::slice::from_raw_parts(c.data, c.len) };
         let (pkt, from, id) = if has_packet { (c.pkt, c.from, c.id) } else { (0, 0, 0) };
-        Some(CallView { component: c.component, method: c.method, value: c.value, flags: c.flags, data, pkt, from, id })
+        Some(CallView { component: c.component, method: c.method, value: c.value, flags: c.flags, data, time_us: if (c.size as usize) >= core::mem::offset_of!(Call, time_us)+4 {c.time_us} else {0}, pkt, from, id, request_id: (has_request && c.request_has_id != 0).then_some(c.request_id) })
     }
 
     /// The call is a request that expects an answer ([`Hw::reply`]).
     pub fn wants_response(&self) -> bool {
         self.flags & 1 != 0
+    }
+
+    /// The request arrived as an envelope that the runtime parsed ([`CALL_ENVELOPE`]); `component`, `method` and `data` (the fields) are the
+    /// envelope's and the runtime wraps the answer.
+    pub fn is_envelope(&self) -> bool {
+        self.flags & CALL_ENVELOPE != 0
     }
 
     /// `HOST_*` call of the host itself (start, stop, ...).

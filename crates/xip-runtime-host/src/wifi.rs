@@ -44,7 +44,10 @@ impl Fixture {
         let i = &self.intent;
         let mut st = WifiState::default();
         st.size = core::mem::size_of::<WifiState>() as u32;
+        st.sta_mac = [2, 0, 0, 0, 0, 1]; st.ap_mac = [2, 0, 0, 0, 0, 2];
         if i.radio == 1 {
+            st.radio = 1; st.now = i.now;
+            st.monitoring = self.monitor.is_some_and(|m| m.enable != 0) as u8;
             st.channel = if i.channel != 0 { i.channel } else { 6 };
             st.ap = i.ap;
             if i.sta == 1 {
@@ -101,7 +104,10 @@ unsafe extern "C" fn get(_ctx: *mut c_void, intent: *mut WifiIntent, generation:
 
 unsafe extern "C" fn state(_ctx: *mut c_void, state: *mut WifiState) -> c_int {
     if state.is_null() || (unsafe { (*state).size } as usize) < core::mem::size_of::<WifiState>() { return ERR_ARG; }
-    FIX.with(|f| unsafe { *state = f.borrow().state });
+    FIX.with(|f| { let f = f.borrow(); let mut out = f.state;
+        out.monitoring = f.monitor.is_some_and(|m| m.enable != 0) as u8;
+        unsafe { *state = out };
+    });
     0
 }
 
@@ -137,6 +143,7 @@ static COMPONENT: Wifi = Wifi {
     state: Some(state),
     scan: Some(scan),
     monitor: Some(monitor),
+    auto_reconnect: None, scan_channels: None,
 };
 
 pub(crate) fn component() -> *const Wifi { &COMPONENT }

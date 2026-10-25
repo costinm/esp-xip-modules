@@ -43,11 +43,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn console_manifest_advertises_binary_and_compatible_text_methods() {
+    fn console_manifest_advertises_only_binary_methods() {
         let data = include_bytes!("../../../modules/mod_con/API.manifest");
         let api = InstalledApi::decode(data).expect("installed console API");
         assert_eq!((api.name, api.component), ("console", 20));
-        assert_eq!(api.methods, [(1, "parse"), (2, "render"), (4, "dispatch"), (5, "status"), (6, "start"), (7, "stop"), (8, "reset"), (9, "heap"), (10, "nv")]);
+        assert_eq!(api.methods, [(5, "status"), (6, "start"), (7, "stop"), (8, "reset"), (9, "heap"), (10, "nv"), (11, "link.send")]);
         assert!(InstalledApi::decode(&data[..2]).is_none(), "required name bytes are missing");
     }
 

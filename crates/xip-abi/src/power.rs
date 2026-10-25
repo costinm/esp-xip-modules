@@ -13,7 +13,9 @@
 use core::{ffi::c_void, ffi::c_int};
 
 /// `Power::version`.
-pub const POWER_VERSION: u32 = 1;
+pub const POWER_VERSION: u32 = 3;
+/// Emit compact CBOR sleep/wake records on PPP port 250 (0xfa).
+pub const POWER_TRACE_UART: u32 = 1;
 
 /// `PowerInfo::state`: nothing running.
 pub const POWER_IDLE: u8 = 0;
@@ -95,7 +97,10 @@ pub struct PowerInfo {
     /// A UART/wake activity interval is still open. Informational: the module
     /// owns sleep policy. Uses one formerly reserved byte, keeping ABI size.
     pub active_window: u8,
-    pub reserved: [u8; 2],
+    /// Open runtime TCP sockets plus the default UDP listener. Zero throughout
+    /// NAN/NOW-only sleepy windows; uses a formerly reserved byte.
+    pub ip_sockets: u8,
+    pub reserved: [u8; 1],
 }
 impl Default for PowerInfo {
     fn default() -> Self {
@@ -115,8 +120,8 @@ pub struct Power {
     pub size: u32,
     /// Sleep for `duration_ms`, `cycles` times with `awake_ms` awake between, on the host worker; returns at once. Each wake delivers `HOST_WAKE` to the modules with
     /// an `ALARM_WINDOW` alarm. `ERR_BUSY` while a request runs, `ERR_ARG` for a duration under 10 ms or a size that is too small. With the radio on it is stopped
-    /// for each sleep and brought back after it with the same settings (the `espnow` link goes `DOWN` and `UP`); nothing else is touched. On USB-Serial/JTAG
-    /// the port drops across a sleep.
+    /// for each sleep and brought back after it with the same settings (the `espnow` link goes `DOWN` and `UP`); nothing else is touched. With a USB-Serial/JTAG host attached the runtime uses a soft wait;
+    /// physical light sleep is tested through UART.
     pub sleep: Option<unsafe extern "C" fn(ctx: *mut c_void, request: *const PowerSleep) -> c_int>,
     /// Read the power state and the FreeRTOS numbers (set `info.size` first). `ERR_SIZE` if `size` is too small.
     pub info: Option<unsafe extern "C" fn(ctx: *mut c_void, info: *mut PowerInfo) -> c_int>,
@@ -124,4 +129,21 @@ pub struct Power {
     pub dump_locks: Option<unsafe extern "C" fn(ctx: *mut c_void) -> c_int>,
     /// Print the FreeRTOS tasks to the device log: name, priority, stack left.
     pub dump_tasks: Option<unsafe extern "C" fn(ctx: *mut c_void) -> c_int>,
+    /// One sleep ending at an absolute monotonic microsecond deadline. Radio
+    /// shutdown time is included, so it cannot shift a scheduled receive DW.
+    /// Requires no active UART window; `flags` may include POWER_TRACE_UART.
+    pub sleep_until: Option<unsafe extern "C" fn(ctx: *mut c_void, wake_at_us: u64, flags: u32) -> c_int>,
+    /// Cancel only this caller's pending sleep. Also cancelled at module unload.
+    pub cancel: Option<unsafe extern "C" fn(ctx: *mut c_void) -> c_int>,
+    /// Open the runtime activity window; zero explicitly clears the current
+    /// window when a policy command arms sleep. Subsequent UART RX reopens it.
+    pub activate: Option<unsafe extern "C" fn(ctx: *mut c_void, duration_ms: u32) -> c_int>,
+    /// Extend one shared temporary awake deadline, at most 300,000 ms per call.
+    /// Zero queries without extending; returns remaining ms, or ERR_ARG above
+    /// the limit. Renewal never shortens another caller's hold. Unlike activate,
+    /// this defers sleep without changing UART or module awake/sleepy policy.
+    pub awake_for: Option<unsafe extern "C" fn(ctx: *mut c_void, duration_ms: u32) -> c_int>,
 }
+
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::size_of::<Power>() == 40);

@@ -74,7 +74,7 @@
 use core::ffi::{c_int, c_void};
 
 /// Version of the [`Wifi`] table.
-pub const WIFI_VERSION: u32 = 1;
+pub const WIFI_VERSION: u32 = 2;
 
 /// What a module wants the radio to do, for `set` and `get`. All fields are plain values. Names and passphrases are byte
 /// arrays with a separate length: they are not NUL-terminated and may hold any bytes except NUL. Unused bytes are zero.
@@ -192,9 +192,19 @@ pub struct WifiState {
     pub ssid: [u8; 32],
     /// IPv4 address of the station interface, zero when none.
     pub ip4: [u8; 4],
+    /// Actual local station and AP addresses (zero when unavailable).
+    pub sta_mac: [u8; 6],
+    pub ap_mac: [u8; 6],
+    /// Driver is running; independent of STA association or IP readiness.
+    pub radio: u8,
+    /// Actual promiscuous receive state, cleared by driver restart.
+    pub monitoring: u8,
+    /// Native NOW receive/transmit is enabled for this radio epoch.
+    pub now: u8,
+    pub reserved2: u8,
 }
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<WifiState>() == 52);
+const _: () = assert!(core::mem::size_of::<WifiState>() == 68);
 
 /// Promiscuous (raw) receive, for [`Wifi::monitor`].
 #[repr(C)]
@@ -276,6 +286,12 @@ pub struct Wifi {
     /// `state` shows the radio again. `ERR_ARG` for a size that is too small or a channel above 13; `ERR_IO` when the driver
     /// refuses.
     pub monitor: Option<unsafe extern "C" fn(ctx: *mut c_void, monitor: *const WifiMonitor) -> c_int>,
+    /// Enable native automatic reconnect, or disable it for module-owned retry
+    /// policy. Returns the previous boolean. Unsupported with an external owner.
+    pub auto_reconnect: Option<unsafe extern "C" fn(ctx: *mut c_void, enabled: bool) -> c_int>,
+    /// Non-blocking bounded channel scan, same completion contract as scan.
+    /// Bits 1..14 select channels; dwell_ms 10..120 per selected channel.
+    pub scan_channels: Option<unsafe extern "C" fn(ctx: *mut c_void, out: *mut WifiAp, max: usize, channels: u16, dwell_ms: u16) -> c_int>,
 }
 
 /// A switch of [`WifiTuning`]: the host's own default.

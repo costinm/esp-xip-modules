@@ -53,6 +53,15 @@ pub const LINK_VERSION: u32 = 1;
 pub const CALL_LINK: u32 = 2;
 /// `call.flags` bit set on the events of a link; the kind is in `call.flags >> 8`.
 pub const CALL_LINK_EVENT: u32 = 4;
+/// `call.flags` bit of a request that arrived as a CBOR envelope `{1: component, 2: method, 3: id, 5: fields}` on a module's port or as a 0x444d0002
+/// datagram. The runtime parsed the envelope: `component` and `method` are the envelope's, `data` is the fields map (`{}` when absent), `from` and
+/// `id` say where the answer goes, and bit 0 is set. What the module sends with `Hw::reply` is wrapped by the runtime as `{1, 2, 3, 6: result}`;
+/// a bare negative integer (`Hw::reply_error`) becomes `{1, 2, 3, 7: error}`. A module does not parse or build envelopes.
+pub const CALL_ENVELOPE: u32 = 8;
+/// OR-ed into the `method` of a `send` to a link that answers an envelope request ([`CALL_ENVELOPE`]): the runtime wraps the message with the request's
+/// id as usual but keeps the request open, so a later message with the same `(component, method, token)` is another answer to it (a subscription's
+/// events). The last message is sent without it. Only the lower 30 bits are the method.
+pub const SEND_MORE: i32 = 1 << 30;
 
 /// Event: a frame sent to the link is done (the packet comes back, `call.value` is the outcome).
 pub const LINK_EVENT_TX_DONE: u32 = 1;
@@ -86,6 +95,13 @@ pub const LINK_SERIAL: &core::ffi::CStr = c"serial";
 /// * Other ports are the first byte of a PPP-framed record on the serial line: `0x7e port bytes... 0x7e`, with `0x7d` escaping (the byte `^ 0x20`).
 ///   DMesh's `0xf7` is the port of its QUIC packets.
 pub const PORT_CONSOLE: u32 = 1;
+/// Virtual NAN port: NAN management frames (A3 prefix 50:6f:9a) and
+/// decoded NAN-over-NOW sync bodies (40:4e:53:59:31). Bound by the module
+/// manifest, independent of the physical radio link. 0xf7 remains QUIC.
+pub const PORT_NAN: u32 = 0xf6;
+/// PPP port of DMesh's QUIC packets (`0xf7`). The record's payload is one QUIC packet: the runtime hands it, in a pool packet with the serial
+/// link in the metadata, to the common QUIC receive function (`xip_quic_rx_set`), like the frames of ESP-NOW and the BLE channel.
+pub const PORT_QUIC: u32 = 0xf7;
 pub const PORT_NET: u32 = 5225;
 
 /// Who provides a link ([`LinkInfo::provider`]).

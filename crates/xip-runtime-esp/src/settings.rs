@@ -47,7 +47,9 @@ impl Namespace {
 }
 impl Drop for Namespace { fn drop(&mut self) { unsafe { esp_idf_sys::nvs_close(self.0) }; } }
 
-const WIFI_MEMORY: [(&[u8], &CStr, u16, u16); 4] = [
+/// The tuning numbers of the Wi-Fi driver, and `ble.boot` (0/1: the `ble` module starts the service at boot), all in the namespace `wl` as in the C runtime.
+const WIFI_MEMORY: [(&[u8], &CStr, u16, u16); 5] = [
+    (b"ble.boot", c"ble_boot", 0, 1),
     (b"wifi.rx_static", c"rx_static", 2, 64), (b"wifi.rx_dynamic", c"rx_dynamic", 2, 128),
     (b"wifi.tx_dynamic", c"tx_dynamic", 4, 128), (b"wifi.rx_ba", c"rx_ba", 2, 64),
 ];

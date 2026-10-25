@@ -3,5 +3,5 @@
 # Nothing that needs the ESP toolchain or esp-idf-sys unconditionally belongs here: firmware (partitions, startup, transport glue) is
 # under fw/, the no_std modules under modules/ (each its own project with its own target); they depend on these crates by path.
 [workspace]
-members = ["xip-abi", "xip-runtime-esp", "xip-runtime-host", "dmesh-wifi-profile", "dmesh-cli"]
+members = ["xip-abi", "xip-runtime-esp", "xip-runtime-host", "dmesh-cli"]
 resolver = "2"

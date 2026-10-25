@@ -266,41 +266,47 @@ fn now_bench_rejects_truncated_or_corrupt_payloads_and_generates_full_response()
     use xip_abi::cbor;
     let rt = Runtime::default();
     rt.add_native_link("espnow", PKT_MAX, xip_runtime_host::NativeTx::Done);
+    rt.set_quic_classifier(true);
     let m = rt.add_module(module("mod_rtest"), 512).unwrap();
     m.set_component(2);
-    m.start(b"now listen size=1500 secs=60");
+    m.start(b"now listen size=1448 secs=60");
     rt.run(0);
-    let mut payload = vec![0u8; 1500];
-    payload[..4].copy_from_slice(b"NOWP");
-    payload[4..8].copy_from_slice(&37u32.to_le_bytes());
-    payload[8..12].copy_from_slice(&1500u32.to_le_bytes());
-    for (i, b) in payload.iter_mut().enumerate().skip(12) {
-        *b = (37u32.rotate_left((i % 32) as u32) ^ (i as u32).wrapping_mul(73) ^ ((i as u32) >> 8)) as u8;
-    }
+    // The bench speaks CBOR datagrams: long header (0xc0, 0x444d0002, DCID 01, SCID 02), envelope {1: 2, 2: 40 ping, 3: seq, 4: size, 5: pattern}.
+    let byte = |seq: u32, i: usize| (seq.rotate_left((i % 32) as u32) ^ (i as u32).wrapping_mul(73) ^ ((i as u32) >> 8)) as u8;
+    let mut payload = vec![0xc0, 0x44, 0x4d, 0x00, 0x02, 1, 0x01, 1, 0x02];
+    payload.extend([0xa5, 0x01, 0x02, 0x02, 0x18, 40, 0x03, 0x1a, 0, 0, 0, 37, 0x04, 0x1a, 0, 0, 0x05, 0xa8, 0x05, 0x59]);
+    payload.extend((1448u16 - 31).to_be_bytes());
+    payload.extend((0..1448 - 31).map(|i| byte(37, i)));
+    assert_eq!(payload.len(), 1448);
     assert_eq!(rt.inject_frame("espnow", 0x060504030201, 0, &payload), 0);
     rt.run(0);
     let sent = rt.take_link_tx("espnow");
     assert_eq!(sent.len(), 1);
-    let mut expected = payload.clone(); expected[..4].copy_from_slice(b"NOWQ");
-    assert_eq!(sent[0].1, expected);
-    // Header still declares 1500: truncation cannot be accepted as a shorter packet.
-    assert_eq!(rt.inject_frame("espnow", 0x060504030201, 0, &payload[..1499]), 0);
+    // the answer: the runtime added the long header (CIDs swapped); the envelope is a pong with the same pattern
+    assert_eq!(sent[0].1.len(), 1448);
+    assert_eq!(&sent[0].1[..9], &[0xc0, 0x44, 0x4d, 0x00, 0x02, 1, 0x02, 1, 0x01]);
+    assert_eq!(cbor::get_int(&sent[0].1[9..], 2).unwrap(), Some(41));
+    assert_eq!(&sent[0].1[9 + 22..], &payload[9 + 22..]);
+    // Header still declares 1448: truncation cannot be accepted as a shorter packet.
+    assert_eq!(rt.inject_frame("espnow", 0x060504030201, 0, &payload[..1447]), 0);
     rt.run(0);
-    payload[1499] ^= 1;
+    payload[1447] ^= 1;
     assert_eq!(rt.inject_frame("espnow", 0x060504030201, 0, &payload), 0);
     rt.run(0);
     assert!(rt.take_link_tx("espnow").is_empty());
     let info = m.request(2, 2, &[0xa0]).unwrap();
+    assert_eq!(rt.quic_stats().long_cbor_bad, 1, "the truncated envelope never reaches the module");
     assert_eq!(cbor::get_int(&info, 7).unwrap(), Some(1));
-    assert_eq!(cbor::get_int(&info, 10).unwrap(), Some(2));
-    assert_eq!(cbor::get_int(&info, 11).unwrap(), Some(1500));
+    assert_eq!(cbor::get_int(&info, 10).unwrap(), Some(1));
+    assert_eq!(cbor::get_int(&info, 11).unwrap(), Some(1448));
     m.stop(); rt.run(0);
     assert_eq!(rt.wifi_intent().0.radio, 0, "restore radio intent on cancellation");
     let rt = Runtime::default();
     rt.add_native_link("espnow", PKT_MAX, xip_runtime_host::NativeTx::Done);
     let m = rt.add_module(module("mod_rtest"), 512).unwrap(); m.set_component(2);
-    m.start(b"now listen rxonly size=1500 secs=60"); rt.run(0);
-    payload[1499] ^= 1;
+    rt.set_quic_classifier(true);
+    m.start(b"now listen rxonly size=1448 secs=60"); rt.run(0);
+    payload[1447] ^= 1;
     assert_eq!(rt.inject_frame("espnow", 0x060504030201, 0, &payload), 0); rt.run(0);
     assert!(rt.take_link_tx("espnow").is_empty(), "RX-only must not generate an echo");
     let info = m.request(2, 2, &[0xa0]).unwrap();

@@ -10,7 +10,11 @@ scripts/build-host-modules.sh
 cargo run --manifest-path crates/xip-runtime-host/Cargo.toml --bin xip-host
 ```
 
-This starts the console on `127.0.0.1:5226` and an async echo module on `127.0.0.1:5228`. Both bind TCP and UDP. The console network/stdin interface is retained text compatibility; binary control tests use the module request API directly. The host executable does not yet expose the firmware's generic envelope router on those sockets.
+This starts the CBOR console on UDP `127.0.0.1:5226` and an async echo module
+on TCP/UDP `127.0.0.1:5228`. Send numeric console envelopes to the UDP port;
+see the [console API](../../modules/mod_con/API.md). There is no text/stdin
+console. Arbitrary module routing through the console is not supported;
+Rust clients can use the module request API directly.
 
 Try the echo service:
 
@@ -29,6 +33,9 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as datagram:
 
 To choose modules and their start requests, pass `PATH.so[=START]` arguments. For example, `target/host-modules/mod_con.so target/host-modules/mod_rtest.so=async`. Keep each generated `.json` file beside its module. Restart `xip-host` to restart a stopped module.
 
-Run the maintained host checks with `scripts/test-host.sh generated` followed by `scripts/test-host.sh ci-runtime`. The local legacy `all` group also uses root `tests/` files and is not used by CI. Tests can also load modules with `Runtime::load_module`, bind their declared ports with `Instance::listen_network`, and run them with `Runtime::run_realtime`. For hardware fixtures and deterministic time, use `Runtime::run(ms)`; see [the tests](tests) for examples.
+Run checks with `scripts/test-host.sh generated` and `scripts/test-host.sh ci-runtime`.
 
-For structured Rust assertions, load the console through `Runtime::load_module` and use `Instance::request(20, 5, &[0xa0])` for status, then decode the CBOR fields with `xip_abi::cbor`. Console method 4 accepts a correlated envelope for console/native calls; other modules can be addressed directly through their instance request API. See [console tests](tests/console.rs), [lifecycle tests](tests/network.rs) and [the binary protocol guide](../../notes/docs/protocol.md). New tests should not generate command lines or scrape text responses.
+To test a module from Rust, use `Runtime::load_module`, `Instance::request` and
+`Runtime::run_realtime`. `Runtime::run(ms)` provides deterministic time for
+fixtures. See [console examples](tests/console.rs), [network examples](tests/network.rs)
+and [the protocol guide](../../notes/docs/protocol.md).

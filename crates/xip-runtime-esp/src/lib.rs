@@ -17,7 +17,7 @@ mod loader;
 #[cfg(target_os = "espidf")]
 pub mod settings;
 
-pub use loader::{autostart, call, find, init, manifest, request_raw, slot_manifest, slot_count, start, status, stop, stop_all, EventHandler, Features, PoolOps, SlotStatus, WifiOwner};
+pub use loader::{post, PacketHandler, autostart, call, find, init, manifest, request_raw, slot_manifest, slot_count, start, status, stop, stop_all, EventHandler, Features, PoolOps, SlotStatus, WifiOwner};
 
 /// Read host status without depending on a console module.
 #[cfg(target_os = "espidf")]

@@ -102,6 +102,8 @@ pub struct RtState {
     /// The id of the last `Instance::request`.
     pub next_request: u64,
     pub reset_called: bool,
+    /// How many times a module asked the host to rescan the module partition.
+    pub rescans: u32,
     pub started: String,
     pub start_request: String,
     pub stopped: String,
@@ -109,6 +111,8 @@ pub struct RtState {
     pub modules_cbor: Vec<u8>,
     pub manifest: Vec<u8>,
     pub(crate) nv_value: String,
+    /// Other settings (`ble.boot`, `flash.auth`): key to value.
+    pub(crate) nv_other: std::collections::HashMap<String, String>,
     pub(crate) pins: Vec<Pin>,
     pub(crate) spi: HashMap<i32, Box<dyn SpiDevice>>,
     pub(crate) components: HashMap<String, usize>,
@@ -158,6 +162,10 @@ pub(crate) struct InstState {
     pub held: Box<Held>,
     pub mem: Box<Mem>,
     pub component: Option<i32>,
+    /// Envelope requests handed to the module whose answer the runtime still wraps.
+    pub env: crate::envelope::Table,
+    /// Components the module hosts (manifest key 11).
+    pub hosted: Vec<crate::hosted::Hosted>,
     pub ended: bool,
     pub result: i32,
     pub calls: u32,
@@ -194,6 +202,10 @@ pub(crate) struct Shared {
     pub network: RefCell<crate::network::Network>,
     pub notify: Rc<tokio::sync::Notify>,
     pub realtime: Cell<Option<(tokio::time::Instant, u64)>>,
+    /// The copies of hosted tables handed to callers (`hosted.rs`); they live as long as the runtime.
+    pub thunk_tables: RefCell<Vec<(String, Box<[usize]>)>>,
+    /// Starts the installed module that hosts a component on demand (`Runtime::on_demand`).
+    pub starter: RefCell<Option<Rc<dyn Fn(&str) -> Option<Instance>>>>,
 }
 
 /// The runtime. Single threaded and deterministic: the application calls [`Runtime::run`] and the modules' handlers run
@@ -226,12 +238,14 @@ impl Runtime {
             main: Vec::new(),
             next_request: 0,
             reset_called: false,
+            rescans: 0,
             started: String::new(),
             start_request: String::new(),
             stopped: String::new(),
             modules_cbor: Vec::new(),
             manifest: Vec::new(),
             nv_value: String::new(),
+            nv_other: Default::default(),
             pins: vec![Pin::default(); PINS],
             spi: HashMap::new(),
             components: HashMap::new(),
@@ -241,7 +255,7 @@ impl Runtime {
         crate::wifi::FIX.with(|f| *f.borrow_mut() = crate::wifi::Fixture::new());
         crate::wifi::TUNING.with(|t| *t.borrow_mut() = xip_abi::WifiTuning::default());
         crate::power::FIX.with(|f| f.borrow_mut().requests.clear());
-        let sh = Rc::new(Shared { pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None) });
+        let sh = Rc::new(Shared { pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None), thunk_tables: RefCell::new(Vec::new()), starter: RefCell::new(None) });
         Runtime { sh }
     }
 
@@ -265,6 +279,15 @@ impl Runtime {
         let instance = self.add_loaded(&name, loaded, state_bytes);
         instance.set_component(component);
         instance.me.registered.set(true);
+        if let Ok(Some(mut names)) = xip_abi::cbor::get(&instance.me.manifest, 11) {
+            if let Some(xip_abi::cbor::Item::Array(n)) = names.next() {
+                for _ in 0..n.min(COMPONENTS_MAX) {
+                    if let Some(xip_abi::cbor::Item::Text(t)) = names.next() {
+                        instance.host_component(&String::from_utf8_lossy(t));
+                    }
+                }
+            }
+        }
         if let Ok(Some(port)) = xip_abi::cbor::get_int(&instance.me.manifest, 9) {
             if let Ok(port) = u32::try_from(port) { let _ = instance.bind_port(port); }
         }
@@ -307,6 +330,8 @@ impl Runtime {
                 held: Held::new(sh.cfg.held_quota),
                 mem: Mem::new(sh.cfg.mem_quota),
                 component: None,
+                env: Default::default(),
+                hosted: Vec::new(),
                 ended: false,
                 result: 0,
                 calls: 0,
@@ -339,6 +364,13 @@ impl Runtime {
     /// stay valid as long as the runtime lives.
     pub fn register_component(&self, name: &str, table: *const c_void) {
         self.sh.st.borrow_mut().components.insert(name.to_string(), table as usize);
+    }
+
+    /// What the runtime does for `get_component(name)` when no running module hosts `name` (the loader's job on a device: start the installed module
+    /// that names it in manifest key 11). `f` creates the instance and queues its start, and returns it; `None`: nothing to start. The runtime then
+    /// runs the instance's start inline, so its table exists before `get_component` answers.
+    pub fn on_demand(&self, f: impl Fn(&str) -> Option<Instance> + 'static) {
+        *self.sh.starter.borrow_mut() = Some(Rc::new(f));
     }
 
     /// Attach a device to the SPI chip-select `cs` (the default is a loopback).
@@ -579,10 +611,16 @@ fn dispatch(sh: &Shared, me: &Rc<Inst>, component: i32, method: i32, value: i32,
         from: 0,
         time_us: 0,
         id: 0,
+            request_id: 0,
+            request_has_id: 0,
+            request_reserved: 0,
     };
     me.st.borrow_mut().calls += 1;
     let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
     finish_call(sh, me, component, method, rc);
+    if component == HOST_COMPONENT as i32 && method == HOST_START as i32 && !me.st.borrow().ended {
+        crate::hosted::publish(sh, me);
+    }
     rc
 }
 
@@ -629,12 +667,32 @@ fn release_all(sh: &Shared, me: &Rc<Inst>) {
 
 fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
     if c.request == 3 {
+        let mut c = c;
+        let raw = unsafe { std::slice::from_raw_parts(sh.pool.slot(c.pslot).add(c.pstart as usize), c.plen as usize) };
+        let (mut data, mut dlen) = (raw.as_ptr(), raw.len());
+        let mut envelope = false;
+        let mut request = (0u64, 0u32);
+        if c.lflags & CALL_ENVELOPE != 0 {
+            // a 0x444d0002 datagram that the classifier routed to this module (its own component, or the console for the native ones): the runtime parses
+            // the envelope and the module gets an ordinary request. Module ports and everything else deliver raw frames.
+            c.lflags &= !CALL_ENVELOPE;
+            let (kind, env) = crate::envelope::parse(raw);
+            if kind == crate::envelope::Kind::Request {
+                envelope = true;
+                request = (env.id, env.has_id as u32);
+                (c.component, c.method) = (env.component, env.method);
+                (data, dlen) = (env.fields.as_ptr(), env.fields.len());
+                c.lflags = CALL_ENVELOPE;
+                let p = crate::envelope::Pending { dst: c.from, token: c.id, id: env.id, component: env.component, method: env.method };
+                me.st.borrow_mut().env.add(p);
+            }
+        }
         let handle = me.st.borrow_mut().held.add(c.pslot, c.pstart, c.plen, HELD_BORROWED);
         if handle == 0 {
             sh.pool.release(c.pslot);
             return;
         }
-        let wants = c.id != 0 && c.lflags & CALL_LINK == 0;
+        let wants = envelope || (c.id != 0 && c.lflags & CALL_LINK == 0);
         {
             let mut st = me.st.borrow_mut();
             st.calls += 1;
@@ -645,12 +703,15 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
             method: c.method,
             value: c.value,
             flags: wants as u32 | c.lflags,
-            data: unsafe { sh.pool.slot(c.pslot).add(c.pstart as usize) },
-            len: c.plen as usize,
+            data,
+            len: dlen,
             pkt: handle,
             from: c.from,
             time_us: c.time_us,
             id: c.id,
+            request_id: request.0,
+            request_has_id: request.1,
+            request_reserved: 0,
         };
         let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
         finish_call(sh, me, c.component, c.method, rc);
@@ -681,6 +742,9 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
             from: c.from,
             time_us: 0,
             id: c.id,
+            request_id: 0,
+            request_has_id: 0,
+            request_reserved: 0,
         };
         me.st.borrow_mut().calls += 1;
         let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
@@ -694,7 +758,7 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
     }
 }
 
-fn drain(sh: &Shared, me: &Rc<Inst>) -> bool {
+pub(crate) fn drain(sh: &Shared, me: &Rc<Inst>) -> bool {
     let mut any = false;
     loop {
         let item = {
@@ -804,6 +868,14 @@ impl Instance {
     }
     pub fn name(&self) -> &str {
         &self.me.name
+    }
+    /// The host table this module's handler is called with (a test calls `get_component` through it as the module would).
+    pub fn host(&self) -> &Host {
+        &self.me.table
+    }
+    /// The module hosts the component `name` (manifest key 11; `load_module` reads it): after `HOST_START` the runtime asks it for the table.
+    pub fn host_component(&self, name: &str) {
+        self.me.st.borrow_mut().hosted.push(crate::hosted::Hosted { name: name.to_string(), table: 0, ctx: 0 });
     }
     /// The address of this module for `send(dst = component)`.
     pub fn set_component(&self, component: i32) {

@@ -192,6 +192,7 @@ pub struct OwnedCall {
     pub method: i32,
     pub value: i32,
     pub flags: u32,
+    pub time_us: u32,
     pub from: u32,
     pub id: u64,
     pub packet: Option<Packet>,
@@ -210,11 +211,11 @@ impl OwnedCall {
             method: self.method,
             value: self.value,
             flags: self.flags,
+            time_us: self.time_us,
             from: self.from,
             id: self.id,
             data: self.data()?,
-            pkt: self.packet.as_ref().map_or(0, Packet::handle),
-        })
+            pkt: self.packet.as_ref().map_or(0, Packet::handle), request_id: None })
     }
     fn snapshot(ctx: &TaskContext, hw: &Hw, c: &CallView) -> Result<Self, i32> {
         let mut bytes = Vec::new();
@@ -222,6 +223,13 @@ impl OwnedCall {
             let rc = hw.pkt_keep(c.pkt);
             if rc < 0 {
                 return Err(rc);
+            }
+            // A request the runtime parsed from an envelope lends the fields, which lie inside the packet: move them to its start so the
+            // packet is the payload (`Packet::data`, `Packet::send` take it from there).
+            if let Ok((p, cap)) = hw.pkt_buf(c.pkt) {
+                if c.data.len() <= cap && !c.data.is_empty() && c.data.as_ptr() != p as *const u8 {
+                    unsafe { core::ptr::copy(c.data.as_ptr(), p, c.data.len()) };
+                }
             }
             Some(Packet {
                 ctx: ctx.clone(),
@@ -240,6 +248,7 @@ impl OwnedCall {
             method: c.method,
             value: c.value,
             flags: c.flags,
+            time_us: c.time_us,
             from: c.from,
             id: c.id,
             packet,
@@ -765,11 +774,11 @@ mod tests {
             method,
             value: 0,
             flags: 0,
+            time_us: 0,
             from: 0,
             id: 0,
             data: &[],
-            pkt: 0,
-        }
+            pkt: 0, request_id: None }
     }
     fn hw(h: &Host) -> Hw {
         unsafe { Hw::new(h) }.unwrap()

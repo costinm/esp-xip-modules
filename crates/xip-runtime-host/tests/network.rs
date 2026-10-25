@@ -51,32 +51,6 @@ async fn declared_udp_and_async_stream_echo_use_real_sockets() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn console_tcp_admission_and_stop_close_connections_without_commands() {
-    let rt = Runtime::default();
-    let m = rt.load_module(module("mod_con")).unwrap();
-    let ports = m.listen_network(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).await.unwrap();
-    m.start(b"");
-    let client = async {
-        let mut first = TcpStream::connect(ports.stream.unwrap()).await.unwrap();
-        let mut second = TcpStream::connect(ports.stream.unwrap()).await.unwrap();
-        let mut byte = [0];
-        assert_eq!(second.read(&mut byte).await.unwrap(), 0);
-        // Admission and cleanup are valuable regardless of the console's command parser.
-        assert!(tokio::time::timeout(Duration::from_millis(30), first.read(&mut byte)).await.is_err());
-        m.stop();
-        assert_eq!(first.read(&mut byte).await.unwrap(), 0);
-    };
-    tokio::select! {
-        _ = rt.run_realtime(Duration::from_secs(3)) => panic!("connection admission test timed out"),
-        _ = client => {},
-    }
-    rt.run(0);
-    assert!(m.ended());
-    assert_eq!(m.mem_leaked(), 0);
-    assert!(std::net::TcpListener::bind(ports.stream.unwrap()).is_ok());
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn repeated_stop_and_reload_reuses_udp_links() {
     let rt = Runtime::default();
     for _ in 0..20 {
@@ -383,8 +357,13 @@ async fn cli_defaults_bind_declared_ports_and_serve_async_echo() {
                 .await
                 .unwrap()
                 .expect("CLI exited during startup");
-            assert!(line.contains("TCP Some"), "{line}");
+            if line.contains("mod_con.so") {
+                assert!(line.contains("TCP None") && line.contains("UDP None"), "{line}"); // the console has no port
+            } else {
+                assert!(line.contains("mod_rtest.so") && line.contains("TCP Some"), "{line}");
+            }
         }
+        // A module's UDP port gets the full raw datagram (mod_con answers envelopes of PPP ports and 0x444d0002 datagrams, not raw UDP).
         let mut echo = TcpStream::connect("127.0.0.1:5228").await.unwrap();
         echo.write_all(b"CLI async").await.unwrap();
         let mut reply = [0; 9];

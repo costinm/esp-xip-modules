@@ -53,6 +53,12 @@ pub struct PoolOps {
 }
 unsafe impl Sync for PoolOps {}
 
+/// Module-to-application messages, invoked on the serialized module worker.
+/// The data is borrowed for the call; reply by posting work, never by a blocking
+/// request to a module on that same worker.
+pub type PacketHandler = unsafe extern "C" fn(*mut core::ffi::c_void, *const core::ffi::c_char,
+    u32, i32, i32, u64, *const u8, usize) -> i32;
+
 /// What the application offers its modules through the ABI beyond the hardware.
 #[derive(Clone, Copy, Default)]
 pub struct Features {
@@ -66,6 +72,7 @@ pub struct Features {
     /// The application's own Wi-Fi owner (DMesh drives the radio itself): its functions answer the `wifi` and `wifi-tuning`
     /// components. `None`: the host's simple station owner.
     pub wifi: Option<&'static WifiOwner>,
+    pub packet: Option<PacketHandler>,
 }
 
 #[cfg(target_os = "espidf")]
@@ -93,6 +100,8 @@ mod imp {
         wifi_tuning_set: Option<unsafe extern "C" fn(*const xip_abi::WifiTuning) -> i32>,
         wifi_tuning_get: Option<unsafe extern "C" fn(*mut xip_abi::WifiTuning) -> i32>,
         wifi_monitor: Option<unsafe extern "C" fn(*const xip_abi::WifiMonitor) -> i32>,
+        module_rescan: Option<unsafe extern "C" fn() -> i32>,
+        component_start: Option<unsafe extern "C" fn(*const c_char) -> i32>,
     }
 
     /// `xip_loader_config_t`.
@@ -111,6 +120,7 @@ mod imp {
         fn xip_loader_slot_count() -> usize;
         fn xip_loader_start(slot: i32, request: *const u8, len: usize) -> i32;
         fn xip_loader_stop(slot: i32, timeout_ms: u32) -> i32;
+        fn xip_loader_post(slot: i32, component: i32, method: i32, data: *const u8, len: usize) -> i32;
         fn xip_loader_request(slot: i32, component: i32, method: i32, data: *const u8, len: usize, response: *mut u8,
                                  capacity: usize, response_len: *mut usize, timeout_ms: u32) -> i32;
         fn xip_loader_status(slot: i32, out: *mut SlotStatus);
@@ -119,6 +129,8 @@ mod imp {
         fn xip_loader_stop_named(name: *const u8, name_len: usize) -> i32;
         fn xip_loader_manifest(slot: i32, out: *mut u8, capacity: usize) -> i32;
         fn xip_loader_manifest_named(name: *const u8, name_len: usize, out: *mut u8, capacity: usize) -> i32;
+        fn xip_loader_rescan() -> i32;
+        fn xip_loader_start_hosting(name: *const c_char) -> i32;
     }
 
     pub fn init(partition: &'static str, features: Features, on_event: Option<EventHandler>) -> i32 {
@@ -130,7 +142,7 @@ mod imp {
             wifi_tuning_set: None, wifi_tuning_get: None,
             nv: features.nv,
             pool: features.pool.map_or(core::ptr::null(), |p| p as *const PoolOps),
-            modules_info: None, module_start: None, module_stop: None, module_manifest: None, packet: None, inbox_ready: None,
+            modules_info: None, module_start: None, module_stop: None, module_manifest: None, packet: features.packet, inbox_ready: None, module_rescan: None, component_start: None,
         };
         if let Some(owner) = features.wifi {
             ext.wifi_set = Some(owner.set); ext.wifi_get = Some(owner.get);
@@ -145,6 +157,8 @@ mod imp {
             ext.module_start = Some(xip_loader_start_named);
             ext.module_stop = Some(xip_loader_stop_named);
             ext.module_manifest = Some(xip_loader_manifest_named);
+            ext.module_rescan = Some(xip_loader_rescan);
+            ext.component_start = Some(xip_loader_start_hosting);
         }
         unsafe {
             let _ = on_event;
@@ -186,6 +200,9 @@ mod imp {
         let n = unsafe { xip_loader_manifest_named(module.as_ptr(), module.len(), out.as_mut_ptr(), out.len()) };
         if n >= 0 { Ok(n as usize) } else { Err(n) }
     }
+    pub fn post(slot:usize,component:i32,method:i32,data:&[u8])->i32 {
+        unsafe {xip_loader_post(slot as i32,component,method,data.as_ptr(),data.len())}
+    }
     pub fn request_raw(slot: usize, component: i32, method: i32, data: &[u8], answer: &mut [u8]) -> Result<usize, i32> {
         /// How long a request to a module may take (the module answers within one handler call).
         const REQUEST_TIMEOUT_MS: u32 = 1000;
@@ -209,6 +226,7 @@ mod imp {
     pub fn status(_: usize) -> SlotStatus { SlotStatus::default() }
     pub fn start(_: usize, _: &[u8]) -> i32 { -1 }
     pub fn stop(_: usize, _: u32) -> i32 { -1 }
+    pub fn post(_:usize,_:i32,_:i32,_:&[u8])->i32 {-1}
     pub fn request_raw(_: usize, _: i32, _: i32, _: &[u8], _: &mut [u8]) -> Result<usize, i32> { Err(-1) }
     pub fn slot_manifest(_: usize, _: &mut [u8]) -> Result<usize, i32> { Err(-1) }
     pub fn manifest(_: &str, _: &mut [u8]) -> Result<usize, i32> { Err(-1) }
@@ -220,7 +238,7 @@ pub fn init(partition: &'static str, features: Features, on_event: Option<EventH
     imp::init(partition, features, on_event)
 }
 /// Start the installed modules whose manifest asks to run at boot (a console). The application calls it last, once everything a
-/// module may use is up; an application that owns the serial port itself (DMesh in `uart.mode=ppp`) does not call it. Few modules should ask.
+/// module may use is up; an application that owns the serial port itself (DMesh with its PPP bearer) does not call it. Few modules should ask.
 pub fn autostart() -> i32 { imp::autostart() }
 /// The slot of a module name.
 pub fn find(name: &str) -> Option<usize> { imp::find(name) }
@@ -256,3 +274,6 @@ pub fn call(module: &str, start_request: &[u8], component: i32, method: i32, req
     }
     request_raw(slot, component, method, request, answer)
 }
+
+/// Post a response without blocking the shared module worker.
+pub fn post(slot:usize,component:i32,method:i32,data:&[u8])->i32 {imp::post(slot,component,method,data)}

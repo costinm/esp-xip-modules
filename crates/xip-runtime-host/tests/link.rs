@@ -366,3 +366,40 @@ fn a_route_forwards_in_the_runtime_before_any_module_is_woken() {
     assert_eq!(rt.link_info("espnow").unwrap().dropped, 1);
     assert_eq!(rt.packets_in_use(), 0);
 }
+
+#[test]
+fn the_quic_rx_function_takes_a_frame_and_the_subscribers_do_not_see_it() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let rt = Runtime::default();
+    let a = consumer_on(&rt, "a", C, "ble");
+    rt.add_native_link("ble", 1500, NativeTx::Done);
+    let seen: Rc<RefCell<Vec<(String, u64, i32, Vec<u8>)>>> = Rc::default();
+    let take = Rc::new(RefCell::new(true));
+    {
+        let (seen, take) = (seen.clone(), take.clone());
+        rt.set_quic_rx(Some(move |name: &str, source: u64, signal: i32, data: &[u8]| {
+            seen.borrow_mut().push((name.to_string(), source, signal, data.to_vec()));
+            *take.borrow()
+        }));
+    }
+    let big: Vec<u8> = (0..1400u32).map(|i| (i % 251) as u8).collect();
+    assert_eq!(rt.inject_frame("ble", 7, signal(-40, 0), &big), 0);
+    rt.run(0);
+    assert_eq!(seen.borrow().len(), 1);
+    assert_eq!((seen.borrow()[0].0.as_str(), seen.borrow()[0].1, seen.borrow()[0].3.len()), ("ble", 7, 1400));
+    assert_eq!(events(&a, 1).len(), 0, "a taken frame is not fanned out");
+    assert_eq!(rt.packets_in_use(), 0, "the runtime returned the packet to the pool");
+    // declined: normal routing goes on and the subscriber owns the frame
+    *take.borrow_mut() = false;
+    assert_eq!(rt.inject_frame("ble", 8, 0, b"\x00second"), 0);
+    rt.run(0);
+    assert_eq!(seen.borrow().len(), 2);
+    assert_eq!(events(&a, 1).len(), 1);
+    // nobody listens and no function: nothing is allocated
+    rt.set_quic_rx(None::<fn(&str, u64, i32, &[u8]) -> bool>);
+    assert_eq!(rt.inject_frame("ble", 9, 0, b"third"), 0);
+    rt.run(0);
+    assert_eq!(events(&a, 1).len(), 2);
+    assert_eq!(rt.packets_in_use(), 0);
+}

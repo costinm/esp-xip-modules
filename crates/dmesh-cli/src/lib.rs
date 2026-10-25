@@ -39,3 +39,5 @@ pub async fn request_uart_record_with_linger(
     node_client::request_uart_monitor(path, None, || Ok(record.to_vec()), timeout,
         None, linger, |_| {}).await.map(|response| response.bytes)
 }
+
+mod console;

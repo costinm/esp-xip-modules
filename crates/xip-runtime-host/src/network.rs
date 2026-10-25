@@ -265,7 +265,7 @@ impl Network {
                     d.link,
                     token,
                     0,
-                    CALL_LINK,
+                    CALL_LINK, // the full raw datagram of a module's UDP port: only PPP ports and 0x444d0002 datagrams are parsed as envelopes
                     0,
                 ) != 0
                 {

@@ -8,10 +8,47 @@
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::time::{Duration, Instant};
 
-/// The console port of the runtime's ports (`xip.h` `XIP_PORT_CONSOLE`).
+
+/// The console port of the runtime's ports (`xip.h` `XIP_PORT_CONSOLE`): raw frames for a module that binds it; requests no longer go there.
 pub const PORT_CONSOLE: u32 = 1;
+/// The QUIC port (`xip.h` `XIP_PORT_QUIC`, 0xf7): the PPP record of a QUIC link. Every request to a device goes here, as a 0x444d0002 long packet.
+pub const PORT_QUIC: u32 = 247;
+/// The version of the CBOR datagram: after the SCID comes the envelope `{1: component, 2: method, 3: id, 5: fields}`.
+pub const VERSION_CBOR: u32 = 0x444d_0002;
+
+/// A QUIC long packet of `version` (first byte 0xc0, the version, DCID, SCID) around `payload`. The CIDs may be empty or up to 20 bytes
+/// (`xip_quic.c` classifies them by length only).
+pub fn long_packet(version: u32, dcid: &[u8], scid: &[u8], payload: &[u8]) -> Vec<u8> {
+    assert!(dcid.len() <= 20 && scid.len() <= 20, "a connection ID is at most 20 bytes");
+    let mut out = vec![0xc0];
+    out.extend_from_slice(&version.to_be_bytes());
+    out.push(dcid.len() as u8);
+    out.extend_from_slice(dcid);
+    out.push(scid.len() as u8);
+    out.extend_from_slice(scid);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// The request as a datagram for the device: a 0x444d0002 long packet (DCID 01, SCID 02) around the envelope.
+pub fn wrap_request(envelope: &[u8]) -> Vec<u8> {
+    long_packet(VERSION_CBOR, &[1], &[2], envelope)
+}
+
+/// The envelope inside an answer packet of the device (a 0x444d0002 long packet, our CIDs swapped), or None for anything else.
+pub fn unwrap_answer(packet: &[u8]) -> Option<&[u8]> {
+    let (&first, rest) = packet.split_first()?;
+    if first & 0xc0 != 0xc0 || rest.len() < 6 || u32::from_be_bytes(rest[..4].try_into().ok()?) != VERSION_CBOR {
+        return None;
+    }
+    let dcid = *rest.get(4)? as usize;
+    let scid = *rest.get(5 + dcid)? as usize;
+    if dcid > 20 || scid > 20 {
+        return None;
+    }
+    rest.get(6 + dcid + scid..)
+}
 const FLAG: u8 = 0x7e;
 const ESC: u8 = 0x7d;
 const XOR: u8 = 0x20;
@@ -187,48 +224,6 @@ impl XipPort {
     }
 }
 
-/// The board's console over the record wire: the words go out as one record to `port`
-/// (`PORT_CONSOLE` by default) and everything the wire carries for `seconds` is printed: the
-/// device's log text as it is, and the records decoded (port and payload).
-pub fn console_session(path: &str, words: &[String], port: u32, seconds: f64) -> Result<(), String> {
-    let mut owner = XipPort::open(path).map_err(|e| e.to_string())?;
-    let mut reader = Reader::default();
-    let mut line: Vec<u8> = Vec::new();
-    owner.flush_input().map_err(|e| e.to_string())?;
-    std::thread::sleep(Duration::from_millis(100));
-    owner.flush_input().map_err(|e| e.to_string())?;
-    if !words.is_empty() {
-        owner
-            .write_all(&encode_record(port, words.join(" ").as_bytes()))
-            .map_err(|e| e.to_string())?;
-    }
-    let start = Instant::now();
-    let window = Duration::from_secs_f64(seconds);
-    while start.elapsed() < window {
-        let bytes = owner.read().map_err(|e| e.to_string())?;
-        for event in reader.feed(&bytes) {
-            match event {
-                Event::Record(port, payload) => {
-                    println!("[port {port}] {}", String::from_utf8_lossy(&payload));
-                }
-                Event::Text(text) => line.extend(text),
-            }
-        }
-        line.extend(reader.take_text());
-        while let Some(at) = line.iter().position(|b| *b == b'\n') {
-            let taken: Vec<u8> = line.drain(..=at).collect();
-            let text = String::from_utf8_lossy(&taken[..taken.len() - 1]).trim_end_matches('\r').to_string();
-            if !text.trim().is_empty() {
-                println!("  {text}");
-            }
-        }
-        if bytes.is_empty() {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +232,22 @@ mod tests {
         let mut r = Reader::default();
         let events = r.feed(bytes);
         (events, r.take_text())
+    }
+
+    #[test]
+    fn requests_are_long_packets_and_answers_are_unwrapped() {
+        let envelope = [0xa2, 1, 20, 2, 5];
+        let packet = wrap_request(&envelope);
+        assert_eq!(&packet[..9], &[0xc0, 0x44, 0x4d, 0, 2, 1, 1, 1, 2]);
+        assert_eq!(unwrap_answer(&packet), Some(&envelope[..]));
+        // the device answers with our CIDs swapped, empty or long ones included
+        for (d, s) in [(&[][..], &[][..]), (&[2][..], &[1][..]), (&[7; 20][..], &[9; 20][..])] {
+            assert_eq!(unwrap_answer(&long_packet(VERSION_CBOR, d, s, &envelope)), Some(&envelope[..]));
+        }
+        assert_eq!(unwrap_answer(&long_packet(0x444d_0001, &[1], &[2], &envelope)), None, "another version is not ours");
+        assert_eq!(unwrap_answer(&envelope), None);
+        assert_eq!(unwrap_answer(&[0xc0, 0x44, 0x4d, 0, 2, 30, 0]), None, "a CID over 20 bytes");
+        assert_eq!(unwrap_answer(&packet[..7]), None, "truncated");
     }
 
     #[test]

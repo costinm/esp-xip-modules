@@ -16,10 +16,14 @@ mod hostcalls;
 mod network;
 mod runtime;
 mod link;
+mod envelope;
+mod hosted;
+pub mod quic;
 mod wifi;
 mod power;
 
 pub use link::NativeTx;
+pub use quic::{QuicClass, QuicHeader, QuicInfo, QuicKind, QuicPacket, QuicStats};
 pub use network::Ports;
 pub use runtime::{Config, Event, Instance, MainMsg, Runtime, Trace, TraceKind};
 pub use xip_abi;

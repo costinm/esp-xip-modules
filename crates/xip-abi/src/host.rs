@@ -42,6 +42,11 @@ pub const HOST_NETWORK: u32 = 3;
 pub const HOST_WAKE: u32 = 4;
 /// The intended Wi-Fi state or the tuning changed (`wifi` and `wifi-tuning` components); `value` is the new generation. Call `get` to read it again, `state` to see what is true now. Delivered to every running module.
 pub const HOST_WIFI: u32 = 5;
+/// The runtime asks for the table of a component the module hosts (manifest key 11 lists them). `data` is the component's name; the module answers the
+/// request with `Hw::provide_table` (its table of functions and the context they take). Asked once, right after `HOST_START`.
+pub const HOST_TABLE: u32 = 6;
+/// Most components one module may host.
+pub const COMPONENTS_MAX: usize = 3;
 
 // RET: Return values of a handler.
 /// Keep the instance.
@@ -101,6 +106,11 @@ pub const ADDR_MAIN: u32 = 0;
 /// The first address of a link (`link` component): `ADDR_LINK + n`. Frames arrive `from` it, and `send` to it transmits. It is below 2^31 so that
 /// `link.open` can return an address like a result, positive, and an error stays negative. Module addresses (component numbers) are below it.
 pub const ADDR_LINK: u32 = 0x4000_0000;
+/// `send` to this address hands the runtime a CBOR envelope `{1: component, 2: method, 3: id, 5: fields}` to dispatch, the way it dispatches a 0x444d0002 datagram: parsed
+/// by the runtime, delivered to the module of the component (or to the console module for a native component) as an ordinary request (`CALL_ENVELOPE`), with `from` the
+/// sender and `id` the `id` argument of the `send`. The answer comes back to the sender as a message from the module, wrapped as `{1, 2, 3, 6: result}` or `{.., 7: error}`,
+/// with the request's component and method and the same `id`. `ERR_ARG` if it is not a valid request envelope, `ERR_NOTFOUND` if no module serves it.
+pub const ADDR_ENVELOPE: u32 = 0x3fff_fff0;
 
 // SOCKET_MODE: `SOCKET_MODE`
 /// Readiness callback; the module calls nonblocking `socket_read` or `socket_write`.
@@ -178,7 +188,7 @@ pub struct Call {
     pub method: i32,
     /// IRQ: the pin level. Alarm: how late it fired, in ms (saturated). `HOST_NETWORK`: 1 or 0. Request: 0. A frame of a link: its signal (`link` component).
     pub value: i32,
-    /// Bit 0: the call is a request that expects an answer (`send` to `from` with the same `id`, `Hw::reply`). Bit 1 (`CALL_LINK`): a frame of a link, `from` is its address and `id` an address token, not a request. Bit 2 (`CALL_LINK_EVENT`): an event of a link, its kind in bits 8..15.
+    /// Bit 0: the call is a request that expects an answer (`send` to `from` with the same `id`, `Hw::reply`). Bit 1 (`CALL_LINK`): a frame of a link, `from` is its address and `id` an address token, not a request. Bit 2 (`CALL_LINK_EVENT`): an event of a link, its kind in bits 8..15. Bit 3 (`CALL_ENVELOPE`): a request that arrived as a CBOR envelope, parsed by the runtime (`component`, `method`, `data` = the fields); its answer is wrapped by the runtime.
     pub flags: u32,
     /// Payload, valid during the call only.
     pub data: *const u8,
@@ -193,9 +203,14 @@ pub struct Call {
     pub time_us: u32,
     /// The sender's correlation number, returned in the answer.
     pub id: u64,
+    /// `CALL_ENVELOPE`: the envelope's own id (field 3) when `request_has_id` is not 0. The envelope's component and method are `component` and `method`,
+    /// its fields `data`. Appended: a host with a shorter `size` does not have it.
+    pub request_id: u64,
+    pub request_has_id: u32,
+    pub request_reserved: u32,
 }
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<Call>() == 48);
+const _: () = assert!(core::mem::size_of::<Call>() == 64);
 
 /// first 64 bytes of a module image
 #[repr(C, packed)]
@@ -471,7 +486,7 @@ pub struct Host {
     ///
     /// # Returns
     ///
-    /// `void *` — NULL on exhaustion, when an allocation would leave less than 32 KiB of host heap free, or when the optional per-module quota is exceeded. `CONFIG_XIP_MEM_QUOTA=0` (default) uses the available heap; a nonzero value caps outstanding allocations per module. The free-heap margin is checked at allocation time; unrelated firmware allocations can consume it later.
+    /// `void *` — A block aligned to16bytes; NULL on exhaustion, when an allocation would leave less than 32 KiB of host heap free, or when the optional per-module quota is exceeded. `CONFIG_XIP_MEM_QUOTA=0` (default) uses the available heap; a nonzero value caps outstanding allocations per module. The free-heap margin is checked at allocation time; unrelated firmware allocations can consume it later.
     ///
     /// # Arguments
     ///
@@ -534,8 +549,9 @@ pub struct Host {
     /// when the application offers none.
     ///
     /// The settings of the *device*, kept in its NVS by the application and the loader, as text: `wifi.rx_static`, `wifi.rx_dynamic`,
-    /// `wifi.tx_dynamic`, `wifi.rx_ba` (the Wi-Fi driver's buffer counts, which are RAM) from the loader, and whatever else the application
-    /// lists (DMesh: `uart.mode`, `quic.pool`, ...). The host knows no names: it passes them on, and the application answers for its own. This is for a
+    /// `wifi.tx_dynamic`, `wifi.rx_ba` (the Wi-Fi driver's buffer counts, which are RAM) from the loader, `flash.auth`
+    /// (`strict` by default or `unsigned`, applied when the upload module starts), and whatever else the application
+    /// lists (DMesh: `quic.pool`, ...). The runtime handles shared settings and delegates application names. This is for a
     /// console or a tool; a module's own settings are `get_setting` / `set_setting`. With `value` NULL it reads; with a value it writes
     /// (an empty value restores the default). Most settings apply at the next start of the thing they configure, or after a reboot.
     ///
@@ -776,9 +792,23 @@ pub struct Host {
     ///
     /// * `name` (`const char *`): NUL-terminated component name; NULL returns NULL.
     pub get_component: Option<unsafe extern "C" fn(user: *mut c_void, name: *const core::ffi::c_char) -> *const c_void>,
+    /// Monotonic microsecond clock, sharing the epoch of Call.time_us.
+    /// Append-only capability; modules must check table size before use.
+    pub now_us: Option<unsafe extern "C" fn(user: *mut c_void) -> u64>,
+    /// Look at the module partition again.
+    ///
+    /// After an install (`mod_flash`) the host rescans the module partition: per module name the image with the highest version
+    /// (manifest key 8) becomes the module, lower versions are *shadowed* and listed in `modules_info` (`Slot` fields `page`,
+    /// `shadowed`). A running module keeps running; the one that was replaced was stopped before its page was written. Slot order and
+    /// indices may change. Append-only capability; modules must check table size before use.
+    ///
+    /// # Returns
+    ///
+    /// `int` — the number of modules, or a negative error (`ERR_UNSUPPORTED` when the host has no loader).
+    pub module_rescan: Option<unsafe extern "C" fn(user: *mut c_void) -> core::ffi::c_int>,
 }
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<Host>() == 148);
+const _: () = assert!(core::mem::size_of::<Host>() == 156);
 
 /// Byte offset of each host call, for `Hw`'s check that an older host has the slot.
 pub mod slot {
@@ -817,4 +847,5 @@ pub mod slot {
     pub const DEVICE_INFO: usize = core::mem::offset_of!(Host, device_info);
     pub const INFO_PUBLISH: usize = core::mem::offset_of!(Host, info_publish);
     pub const GET_COMPONENT: usize = core::mem::offset_of!(Host, get_component);
+    pub const MODULE_RESCAN: usize = core::mem::offset_of!(Host, module_rescan);
 }

@@ -59,6 +59,8 @@ unsafe extern "C" fn h_log(user: *mut c_void, data: *const u8, len: usize) -> i3
     if len < 97 { 0 } else { ERR_SIZE }
 }
 
+unsafe extern "C" fn h_now_us(user: *mut c_void) -> u64 { h_now(user).saturating_mul(1000) }
+
 unsafe extern "C" fn h_now(user: *mut c_void) -> u64 {
     let (sh, _me) = ctx(user);
     sh.st.borrow().now
@@ -319,6 +321,30 @@ unsafe extern "C" fn h_heap_dump(user: *mut c_void, kind: i32) -> i32 {
 
 unsafe extern "C" fn h_nv(user: *mut c_void, key: *const u8, kn: usize, value: *const u8, vn: usize, out: *mut u8, cap: usize) -> i32 {
     let (sh, _me) = cx!(user, "nv");
+    if sl(key, kn) == b"flash.auth" {
+        let mut s = sh.st.borrow_mut();
+        if !value.is_null() {
+            let v = sl(value, vn);
+            if v.is_empty() { s.nv_other.remove("flash.auth"); }
+            else if v == b"strict" || v == b"unsigned" {
+                s.nv_other.insert("flash.auth".into(), String::from_utf8_lossy(v).into_owned());
+            } else { return ERR_ARG; }
+            return 0;
+        }
+        return put(out, cap, s.nv_other.get("flash.auth").map_or(b"strict".as_slice(), |v| v.as_bytes()));
+    }
+    if sl(key, kn) == b"ble.boot" {
+        let mut s = sh.st.borrow_mut();
+        let k = "ble.boot".to_string();
+        if !value.is_null() {
+            s.nv_other.insert(k, String::from_utf8_lossy(sl(value, vn)).into_owned());
+            return 0;
+        }
+        return match s.nv_other.get(&k) {
+            Some(v) => put(out, cap, v.as_bytes()),
+            None => ERR_NOTFOUND,
+        };
+    }
     if sl(key, kn) != b"wifi.rx_static" {
         return ERR_NOTFOUND;
     }
@@ -412,6 +438,11 @@ unsafe extern "C" fn h_module_manifest(user: *mut c_void, name: *const u8, n: us
     }
     put(out, cap, &sh.st.borrow().manifest)
 }
+unsafe extern "C" fn h_module_rescan(user: *mut c_void) -> i32 {
+    let (sh, _me) = cx!(user, "module_rescan");
+    sh.st.borrow_mut().rescans += 1;
+    1
+}
 unsafe extern "C" fn h_reset(user: *mut c_void) -> i32 {
     let (sh, _me) = cx!(user, "reset");
     sh.st.borrow_mut().reset_called = true;
@@ -502,8 +533,49 @@ unsafe extern "C" fn h_send(user: *mut c_void, pkt: u32, len: usize, dst: u32, c
         sh.st.borrow_mut().main.push(MainMsg { inst: Rc::as_ptr(&me) as usize, from: from as u32, component, method, id, data });
         sh.pool.release(slot);
         return 0;
+    } else if dst == ADDR_ENVELOPE {
+        // a module hands the runtime an envelope to dispatch, as the 0x444d0002 path does: parsed here, delivered to the module of its component (or the
+        // console for a native one) as a request from this module with `id` as the token; the answer returns as a message
+        let data = sl(sh.pool.slot(slot).add(e.start as usize), len);
+        let (kind, env) = crate::envelope::parse(data);
+        if kind != crate::envelope::Kind::Request {
+            ERR_ARG
+        } else {
+            let target = crate::link::envelope_target(sh, env.component);
+            match target {
+                Some(t) if !Rc::ptr_eq(&t, &me) => {
+                    let component = t.st.borrow().component.unwrap_or(0);
+                    deliver(sh, &t, slot, e.start, len as u16, component, 0, from as u32, id, 0, CALL_LINK | CALL_ENVELOPE, 0)
+                }
+                Some(_) => ERR_ARG,
+                None => ERR_NOTFOUND,
+            }
+        }
     } else {
-        match route(sh, dst as i32) {
+        let mut component = component;
+        let mut method = method;
+        let mut len = len;
+        let more = method & SEND_MORE != 0;
+        method &= !SEND_MORE;
+        let target = route(sh, dst as i32);
+        // the answer to an envelope request that came from a module (ADDR_ENVELOPE): wrapped as for a datagram, in front of the payload
+        let pending = if target.is_some() { me.st.borrow().env.find(dst, id, component, method) } else { None };
+        if let Some(p) = pending {
+            let at = sl(sh.pool.slot(slot).add(e.start as usize), len);
+            let failed = crate::envelope::is_error(at);
+            let head = crate::envelope::head(p.component, p.method, p.id, failed.unwrap_or(0));
+            if len + head.len() <= PKT_MAX as usize && e.start as usize + len + head.len() <= sh.pool.slot_size() as usize {
+                let base = sh.pool.slot(slot).add(e.start as usize);
+                std::ptr::copy(base, base.add(head.len()), len);
+                std::ptr::copy_nonoverlapping(head.as_ptr(), base, head.len());
+                len = if failed.is_some() { head.len() } else { len + head.len() };
+                if !more {
+                    me.st.borrow_mut().env.done(&p);
+                }
+            }
+        }
+        let _ = (&mut component, &mut method);
+        match target {
             Some(t) => deliver(sh, &t, slot, e.start, len as u16, component, method, from as u32, id, 0, 0, 0),
             None => ERR_NOTFOUND,
         }
@@ -547,7 +619,16 @@ unsafe extern "C" fn h_get_component(user: *mut c_void, name: *const c_char) -> 
     if name == "wifi-tuning" {
         return crate::wifi::tuner().cast();
     }
-    sh.st.borrow().components.get(&name).map_or(std::ptr::null(), |p| *p as *const c_void)
+    if let Some(p) = sh.st.borrow().components.get(&name) {
+        return *p as *const c_void;
+    }
+    // a running module that hosts it (manifest key 11): the runtime's copy of its table, with thunks
+    let rc = unsafe {
+        let raw = sh as *const crate::runtime::Shared;
+        Rc::increment_strong_count(raw);
+        Rc::from_raw(raw)
+    };
+    crate::hosted::table_of(&rc, &name)
 }
 
 /// get_component("hw"): the pins, buses and converters of the fixture.
@@ -579,6 +660,7 @@ pub(crate) fn fill(t: &mut Host, user: *mut c_void) {
     t.socket_peer = Some(crate::network::peer);
     t.socket_write_pkt = Some(crate::network::write_pkt);
     t.now_ms = Some(h_now);
+    t.now_us = Some(h_now_us);
     t.get_setting = Some(h_get_setting);
     t.set_setting = Some(h_set_setting);
     t.alarm_set = Some(h_alarm_set);
@@ -587,6 +669,7 @@ pub(crate) fn fill(t: &mut Host, user: *mut c_void) {
     t.module_start = Some(h_module_start);
     t.module_stop = Some(h_module_stop);
     t.module_manifest = Some(h_module_manifest);
+    t.module_rescan = Some(h_module_rescan);
     t.reset = Some(h_reset);
     t.pkt_alloc = Some(h_pkt_alloc);
     t.pkt_buf = Some(h_pkt_buf);

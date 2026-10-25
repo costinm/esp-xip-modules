@@ -48,7 +48,7 @@ pub(crate) fn is_fatal_diagnostic(line: &str) -> bool {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: dmesh-cli SERIAL|DEVICE --reset\n       dmesh-cli SERIAL|DEVICE --wake [--baud PHYSICAL_UART_BAUD]\n       dmesh-cli SERIAL|DEVICE --watch [--reset] [--interactive] [--baud PHYSICAL_UART_BAUD] [--timeout-secs N]\n       dmesh-cli DEVICE METHOD [--field=value ...] [--bearer udp[,uart]]\n       dmesh-cli SERIAL METHOD [--baud PHYSICAL_UART_BAUD] [--timeout-secs N] [--linger-secs N] [--repeat-secs N] [--field=value ...]\n       dmesh-cli devices check|sync [--dry-run]\n       dmesh-cli discover\n       dmesh-cli flash TARGET [--target main|recovery|stage2|MODULE] [--file IMAGE]\n       dmesh-cli lmesh METHOD [--field=value ...]\n       dmesh-cli NODE check\n       dmesh-cli udp://HOST:PORT --socket PATH\n       dmesh-cli http://HOST:PORT SERVICE.METHOD [--field=value ...]"
+        "usage: dmesh-cli SERIAL|DEVICE --reset\n       dmesh-cli SERIAL|DEVICE --wake [--baud PHYSICAL_UART_BAUD]\n       dmesh-cli SERIAL|DEVICE --watch [--reset] [--interactive] [--baud PHYSICAL_UART_BAUD] [--timeout-secs N]\n       dmesh-cli DEVICE METHOD [--field=value ...] [--bearer udp[,uart]]\n       dmesh-cli SERIAL METHOD [--baud PHYSICAL_UART_BAUD] [--timeout-secs N] [--linger-secs N] [--repeat-secs N] [--field=value ...]\n       dmesh-cli devices check|sync [--dry-run]\n       dmesh-cli discover\n       dmesh-cli console SERIAL [METHOD] [--field=value ...] [--port N] [--seconds N]\n       dmesh-cli lmesh METHOD [--field=value ...]\n       dmesh-cli NODE check\n       dmesh-cli udp://HOST:PORT --socket PATH\n       dmesh-cli http://HOST:PORT SERVICE.METHOD [--field=value ...]"
     );
     std::process::exit(2)
 }
@@ -86,7 +86,7 @@ pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), 
         .first()
         .is_some_and(|target| target == "console")
     {
-        return run_xip_console(&arguments);
+        return crate::console::run(&arguments);
     }
     if arguments.as_slice() == ["devices", "check"] {
         return run_devices_check();
@@ -107,7 +107,7 @@ pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), 
         .is_some_and(|argument| argument == "flash")
     {
         return Err("`dmesh-cli flash` was retired: sign the image with the esp-wifi-loader tools (tools/sign.py), \
-send it with tools/upload.py, or use scripts/flash-device.py over USB (docs/flashing.md)"
+send it with tools/upload.py, or use scripts/flash-serial.sh over USB (notes/docs/flashing.md)"
             .into());
     }
     if arguments.get(1).is_some_and(|argument| argument == "check") {
@@ -532,33 +532,6 @@ fn append_catalog_uart_baud(arguments: &mut Vec<String>, profile: &DeviceProfile
         arguments.push("--baud".to_owned());
         arguments.push(profile.uart_baud.expect("checked above").to_string());
     }
-}
-
-/// The board's console over the runtime's record wire (`xip_wire`): the words go out as one
-/// record to the console port and the wire is read for the window.
-///
-/// `dmesh-cli console PATH [WORD ...] [--port N] [--seconds N]`
-fn run_xip_console(arguments: &[String]) -> Result<(), String> {
-    let Some(path) = arguments.get(1) else {
-        return Err("console needs a serial path: dmesh-cli console PATH [WORD ...] [--port N] [--seconds N]".into());
-    };
-    let (mut words, mut port, mut seconds) = (Vec::new(), crate::xip_wire::PORT_CONSOLE, 6.0);
-    let mut i = 2;
-    while i < arguments.len() {
-        match arguments[i].as_str() {
-            "--port" => {
-                i += 1;
-                port = arguments.get(i).ok_or("--port needs a value")?.parse::<u32>().map_err(|e| e.to_string())?;
-            }
-            "--seconds" => {
-                i += 1;
-                seconds = arguments.get(i).ok_or("--seconds needs a value")?.parse::<f64>().map_err(|e| e.to_string())?;
-            }
-            word => words.push(word.to_owned()),
-        }
-        i += 1;
-    }
-    crate::xip_wire::console_session(path, &words, port, seconds)
 }
 
 fn run_serial_direct_discovery(path: &str, baud: Option<u32>) -> Result<(), String> {

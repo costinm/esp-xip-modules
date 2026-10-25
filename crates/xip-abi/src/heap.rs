@@ -11,13 +11,13 @@
 //! not escape to another task or interrupt. Keep explicit `HostAlloc` values where an API accepts an allocator.
 //! Every block must be freed before the module stops: a non-zero balance is `ERR_LEAK`. Futures and other owned values
 //! may persist in instance-owned memory, provided they are dropped inside a handler before the module stops.
-//! Blocks are aligned for any type up to 8 bytes (larger alignment fails: null / `AllocError`).
+//! Blocks are aligned for any type up to 16 bytes (larger alignment fails: null / `AllocError`).
 
 use core::alloc::Layout;
 
 use crate::{Hw, Host};
 
-const ALIGN: usize = 8;
+const ALIGN: usize = 16;
 
 impl Hw {
     fn raw_alloc(&self, layout: Layout) -> *mut u8 {
@@ -195,7 +195,16 @@ mod tests {
                 assert_eq!(LIVE.load(core::sync::atomic::Ordering::SeqCst), 24);
                 core::alloc::GlobalAlloc::dealloc(&a, p, layout);
             }
-            assert!(core::alloc::GlobalAlloc::alloc(&a, Layout::from_size_align(8, 16).unwrap()).is_null(), "alignment above 8");
+            let aligned = Layout::from_size_align(992, 16).unwrap();
+            let p = core::alloc::GlobalAlloc::alloc(&a, aligned);
+            if cfg!(feature = "global-alloc") {
+                assert!(!p.is_null(), "16-byte QUIC metadata must be supported");
+                assert_eq!(p as usize % 16, 0);
+                core::alloc::GlobalAlloc::dealloc(&a, p, aligned);
+            } else {
+                assert!(p.is_null());
+            }
+            assert!(core::alloc::GlobalAlloc::alloc(&a, Layout::from_size_align(8, 32).unwrap()).is_null(), "alignment above 16");
             leave(saved);
             assert!(core::alloc::GlobalAlloc::alloc(&a, layout).is_null(), "return clears allocator context");
             assert_eq!(LIVE.load(core::sync::atomic::Ordering::SeqCst), 0);

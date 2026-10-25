@@ -40,3 +40,37 @@ pub fn dump(m: &Instance) {
         eprintln!("  event 0x{:04x} {}", e.id, e.text());
     }
 }
+
+/// The way every request reaches a module now: a 0x444d0002 long packet (CIDs 01 / 02) whose payload is the CBOR envelope, received on a link the
+/// classifier treats as QUIC. `Requests` owns that link ("udp") and collects what the runtime sent back, with the long header taken off.
+pub struct Requests {
+    pub rt: Runtime,
+}
+impl Requests {
+    pub fn new() -> Self {
+        let rt = Runtime::default();
+        rt.add_native_link("udp", xip_abi::PKT_MAX, xip_runtime_host::NativeTx::Done);
+        rt.set_quic_classifier(true);
+        Requests { rt }
+    }
+    pub fn datagram(envelope: &[u8]) -> Vec<u8> {
+        let mut v = xip_runtime_host::quic::long_build(xip_runtime_host::quic::VERSION_CBOR, &[1], &[2]).unwrap();
+        v.extend_from_slice(envelope);
+        v
+    }
+    /// The envelope of an answer packet: the long header (our CIDs swapped) taken off.
+    pub fn unwrap(packet: &[u8]) -> Vec<u8> {
+        let (class, h) = xip_runtime_host::quic::classify(packet, 0);
+        assert_eq!(class, xip_runtime_host::QuicClass::Long, "an answer is a long packet");
+        assert_eq!((h.version, h.dcid.as_slice(), h.scid.as_slice()), (xip_runtime_host::quic::VERSION_CBOR, &[2][..], &[1][..]));
+        packet[h.body..].to_vec()
+    }
+    /// Send one envelope (token 5) and return the envelopes the runtime sent back, in order.
+    pub fn send(&self, envelope: &[u8]) -> Vec<Vec<u8>> {
+        assert_eq!(self.rt.inject_frame("udp", 5, 0, &Self::datagram(envelope)), 0);
+        for _ in 0..4 {
+            self.rt.run(0);
+        }
+        self.rt.take_link_tx("udp").into_iter().map(|(_, f)| Self::unwrap(&f)).collect()
+    }
+}

@@ -11,19 +11,37 @@ style = "type"
 usize_is_size_t = true
 
 trailer = """
+_Static_assert(sizeof(xip_ip_config) == 36, "xip_ip_config layout");
 _Static_assert(sizeof(xip_spi_config) == 44, "xip_spi_config layout");
 _Static_assert(sizeof(xip_dmod_header) == 64, "xip_dmod_header layout");
 _Static_assert(sizeof(xip_wifi_intent) == 216, "xip_wifi_intent layout");
-_Static_assert(sizeof(xip_wifi_state) == 52, "xip_wifi_state layout");
+_Static_assert(sizeof(xip_wifi_state) == 68, "xip_wifi_state layout");
 _Static_assert(sizeof(xip_wifi_tuning) == 20, "xip_wifi_tuning layout");
 _Static_assert(sizeof(xip_link_info) == 60, "xip_link_info layout");
 _Static_assert(sizeof(xip_wifi_monitor) == 8, "xip_wifi_monitor layout");
 _Static_assert(sizeof(xip_wifi_ap) == 42, "xip_wifi_ap layout");
 _Static_assert(sizeof(xip_power_sleep) == 12, "xip_power_sleep layout");
 _Static_assert(sizeof(xip_power_info) == 76, "xip_power_info layout");
+_Static_assert(sizeof(xip_ble_start) == 8, "xip_ble_start layout");
+_Static_assert(sizeof(xip_ble_scan) == 8, "xip_ble_scan layout");
+_Static_assert(sizeof(xip_ble_connect) == 16, "xip_ble_connect layout");
+_Static_assert(sizeof(xip_ble_listen) == 8, "xip_ble_listen layout");
+_Static_assert(sizeof(xip_ble_mode) == 8, "xip_ble_mode layout");
+_Static_assert(sizeof(xip_ble_status) == 92, "xip_ble_status layout");
+_Static_assert(sizeof(xip_ble_scan_results) == 152, "xip_ble_scan_results layout");
+_Static_assert(sizeof(xip_nimble_filter) == 20, "xip_nimble_filter layout");
+_Static_assert(sizeof(xip_nimble_start) == 96, "xip_nimble_start layout");
+_Static_assert(sizeof(xip_nimble_scan) == 68, "xip_nimble_scan layout");
+_Static_assert(sizeof(xip_nimble_connect) == 20, "xip_nimble_connect layout");
 #if UINTPTR_MAX == 0xffffffffu
-_Static_assert(sizeof(xip_call) == 48, "xip_call layout");
-_Static_assert(sizeof(xip_host) == 148, "xip_host layout");
+_Static_assert(sizeof(xip_quic) == 32, "xip_quic layout");
+_Static_assert(sizeof(xip_quic_pool_info) == 24, "xip_quic_pool_info layout");
+_Static_assert(sizeof(xip_quic_tx_completion) == 40, "xip_quic_tx_completion layout");
+_Static_assert(sizeof(xip_ip) == 20, "xip_ip layout");
+_Static_assert(sizeof(xip_call) == 64, "xip_call layout");
+_Static_assert(sizeof(xip_identity) == 20, "xip_identity layout");
+_Static_assert(sizeof(xip_power) == 40, "xip_power layout");
+_Static_assert(sizeof(xip_host) == 156, "xip_host layout");
 #endif
 
 /* Non-zero when the host's table includes this call (older hosts are shorter). */
@@ -40,10 +58,16 @@ int xip_handle(const xip_host *host, void *state, const xip_call *call);
 """
 
 [export]
-include = ["SerialRxBuffer", "SerialPacketTx", "SerialPacketClient", "Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware"]
+include = ["Ip", "IpConfig", "Quic", "QuicPoolInfo", "QuicTxCompletion", "Identity", "SerialRxBuffer", "SerialPacketTx", "SerialPacketClient", "Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware", "Ble", "BleStart", "BleScan", "BleConnect", "BleListen", "BleMode", "BleStatus", "BleScanResults", "Nimble", "NimbleFilter", "NimbleStart", "NimbleScan", "NimbleConnect"]
 prefix = "xip_"
 
 [export.rename]
+Ip = "ip"
+IpConfig = "ip_config"
+Quic = "quic"
+QuicPoolInfo = "quic_pool_info"
+QuicTxCompletion = "quic_tx_completion"
+Identity = "identity"
 SerialRxBuffer = "serial_rx_buffer"
 SerialPacketTx = "serial_packet_tx"
 SerialPacketClient = "serial_packet_client"
@@ -65,6 +89,19 @@ Power = "power"
 PowerSleep = "power_sleep"
 PowerInfo = "power_info"
 Hardware = "hardware"
+Ble = "ble"
+BleStart = "ble_start"
+BleScan = "ble_scan"
+BleConnect = "ble_connect"
+BleListen = "ble_listen"
+BleMode = "ble_mode"
+BleStatus = "ble_status"
+BleScanResults = "ble_scan_results"
+Nimble = "nimble"
+NimbleFilter = "nimble_filter"
+NimbleStart = "nimble_start"
+NimbleScan = "nimble_scan"
+NimbleConnect = "nimble_connect"
 
 [layout]
 packed = "__attribute__((packed))"

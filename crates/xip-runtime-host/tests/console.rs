@@ -1,6 +1,4 @@
-//! Binary console operations and envelope correlation, plus retained text compatibility.
-//! Text/parser/render cases below protect the legacy interface until removal; new behavior
-//! coverage uses typed CBOR requests. Real module lifecycle coverage is in network.rs.
+//! CBOR console operations, native dispatch and envelope correlation.
 mod common;
 use common::*;
 use xip_abi::cbor::{self, Writer};
@@ -8,7 +6,7 @@ use xip_abi::*;
 use xip_runtime_host::{Instance, Runtime};
 
 fn enc(f: impl FnOnce(&mut Writer)) -> Vec<u8> {
-    let mut buf = vec![0u8; 1100];
+    let mut buf = vec![0u8; 2000];
     let mut w = Writer::new(&mut buf);
     f(&mut w);
     let n = w.finish().expect("fits").len();
@@ -16,50 +14,28 @@ fn enc(f: impl FnOnce(&mut Writer)) -> Vec<u8> {
     buf
 }
 
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-struct Console {
-    rt: Runtime,
-    c: Instance,
-    /// what the console sent to the `serial` link so far
-    acc: std::cell::RefCell<String>,
-    /// instances the console talks to, run along with it
-    failures: Vec<String>,
-}
-
+/// The console module (component 20) has no port: every request is a 0x444d0002 datagram that the runtime parses (the native components Wi-Fi 10,
+/// power 11, ip 12 go to it because no module hosts them), and the answer comes back as one.
+struct Console { rt: Runtime, q: Requests, c: Instance }
 impl Console {
-    fn new() -> Console {
-        let rt = Runtime::default();
-        rt.add_native_link("serial", 256, xip_runtime_host::NativeTx::Done);
+    fn new() -> Self {
+        let q = Requests::new();
+        let rt = q.rt.clone();
         let c = rt.add_module(module("mod_con"), 32).unwrap();
         c.set_component(20);
-        assert!(c.bind_port(PORT_CONSOLE) > 0, "the manifest's port");
         c.start(b"");
         rt.run(0);
-        Console { rt, c, acc: Default::default(), failures: Vec::new() }
+        Self { rt, q, c }
     }
-
-    fn fail(&mut self, msg: String) {
-        eprintln!("FAIL {msg}");
-        self.failures.push(msg);
-    }
-
-    fn parse(&self, line: &str) -> Vec<u8> {
-        let req = enc(|w| {
-            w.map(1).uint(1).text(line);
-        });
-        self.c.request(20, 1, &req).unwrap_or_default()
-    }
-
-    /// Invoke a typed method using the shared binary envelope, without text conversion.
+    /// Invoke a method with the envelope `{1: component, 2: method, 3: id, 5: fields}`; the answer envelope.
     fn binary(&self, component: u64, method: u64, fields: &[u8]) -> Vec<u8> {
         let mut req = enc(|w| {
             w.map(4).uint(1).uint(component).uint(2).uint(method).uint(3).uint(0x1_0000_004d).uint(5);
         });
         req.extend_from_slice(fields);
-        let answer = self.c.request(20, 4, &req).expect("dispatch response");
+        let mut frames = self.q.send(&req);
+        assert_eq!(frames.len(), 1, "one answer");
+        let answer = frames.remove(0);
         assert_eq!(cbor::get_int(&answer, 1).unwrap(), Some(component as i64));
         assert_eq!(cbor::get_int(&answer, 2).unwrap(), Some(method as i64));
         assert_eq!(cbor::get_int(&answer, 3).unwrap(), Some(0x1_0000_004d));
@@ -75,264 +51,100 @@ impl Console {
         rest[..rest.len() - result.rest().len()].to_vec()
     }
 
-    fn local_text(r: &[u8]) -> Option<String> {
-        cbor::get_text(r, 12).ok().flatten().map(|t| String::from_utf8_lossy(t).into_owned())
+    fn binary_error(&self, component: u64, method: u64, fields: &[u8], error: i32) {
+        let answer = self.binary(component, method, fields);
+        assert_eq!(cbor::get_int(&answer, 7).unwrap(), Some(error as i64));
+        assert!(cbor::get(&answer, 6).unwrap().is_none());
     }
-
-    fn check_request(&mut self, line: &str, comp: i64, method: i64, fields_hex: &str) {
-        let r = self.parse(line);
-        let c = cbor::get_int(&r, 1).ok().flatten().unwrap_or(-1);
-        let m = cbor::get_int(&r, 2).ok().flatten().unwrap_or(-1);
-        let mut h = String::new();
-        if let Ok(Some(f)) = cbor::get(&r, 5) {
-            let whole = f.rest();
-            let mut k = cbor::Reader::new(whole);
-            k.skip();
-            h = hex(&whole[..whole.len() - k.rest().len()]);
-        }
-        if c != comp || m != method || h != fields_hex {
-            let t = Self::local_text(&r).unwrap_or_default();
-            self.fail(format!("line \"{line}\": got {c}.{m} fields {h} local \"{t}\", want {comp}.{method} {fields_hex}"));
-        }
-    }
-
-    fn check_local(&mut self, line: &str, want: &str) {
-        let r = self.parse(line);
-        match Self::local_text(&r) {
-            Some(t) if t.contains(want) => {}
-            t => self.fail(format!("line \"{line}\": {t:?} lacks \"{want}\"")),
-        }
-    }
-
-    fn check_render(&mut self, res: &[u8], comp: u64, method: u64, want: &str) {
-        let req = enc(|w| {
-            w.map(3).uint(1).uint(comp).uint(2).uint(method).uint(6);
-        });
-        let mut req = req;
-        req.extend_from_slice(res);
-        let ans = self.c.request(20, 2, &req).unwrap_or_default();
-        let text = cbor::get_text(&ans, 1).ok().flatten().map(|t| String::from_utf8_lossy(t).into_owned()).unwrap_or_default();
-        if text != want {
-            self.fail(format!("render: got \"{text}\" want \"{want}\""));
-        }
-    }
-
-    /// Let the console and the modules it talks to exchange packets.
-    fn pump(&self) {
-        for _ in 0..4 {
-            self.rt.run(0);
-        }
-    }
-
-    fn serial(&self) -> String {
-        for (_token, frame) in self.rt.take_link_tx("serial") {
-            self.acc.borrow_mut().push_str(&String::from_utf8_lossy(&frame));
-        }
-        self.acc.borrow().clone()
-    }
-
-    fn clear_serial(&self) {
-        self.serial();
-        self.acc.borrow_mut().clear();
-    }
-
-    /// A typed line: a frame of the `serial` link.
-    fn type_line(&self, line: &str) -> i32 {
-        self.rt.inject_frame("serial", 0, 0, line.as_bytes())
-    }
-
-    /// A typed line, as the serial port delivers it. The answer is what the console writes to the port: exactly `want`
-    /// (when it ends with a newline) or containing it.
-    fn check_line(&mut self, line: &str, want: &str) {
-        self.clear_serial();
-        let rc = self.type_line(line);
-        self.pump();
-        let out = self.serial();
-        let exact = want.ends_with('\n');
-        if rc != 0 || (if exact { out != want } else { !out.contains(want) }) {
-            self.fail(format!("line \"{line}\": got \"{out}\" (send {rc}), want \"{want}\""));
-        }
-    }
-}
-
-unsafe extern "C" fn silent_handle(_h: *const Host, _s: *mut u8, _c: *const Call) -> i32 {
-    0
 }
 
 #[test]
-fn the_console() {
-    let mut k = Console::new();
-
-    k.check_request("test.echo value=hi", 2, 1, "a101626869");
-    k.check_request("test.echo value=\"two words\"", 2, 1, "a1016974776f20776f726473");
-    k.check_request("test.echo @1=7", 2, 1, "a1016137");
-    k.check_local("nosuch", "unknown method");
-    k.check_local("status bogus=1", "unknown field");
-
-    // answers
-    let r = enc(|w| {
-        w.map(1).uint(1).text("hi there");
-    });
-    k.check_render(&r, 2, 1, "value=\"hi there\"\n");
-    let r = enc(|w| {
-        w.map(0);
-    });
-    k.check_render(&r, 2, 3, "ok\n");
-    let r = enc(|w| {
-        w.map(2).uint(1).int(-68).uint(77).bytes(&[0x0a, 0x0b]);
-    });
-    k.check_render(&r, 99, 99, "@1=-68 @77=hex:0a0b\n");
-
-    // the console as the serial port's owner: lines in, text out
-    {
-        let mut s = k.rt.state_mut();
-        s.modules_cbor = enc(|w| {
-            w.array(2);
-            w.map(3).uint(1).text("hello").uint(2).uint(1).uint(3).boolean(false);
-            w.map(4).uint(1).text("test").uint(2).uint(2).uint(3).boolean(true).uint(5).uint(7);
-        });
-    }
-    k.check_line("status", "{1:{4:\"main\"},2:{},3:{},4:[{1:\"hello\",2:1,3:false},{1:\"test\",2:2,3:true,5:7}],5:{}}\n");
-    k.check_line("start test serve it", "ok\n");
-    assert!(k.rt.state().started == "test" && k.rt.state().start_request == "serve it");
-    k.check_line("start nosuch", "error: unknown module\n");
-    k.check_line("start", "error: name is required\n");
-    k.check_line("stop test", "ok\n");
-    assert_eq!(k.rt.state().stopped, "test");
-    k.check_line("reset", "ok\n");
-    assert!(k.rt.state().reset_called);
-    k.check_line("", "");
-    k.check_line("help", "status | start NAME");
-    k.check_line("nosuch", "error: unknown method");
-    k.check_line("test.echo value=hi", "error: module not running (start it)\n");
-
-    let test = k.rt.add_module(module("mod_rtest"), 64).unwrap();
-    test.start(b"serve");
-    test.set_component(2);
-    k.pump();
-    k.check_line("test.echo value=hello", "value=hello\n");
-    k.check_line("test.echo hello there", "value=\"hello there\"\n");
-    k.check_line("wifi", "state=off wanted_ssid=\"\" psk=unset\n");
-    k.check_line("wifi ssid=lab psk=\"two words\"", "state=up ssid=\"lab\" ip=192.168.49.7 rssi=-40 ch=6 wanted_ssid=\"lab\" psk=set\n");
-    k.check_line("wifi start", "state=up ssid=\"lab\" ip=192.168.49.7 rssi=-40 ch=6 wanted_ssid=\"lab\" psk=set\n");
-    let (wanted, generation) = k.rt.wifi_intent();
-    assert!(&wanted.sta_ssid[..3] == b"lab" && &wanted.sta_psk[..9] == b"two words" && wanted.radio == 1 && wanted.sta == 1 && generation == 1);
-    k.check_line("wifi stop", "state=off");
-    k.check_line("heap", "free=41000 largest=30000 min_free=28000 total=230000 internal_free=38000 internal_largest=26000\n");
-    k.check_line("heap regions", "ok (in the device log)\n");
-    k.check_line("heap bogus", "error: heap [regions");
-    k.check_line("nv wifi.rx_static", "wifi.rx_static is unknown or not set\n");
-    k.check_line("nv wifi.rx_static=12", "wifi.rx_static set (applies at the next start)\n");
-    k.check_line("nv wifi.rx_static", "wifi.rx_static=12\n");
-    k.check_line("nv bogus", "bogus is unknown or not set\n");
-    k.check_line("wifi scan", "scanning; run `wifi scan` again");
-    k.check_line("wifi scan", "ssid=\"costin\" ch=6 rssi=-41 auth=3 bssid=10:bd:a3:ac:5a:21\nssid=\"\" ch=11 rssi=-80 auth=0 bssid=01:02:03:04:05:06\n");
-    k.check_line("wifi bogus", "error: wifi [ssid=NAME]");
-    k.check_line("wifi ssid=", "state=off ch=6 wanted_ssid=\"\" psk=set\n");
-
-    // the console waits for nothing: two requests in flight, answers in any order, and messages nobody asked for
-    k.clear_serial();
-    assert_eq!(k.type_line(std::str::from_utf8(b"test.echo value=one").unwrap()), 0);
-    assert_eq!(k.type_line(std::str::from_utf8(b"test.echo value=two").unwrap()), 0);
-    k.pump();
-    let out = k.serial();
-    assert!(out.contains("value=one\n") && out.contains("value=two\n"), "{out:?}");
-    k.clear_serial();
-    let (a1, b1) = ([0xa1, 0x01, 0x61, b'a'], [0xa1, 0x01, 0x61, b'b']);
-    assert_eq!(k.c.send_from(2, 2, 1, 0, &a1), 0, "from the module, no request: a line it chose to write");
-    assert_eq!(k.c.send_from(2, 2, 1, 77, &b1), 0, "and another, with an id of its own");
-    k.pump();
-    assert_eq!(k.serial(), "value=a\nvalue=b\n");
-
-    // Dispatch reaches the handler even when the manifest omits the method.
-    // The catalog resolves names; the module implements the operation.
-    k.rt.state_mut().manifest = enc(|w| {
-        w.map(3).uint(1).text("test").uint(2).uint(2).uint(3).array(1);
-        w.map(2).uint(1).uint(2).uint(2).text("info");
-    });
-    k.check_line("test.echo value=unlisted", "value=unlisted\n");
-    k.rt.state_mut().manifest.clear();
-    k.check_line("test.echo value=no-manifest", "value=no-manifest\n");
-
-    // a module that never answers costs the console nothing
-    test.stop();
-    k.rt.run(0);
-    assert!(test.ended());
-    let silent = k.rt.add_handler("silent", silent_handle, 0);
-    silent.set_component(2);
-    k.clear_serial();
-    assert_eq!(k.type_line(std::str::from_utf8(b"test.echo value=x").unwrap()), 0);
-    k.rt.run(0);
-    assert!(k.serial().is_empty() || !k.serial().contains("value=x"));
-    k.check_line("status", "{1:{4:\"main\"}");
-    k.c.stop();
-    k.rt.run(0);
-
-    assert!(k.failures.is_empty(), "{:#?}", k.failures);
-}
-
-/// `component.method` of a host component is called through its table, not sent to a module: the fields of the line fill the C
-/// struct, the output struct comes back as text (native.h, generated from `x-c` of api.json).
-#[test]
-fn sleep_and_promiscuous_receive_are_exercised_from_the_console() {
-    let mut k = Console::new();
-    // promiscuous receive needs the radio on
-    k.check_line("wifi.monitor enable=true channel=6", "error: wifi failed: -2\n");
-    let fields = enc(|w| { w.map(2).uint(1).boolean(true).uint(2).boolean(false); });
-    let result = k.binary_ok(10, 2, &fields);
-    assert_eq!(cbor::get_int(&result, 1).unwrap(), Some(1));
-    k.check_line("wifi.monitor enable=true channel=6", "ok\n");
+fn native_monitor_and_sleep_use_binary_fields() {
+    let k = Console::new();
+    let monitor = enc(|w| { w.map(2).uint(1).boolean(true).uint(2).uint(6); });
+    k.binary_error(10, 7, &monitor, ERR_UNSUPPORTED);
+    let fields = enc(|w| { w.map(1).uint(1).boolean(true); });
+    k.binary_ok(10, 2, &fields);
+    assert_eq!(k.binary_ok(10, 7, &monitor), [0xa0]);
     assert_eq!(k.rt.wifi_monitor().map(|m| (m.enable, m.channel)), Some((1, 6)));
-    k.check_line("wifi.monitor channel=14", "error: wifi failed: -1\n");
-    k.check_line("wifi.monitor enable=false", "ok\n");
-    // sleep: three cycles of 500 ms, the modules get HOST_WAKE after each
+    k.binary_error(10, 7, &enc(|w| { w.map(1).uint(2).uint(14); }), ERR_ARG);
+    k.binary_ok(10, 7, &enc(|w| { w.map(1).uint(1).boolean(false); }));
     let sleep = enc(|w| { w.map(3).uint(1).uint(500).uint(2).uint(3).uint(3).uint(100); });
     assert_eq!(k.binary_ok(11, 1, &sleep), [0xa0]);
     let r = k.rt.power_requests();
     assert_eq!((r.len(), r[0].duration_ms, r[0].cycles, r[0].awake_ms), (1, 500, 3, 100));
-    k.check_line("power.sleep duration_ms=5", "error: power failed: -1\n");
-    k.check_line("power.info", "sleep_attempts=3 sleep_entries=3");
-    k.check_line("power.dump_tasks", "ok\n");
-    assert!(k.failures.is_empty(), "{:?}", k.failures);
+    k.binary_error(11, 1, &enc(|w| { w.map(1).uint(1).uint(5); }), ERR_ARG);
+    let info = k.binary_ok(11, 2, &[0xa0]);
+    assert_eq!(cbor::get_int(&info, 12).unwrap(), Some(3));
+    assert_eq!(cbor::get_int(&info, 13).unwrap(), Some(3));
+    assert_eq!(k.binary_ok(11, 4, &[0xa0]), [0xa0]);
 }
 
 #[test]
-fn a_method_of_a_host_component_is_called_through_its_table() {
-    let mut k = Console::new();
-    k.check_line("wifi.get", "radio=false sta=false ap=false channel=0 now=false\n");
-    k.check_line("wifi.set radio=true sta=true now=true channel=6 sta_ssid=home sta_psk=password", "generation=1\n");
+fn native_wifi_intent_and_tuning_preserve_layout_and_validation() {
+    let k = Console::new();
+    let fields = enc(|w| {
+        w.map(6).uint(1).boolean(true).uint(2).boolean(true).uint(4).uint(6)
+            .uint(6).text("home").uint(7).text("password").uint(10).boolean(true);
+    });
+    let result = k.binary_ok(10, 2, &fields);
+    assert_eq!(cbor::get_int(&result, 1).unwrap(), Some(1));
     let (wanted, generation) = k.rt.wifi_intent();
-    assert!(wanted.radio == 1 && wanted.sta == 1 && wanted.ap == 0 && wanted.now == 1 && wanted.channel == 6 && generation == 1);
-    assert!(&wanted.sta_ssid[..4] == b"home" && wanted.sta_ssid_len == 4 && &wanted.sta_psk[..8] == b"password" && wanted.sta_psk_len == 8);
+    assert_eq!((wanted.radio, wanted.sta, wanted.ap, wanted.now, wanted.channel, generation), (1, 1, 0, 1, 6, 1));
+    assert_eq!(&wanted.sta_ssid[..wanted.sta_ssid_len as usize], b"home");
+    assert_eq!(&wanted.sta_psk[..wanted.sta_psk_len as usize], b"password");
     assert_eq!(wanted.size as usize, std::mem::size_of::<WifiIntent>());
-    k.check_line("wifi.get", "radio=true sta=true ap=false channel=6 sta_ssid=home sta_psk=set now=true\n");
-    // the whole intent is replaced: what the line does not say is the default again
-    k.check_line("wifi.set ap=true radio=true ap_ssid=lab bssid=hex:010203040506", "generation=2\n");
-    k.check_line("wifi.get", "radio=true sta=false ap=true channel=0 bssid=hex:010203040506 ap_ssid=lab now=false\n");
-    // the host refuses what it does not accept; the console refuses what does not fit the struct
-    k.check_line("wifi.set channel=15 radio=true", "error: wifi failed: -1\n");
-    k.check_line("wifi.set sta_ssid=0123456789012345678901234567890123456789", "error: sta_ssid is too long\n");
-    k.check_line("wifi.set bssid=hex:0102", "error: bssid has the wrong length\n");
-    k.check_line("wifi.set channel=300", "error: channel is out of range\n");
-    // a second component, with switches and 16-bit numbers
-    k.check_line("wifi.set_tuning ampdu=2 rx_static=12 lr=1", "ok\n");
-    assert_eq!((k.rt.wifi_tuning().ampdu, k.rt.wifi_tuning().rx_static), (TUNE_OFF, 12));
-    k.check_line("wifi.tuning", "ampdu=2 rates_11b=0 raw_rx=0 driver_tx=0 bssid_check=0 raw_tx_rate=0 rx_static=12 rx_dynamic=0 tx_dynamic=0 rx_ba=0 lr=1\n");
-    assert_eq!(k.rt.wifi_tuning().lr, xip_abi::TUNE_ON);
-    k.check_line("wifi.set_tuning lr=3", "error: wifi-tuning failed: -1\n");
-    k.check_line("wifi.set_tuning rx_static=1", "error: wifi-tuning failed: -1\n");
-    k.check_line("wifi.state", "error: not a call the console can make");
-    assert!(k.failures.is_empty(), "{:?}", k.failures);
+    let got = k.binary_ok(10, 1, &[0xa0]);
+    assert_eq!(cbor::get_text(&got, 6).unwrap(), Some(b"home".as_slice()));
+    let replacement = enc(|w| { w.map(4).uint(1).boolean(true).uint(3).boolean(true).uint(8).text("lab").uint(5).bytes(&[1,2,3,4,5,6]); });
+    k.binary_ok(10, 2, &replacement);
+    let (wanted, generation) = k.rt.wifi_intent();
+    assert_eq!((wanted.sta, wanted.ap, wanted.now, wanted.channel, generation), (0, 1, 0, 0, 2));
+    assert_eq!(wanted.sta_ssid_len, 0);
+    assert_eq!(wanted.bssid, [1,2,3,4,5,6]);
+    for fields in [
+        enc(|w| { w.map(1).uint(4).uint(15); }),
+        enc(|w| { w.map(1).uint(6).text("0123456789012345678901234567890123456789"); }),
+        enc(|w| { w.map(1).uint(5).bytes(&[1,2]); }),
+        enc(|w| { w.map(1).uint(4).uint(300); }),
+    ] { k.binary_error(10, 2, &fields, ERR_ARG); }
+    assert_eq!(k.rt.wifi_intent().1, 2, "invalid requests must not replace the intent");
+    let tuning = enc(|w| { w.map(3).uint(1).uint(2).uint(7).uint(12).uint(11).uint(1); });
+    k.binary_ok(10, 6, &tuning);
+    assert_eq!((k.rt.wifi_tuning().ampdu, k.rt.wifi_tuning().rx_static, k.rt.wifi_tuning().lr), (TUNE_OFF, 12, TUNE_ON));
+    let got = k.binary_ok(10, 5, &[0xa0]);
+    assert_eq!(cbor::get_int(&got, 7).unwrap(), Some(12));
+    for fields in [enc(|w| { w.map(1).uint(11).uint(3); }), enc(|w| { w.map(1).uint(7).uint(1); })] {
+        k.binary_error(10, 6, &fields, ERR_ARG);
+    }
 }
 
 #[test]
-fn module_scalar_busy_reply_is_rendered_as_error() {
-    let mut k = Console::new();
-    k.check_render(&[0x24], 2, 1, "error: busy\n");
-    k.check_render(&[0x20], 2, 1, "error: module -1\n");
-    assert!(k.failures.is_empty(), "{:?}", k.failures);
+fn flash_auth_nv_defaults_strict_validates_and_clears_development_override() {
+    let k = Console::new();
+    let get = enc(|w| { w.map(1).uint(1).text("flash.auth"); });
+    let read = || {
+        let r = k.binary_ok(20, 10, &get);
+        match cbor::get(&r, 1).unwrap().unwrap().next().unwrap() {
+            cbor::Item::Bytes(v) => v.to_vec(),
+            _ => panic!("NV must return bytes"),
+        }
+    };
+    assert_eq!(read(), b"strict");
+    for value in [b"unsigned".as_slice(), b"strict"] {
+        let set = enc(|w| { w.map(2).uint(1).text("flash.auth").uint(2).bytes(value); });
+        k.binary_ok(20, 10, &set);
+        assert_eq!(read(), value);
+    }
+    let bad = enc(|w| { w.map(2).uint(1).text("flash.auth").uint(2).bytes(b"typo"); });
+    k.binary_error(20, 10, &bad, ERR_ARG);
+    assert_eq!(read(), b"strict");
+    let dev = enc(|w| { w.map(2).uint(1).text("flash.auth").uint(2).bytes(b"unsigned"); });
+    k.binary_ok(20, 10, &dev);
+    let clear = enc(|w| { w.map(2).uint(1).text("flash.auth").uint(2).bytes(b""); });
+    k.binary_ok(20, 10, &clear);
+    assert_eq!(read(), b"strict");
 }
-
 
 #[test]
 fn binary_console_operations_preserve_envelopes_and_return_structured_fields() {
@@ -357,32 +169,13 @@ fn binary_console_operations_preserve_envelopes_and_return_structured_fields() {
     let bad_start = k.binary(20, 6, &[0xa0]);
     assert_eq!(cbor::get_int(&bad_start, 7).unwrap(), Some(ERR_ARG as i64));
     assert!(cbor::get(&bad_start, 6).unwrap().is_none());
-    let malformed = k.binary(10, 2, &[0xf6]);
-    assert_eq!(cbor::get_int(&malformed, 7).unwrap(), Some(ERR_ARG as i64));
+    // fields that are not a map make the datagram a raw frame (the NOW bench's pattern field): the console does not take it and nothing answers
+    assert!(k.q.send(&enc(|w| { w.map(4).uint(1).uint(10).uint(2).uint(2).uint(3).uint(1).uint(5).null(); })).is_empty());
     assert_eq!(k.rt.wifi_intent().1, 0, "malformed native fields must not change intent");
     let recursive = k.binary(20, 4, &[0xa0]);
     assert_eq!(cbor::get_int(&recursive, 7).unwrap(), Some(ERR_UNSUPPORTED as i64));
     assert_eq!(k.binary_ok(20, 8, &[0xa0]), [0xa0]);
     assert!(k.rt.state().reset_called);
-    assert!(k.serial().is_empty(), "binary handlers must not render serial output");
-}
-
-#[test]
-fn console_port_accepts_binary_envelope_without_parse_or_render() {
-    let k = Console::new();
-    let request = enc(|w| { w.map(4).uint(1).uint(20).uint(2).uint(9).uint(3).uint(987).uint(5).map(0); });
-    assert_eq!(k.rt.inject_frame("serial", 0, 0, &request), 0);
-    k.pump();
-    let frames = k.rt.take_link_tx("serial");
-    assert_eq!(frames.len(), 1);
-    let answer = &frames[0].1;
-    assert_eq!(cbor::get_int(answer, 3).unwrap(), Some(987));
-    assert!(cbor::get(answer, 7).unwrap().is_none());
-    let mut result = cbor::get(answer, 6).unwrap().unwrap();
-    let start = result.rest();
-    result.skip();
-    let result = &start[..start.len() - result.rest().len()];
-    assert_eq!(cbor::get_int(result, 1).unwrap(), Some(41000));
 }
 
 #[test]
@@ -401,4 +194,60 @@ fn direct_heap_query_works_without_managed_allocation() {
     }
     console.stop(); rt.run(0);
     assert_eq!(console.mem_leaked(), 0);
+}
+
+#[test]
+fn retired_text_methods_and_lines_return_numeric_errors() {
+    let k = Console::new();
+    for method in 1..=3 {
+        let result = k.c.request(20, method, &[0xa0]).unwrap();
+        assert_eq!(cbor::Reader::new(&result).next().and_then(|item| item.as_int()), Some(ERR_UNSUPPORTED as i64));
+    }
+}
+
+#[test]
+fn link_send_puts_one_packet_on_the_named_link_and_reports_the_link_errors() {
+    let k = Console::new();
+    let addr = k.rt.add_native_link("probe", 1500, xip_runtime_host::NativeTx::Done) as u64;
+    let payload: Vec<u8> = (0..1400u32).map(|i| (i % 251) as u8).collect();
+    let f = enc(|w| { w.map(3).uint(1).uint(addr).uint(2).bytes(&payload).uint(3).uint(0x1234); });
+    assert_eq!(k.binary_ok(20, 11, &f), [0xa0]);
+    let sent = k.rt.take_link_tx("probe");
+    assert_eq!(sent.len(), 1);
+    assert_eq!((sent[0].0, sent[0].1.len(), sent[0].1 == payload), (0x1234, 1400, true));
+    // hex text, as the DMesh clients send bytes
+    let h = enc(|w| { w.map(2).uint(1).uint(addr).uint(2).text("hex:0102ff"); });
+    k.binary_ok(20, 11, &h);
+    assert_eq!(k.rt.take_link_tx("probe")[0].1, vec![1, 2, 0xff]);
+    // no such link, bad data, empty data
+    k.binary_error(20, 11, &enc(|w| { w.map(2).uint(1).uint(0x4000_0fff).uint(2).bytes(b"x"); }), ERR_NOTFOUND);
+    k.binary_error(20, 11, &enc(|w| { w.map(2).uint(1).uint(addr).uint(2).text("hex:0"); }), ERR_ARG);
+    k.binary_error(20, 11, &enc(|w| { w.map(2).uint(1).uint(addr).uint(2).bytes(b""); }), ERR_ARG);
+    k.binary_error(20, 11, &enc(|w| { w.map(1).uint(2).bytes(b"x"); }), ERR_ARG);
+    assert_eq!(k.rt.packets_in_use(), 0, "every packet went back to the pool");
+}
+
+#[test]
+fn wifi_state_and_nonblocking_scan_keep_existing_cbor_shapes() {
+    let k = Console::new();
+    let fields = enc(|w| { w.map(4).uint(1).boolean(true).uint(2).boolean(true).uint(6).text("test-net").uint(10).boolean(true); });
+    k.binary_ok(10, 2, &fields);
+    let state = k.binary_ok(10, 3, &[0xa0]);
+    assert_eq!(cbor::get_int(&state, 1).unwrap(), Some(2));
+    assert_eq!(cbor::get_text(&state, 2).unwrap(), Some(b"test-net".as_slice()));
+    assert_eq!(cbor::get_text(&state, 3).unwrap(), Some(b"192.168.49.7".as_slice()));
+    assert_eq!(cbor::get_int(&state, 4).unwrap(), Some(-40));
+    assert_eq!(cbor::get(&state, 8).unwrap().unwrap().next(), Some(cbor::Item::Bytes(&[2,0,0,0,0,1])));
+    assert_eq!(cbor::get(&state, 10).unwrap().unwrap().next(), Some(cbor::Item::Bool(true)));
+    k.binary_error(10, 4, &[0xa0], ERR_BUSY);
+    let scan = k.binary_ok(10, 4, &[0xa0]);
+    let mut rows = cbor::get(&scan, 1).unwrap().unwrap();
+    assert_eq!(rows.next(), Some(cbor::Item::Array(2)));
+    assert_eq!(rows.next(), Some(cbor::Item::Map(5)));
+    assert_eq!(rows.next(), Some(cbor::Item::Uint(1)));
+    assert_eq!(rows.next(), Some(cbor::Item::Bytes(b"costin")));
+    assert_eq!(rows.next(), Some(cbor::Item::Uint(2)));
+    assert!(matches!(rows.next(), Some(cbor::Item::Bytes(mac)) if mac.len()==6));
+    assert_eq!(rows.next(), Some(cbor::Item::Uint(3)));
+    assert_eq!(rows.next(), Some(cbor::Item::Neg(40)), "RSSI must retain its sign");
 }

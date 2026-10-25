@@ -47,6 +47,29 @@ discovery. Secrets and the control-plane root live only in the private first dir
 files 0600), never in the tracked examples. Hardware tests must restore and release acquired peers so later runs can
 select them reproducibly.
 
+## Native module console
+
+For generic C/Rust Main, use `dmesh-cli console SERIAL console.status`.
+This sends a correlated CBOR envelope over native module PPP, using embedded
+component catalogs. It is separate from FW's QUIC-backed `dmesh-cli SERIAL
+console.status`. Names and argument parsing stay on the host:
+
+~~~sh
+dmesh-cli console SERIAL console.status
+dmesh-cli console SERIAL console.start --name=nan
+dmesh-cli console SERIAL console.stop --name=nan
+dmesh-cli console SERIAL console.nv --key=flash.auth
+dmesh-cli console SERIAL wifi.state
+dmesh-cli console SERIAL wifi.scan
+~~~
+
+`console` defaults to `console.status` when no method is given. `--port N`
+selects the PPP port (default 247, 0xf7, the QUIC port: every request is an envelope in a 0x444d0002 long packet, `xip_wire::wrap_request`, and the answer comes back as one, `xip_wire::unwrap_answer`), and `--seconds N` bounds the response wait
+(default 6). Results are JSON with numeric CBOR keys preserved and bytes rendered
+as `hex:`; console's module list is `.result["4"]`. A scan returning -5 is still
+busy: poll again about a second later. Use `--watch` for boot/platform logs.
+The old text console command path is removed. See [module troubleshooting](../../notes/ai/modules/TROUBLESHOOTING.md).
+
 ## Find and inspect devices
 
 ~~~sh
@@ -201,7 +224,6 @@ dmesh-cli DEVICE ble.scan_stop                     # Stop scanning.
 dmesh-cli DEVICE ble.start                         # Start BLE service activity.
 dmesh-cli DEVICE ble.stop                          # Stop BLE service activity.
 dmesh-cli DEVICE ble.connect --addr=aa:bb:cc:dd:ee:ff --psm=128
-dmesh-cli DEVICE ble.coc.send --data=hex:010203      # Send bytes on an established CoC.
 ~~~
 
 lmesh is a regular mesh service, like mesh-init or ssh-mesh. Use the generic
@@ -226,28 +248,5 @@ For a direct bootstrap diagnostic while owning a local serial port:
 Normal API calls use tagged service streams over QUIC, including relay paths.
 The direct tagged control record is reserved for bootstrap diagnostics.
 
-## Device memory checks
-
-Build the structured heap diagnostic and select a device explicitly:
-
-```sh
-. ./env.sh
-cargo build --manifest-path crates/Cargo.toml -p dmesh-cli --example xip_heap
-crates/target/debug/examples/xip_heap "$PORT" --fw
-```
-
-Use `--fw` for DMesh firmware; omit it for generic C/Rust Main. On native module
-PPP, `--dump 6` captures a binary heap snapshot; `--dump 2` lists tasks. See the
-[console API](../../modules/mod_con/API.md) for diagnostics.
-
-To check repeated session cleanup, run against no-BLE FW Main:
-
-```sh
-XIP_HEAP_PORT="$PORT" cargo test --manifest-path crates/Cargo.toml \
-  -p dmesh-cli --test heap_device -- --ignored
-```
-
-Set `XIP_HEAP_ARTIFACT_DIR` to retain captures, or `XIP_HEAP_CLI` to select an
-example executable from a custom target directory. The test checks heap growth
-across eight fresh associations. It is compiled by CI and requires a board to
-run. Detailed measurements are in [notes/](../../notes/ai/2026-10-23-serial-memory.md).
+Heap and task diagnostics are available through the [console API](../../modules/mod_con/API.md).
+Detailed measurements are kept in [notes/](../../notes/ai/2026-10-23-serial-memory.md).
