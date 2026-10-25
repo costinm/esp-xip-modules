@@ -1,0 +1,5 @@
+# off: no Bluetooth in the image. xip_ble builds as a stub (CONFIG_XIP_BLE depends on BT_ENABLED), the controller and the host are not linked.
+CONFIG_BT_ENABLED=n
+CONFIG_BT_NIMBLE_ENABLED=n
+
+CONFIG_XIP_BLE=n

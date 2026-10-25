@@ -1,0 +1,66 @@
+menu "esp-xip-modules BLE (xip_ble)"
+
+    config XIP_BLE
+        bool "BLE component (advertising, scan, CoC channel, bonds, wake/sleep modes)"
+        depends on BT_ENABLED && BT_NIMBLE_ENABLED
+        default n
+        help
+            Builds a thin subset of NimBLE (advertising with the caller's data, scan with the caller's filters, one LE CoC channel, bonds, wake/sleep
+            modes) and offers get_component("nimble"). The policy is the caller's (modules/mod_ble hosts the `ble` component, 104). Off: the component is a stub that offers
+            nothing and links no Bluetooth code. Also set CONFIG_BT_ENABLED=n to leave the controller and the host out of the image
+            (profiles/off.defaults); the options of the NimBLE stack itself (roles, connections, bonds, buffers) are the bt component's and are
+            set with the profile files in components/xip_ble/profiles (README.md has the measured table).
+
+    config XIP_BLE_COC
+        bool "LE CoC channel (listen, connect, bearer)"
+        depends on XIP_BLE
+        default y
+        help
+            One L2CAP connection-oriented channel with a single-record transmit buffer. Needs CONFIG_BT_NIMBLE_L2CAP_COC_MAX_NUM >= 1.
+            Off: advertising, scan and bonds only.
+
+    config XIP_BLE_COC_MTU
+        int "Largest CoC SDU size a module may ask for, bytes"
+        depends on XIP_BLE_COC
+        range 256 1500
+        default 1500
+        help
+            The limit, and the MTU of the runtime link "ble". The module that starts the stack chooses the SDU size of the channel (nimble.start: coc_mtu) and the
+            pool is allocated with it then, not at build time. One QUIC packet is one SDU. 1500 is XIP_PKT_MAX, the payload of every pool packet and of the ESP-NOW link; quic-lite's own limit is 1100 today.
+            The receive copy is on the NimBLE host task stack, so this also bounds that stack use.
+
+    config XIP_BLE_COC_BUFS
+        int "Most CoC buffers a module may ask for (one SDU each)"
+        depends on XIP_BLE_COC
+        range 3 8
+        default 3
+        help
+            One channel needs the receive buffer posted to NimBLE, the received SDU while it is copied into a pool packet, and the transmit mbuf: 3, which
+            is also the least nimble.start accepts. The module chooses the count (coc_buffers) when it starts the stack. The connect request's buffer becomes
+            the receive buffer, so it is not an extra one.
+
+    config XIP_BLE_SCAN_CACHE
+        int "Scan cache entries (distinct advertisers kept for ble.scan_results)"
+        depends on XIP_BLE
+        range 0 16
+        default 8
+        help
+            9 bytes each, static. 0 builds the cache out (scan results are then only counted, with the last one in the status).
+
+    config XIP_BLE_LOG_LEVEL
+        int "Log lines of the BLE mechanics (0 none, 1 failures, 2 all)"
+        depends on XIP_BLE
+        range 0 2
+        default 2
+        help
+            The lines are the former "event type=ble.*" records. Level 0 removes the strings and the formatting from the image.
+
+    config XIP_BLE_RELEASE_WHEN_OFF
+        bool "Release the BLE controller memory when the application boots with BLE off"
+        depends on XIP_BLE
+        default n
+        help
+            xip_ble_configure_boot(false) calls esp_bt_mem_release(): the controller's static memory returns to the heap for this boot,
+            and BLE cannot start until the next reboot with the boot flag on. Leave it off when BLE may be started later by a request.
+
+endmenu
