@@ -15,6 +15,11 @@
 extern "C" {
 #endif
 
+/* Xtensa: the link address belongs to the module, not to its flash page. A module starts at a slot of one 64 KiB MMU page and may span consecutive slots, which is the
+ * index of its RAM cell ((static_addr - static_base) / XIP_DMOD_STATIC_SLOT_BYTES); the image is linked at code_base + slot * this
+ * (data_base likewise) and may sit on any flash page, because the loader maps whatever page it was found on at that address. */
+#define XIP_DMOD_WINDOW_SLOT_BYTES 0x10000u
+
 /* ---- module image header ---- */
 typedef enum {
     EMD_OK = 0,
@@ -27,12 +32,13 @@ typedef enum {
 } xip_dmod_result_t;
 
 typedef struct {
-    uint32_t slot_offset;    /* where the image was found in the module partition */
+    uint32_t slot_offset;    /* where the image was found in the module partition (informational: no placement rule depends on it) */
     uint32_t slot_size;      /* the room from there to the next image or the end of the partition */
     uint32_t max_stack_bytes;
     bool fixed_vma;          /* this chip runs modules at a fixed address (Xtensa) */
     uint32_t static_base;    /* platform's reserved module-context RAM arena */
-    uint32_t code_base, data_base; /* fixed_vma: window origins; image VMA = base + slot_offset */
+    uint32_t code_base, data_base; /* fixed_vma: window origins; image VMA = base + window slot * XIP_DMOD_WINDOW_SLOT_BYTES */
+    uint32_t window_bytes;   /* fixed_vma: size of the window; 0: XIP_DMOD_STATIC_SLOTS slots */
 } xip_slot_rules_t;
 
 xip_dmod_result_t xip_dmod_check(const xip_dmod_header *h, const xip_slot_rules_t *rules);

@@ -1,22 +1,20 @@
-This is the 'core' XIP mapper - MMU, slots, etc.
+# XIP loader
 
-Modules use the ABI - implemented by xip_runtime. 
+Maps and starts independently packaged modules. Applications use `xip_runtime`
+to provide the module ABI and lifecycle services.
 
-The loader doesn't depend on the ABI definition or implementation - it's just
-a pointer that gets passed to the modules.
+Build modules with `scripts/build.sh <chip>`. `modules/SLOTS` assigns each module
+a starting slot and an optional span, for example `mod_nan 7 2`. On ESP32 and
+ESP32-S3, each slot provides a 64 KiB link window; larger modules use consecutive
+windows. The module uses only its starting slot's state cell.
 
-The MMU imposes a restriction on 64k alignment - so modules must be flashed in specific 
-slots. While RiscV supports PIC, the Xtensa doesn't - so modules currently need to 
-be compiled for a specific slot. Current partition uses 8 module slots, in the last part
-of the 4M flash - but it depends on the user choices.
+Flash placement is independent of link slots. An image occupies enough
+consecutive 64 KiB flash pages for its actual size. The loader rejects overlapping
+active link windows and images that exceed the available mapping or flash space.
 
-Since most modules are smaller than 64k - it is good to combine multiple features in
-a module, or to use a filesystem that can use the unused blocks for storage. Or a filesystem
-that can reserve continuous space at 64k offsets for the modules - all of this is out of scope
-for module loader, which only cares about 64k slots and Xtensa modules compiled for the 
-matching slot.
+Per module name, the highest installed version is selected. Older versions remain
+shadowed for recovery and later reuse. Use [mod_flash](../../modules/mod_flash/README.md)
+for uploads; a larger image needs enough consecutive free or reusable pages.
 
-While dynamic install/upgrade of optional or custom modules is possible - and 'stop' and 
-memory model in current ABI are trying to make it viable - the main use is to modularize
-and allow faster independent upgrade of components in an app, and faster development
-since a module can be flashed much faster - and tested on host with a fake ABI runtime. 
+See the [current module guide](../../notes/ai/modules/README.md) and
+[inspection/recovery commands](../../notes/ai/modules/TROUBLESHOOTING.md).

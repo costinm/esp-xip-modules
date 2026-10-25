@@ -2,10 +2,10 @@
 /* Map a module image from flash, run it on its own task, stop it, report on it.
  *
  * Where the code runs depends on the chip:
- *  - ESP32 and ESP32-S3 (Xtensa): the toolchain cannot make position independent code, so each slot
- *    is linked for one fixed address (code_base + slot offset) and the loader maps the flash pages
- *    at exactly that address in both the instruction and the data alias (literals are data loads).
- *    That needs the HAL MMU calls: esp_partition_mmap() never lets the caller choose the address.
+ *  - ESP32 and ESP32-S3 (Xtensa): the toolchain cannot make position independent code, so each module
+ *    is linked for one fixed address (code_base + its window slot, the index of its RAM cell, 64 KiB each) and the loader maps the
+ *    flash page it was found on at exactly that address in both the instruction and the data alias (literals are data loads).
+ *    The image may sit on any flash page. That needs the HAL MMU calls: esp_partition_mmap() never lets the caller choose the address.
  *  - ESP32-C6 (RISC-V): the image is position independent; esp_partition_mmap() is enough.
  * The fixed-address part is the proven code of DMesh's module loader (docs/architecture.md). */
 #include <stdio.h>
@@ -38,25 +38,25 @@ xip_loader_t em;
 #define XIP_FIXED 1
 #define XIP_CODE_BASE 0x43000000u
 #define XIP_DATA_BASE 0x3d000000u
-#define XIP_WINDOW_MAX 0x1000000u
+#define XIP_WINDOW_BYTES (XIP_DMOD_STATIC_SLOTS * XIP_DMOD_WINDOW_SLOT_BYTES)
 #elif CONFIG_IDF_TARGET_ESP32
 #define XIP_FIXED 1
 /* Above Main's own IROM (0x400d0000..) and DROM. */
 #define XIP_CODE_BASE 0x40300000u
 #define XIP_DATA_BASE 0x3f700000u
-#define XIP_WINDOW_MAX 0x100000u
+#define XIP_WINDOW_BYTES (XIP_DMOD_STATIC_SLOTS * XIP_DMOD_WINDOW_SLOT_BYTES)
 #else
 #define XIP_FIXED 0
 #define XIP_CODE_BASE 0u
 #define XIP_DATA_BASE 0u
-#define XIP_WINDOW_MAX 0xffffffffu
+#define XIP_WINDOW_BYTES 0u
 #endif
 
 
 static xip_slot_rules_t rules_for(uint32_t offset, uint32_t size)
 {
     return (xip_slot_rules_t){.slot_offset = offset, .slot_size = size, .max_stack_bytes = CONFIG_XIP_WORKER_STACK,
-                                 .fixed_vma = XIP_FIXED, .code_base = XIP_CODE_BASE, .data_base = XIP_DATA_BASE,
+                                 .fixed_vma = XIP_FIXED, .code_base = XIP_CODE_BASE, .data_base = XIP_DATA_BASE, .window_bytes = XIP_WINDOW_BYTES,
                                  .static_base = XIP_MODULE_RAM_BASE};
 }
 
@@ -177,8 +177,8 @@ static void unmap_image(xip_slot_state_t *st)
 /* On the worker, after the instance is gone: nothing runs from the slot any more. */
 static void instance_done(void *ctx, int result, const xip_stats_t *stats)
 {
-    const int slot = (int)(intptr_t)ctx;
-    xip_slot_state_t *st = &em.slots[slot];
+    const int page = (int)(intptr_t)ctx;     /* the page, not the slot index: a rescan may renumber the slots */
+    xip_slot_state_t *st = &em.slots[page];
     unmap_image(st);
     xSemaphoreTake(em.lock, portMAX_DELAY);
     st->inst = NULL;                         /* from here no stop or post can reach it */
@@ -189,41 +189,72 @@ static void instance_done(void *ctx, int result, const xip_stats_t *stats)
     st->st.last_runtime_ms = (uint32_t)((esp_timer_get_time() - st->started_us) / 1000);
     st->st.runs++;
     if (stats && stats->mem_leaked) st->st.needs_reboot = true;     /* its memory is lost until the device restarts */
-    ESP_LOGI(TAG, "%s ended with %d after %u ms", em.slots_found[slot].name, result, (unsigned)st->st.last_runtime_ms);
+    ESP_LOGI(TAG, "%s ended with %d after %u ms", em.names_found[page], result, (unsigned)st->st.last_runtime_ms);
     st->st.running = false;   /* last: xip_loader_stop() may erase the slot once this is clear */
 }
 
 /* ---- public API ---- */
-/* The name of the module in the image at `offset`: key 1 of its manifest, or "@<hex offset>". */
-static void name_of(uint32_t offset, const xip_dmod_header *h, char *out, size_t cap)
+/* The name (manifest key 1, or "@<hex offset>") and the version (key 8, 0 without one) of the image at `offset`. */
+static void ident_of(uint32_t offset, const xip_dmod_header *h, char *out, size_t cap, uint32_t *version)
 {
     snprintf(out, cap, "@%x", (unsigned)offset);
+    *version = 0;
     if (!h->manifest_size || h->manifest_size > 4096 || h->manifest_offset < XIP_DMOD_HEADER_SIZE || (h->manifest_offset & 3) ||
         h->manifest_offset > h->image_size || h->manifest_size > h->image_size - h->manifest_offset) return;
     uint8_t *m = malloc(h->manifest_size);
     if (!m) return;
     const uint8_t *text;
     size_t n;
-    if (esp_partition_read(em.part, offset + h->manifest_offset, m, h->manifest_size) == ESP_OK &&
-        xip_cbor_get_str(m, h->manifest_size, 1, XIP_CBOR_TEXT, &text, &n) == 0 && n > 0 && n < cap) {
-        memcpy(out, text, n);
-        out[n] = 0;
+    if (esp_partition_read(em.part, offset + h->manifest_offset, m, h->manifest_size) == ESP_OK) {
+        int64_t v;
+        if (xip_cbor_get_str(m, h->manifest_size, 1, XIP_CBOR_TEXT, &text, &n) == 0 && n > 0 && n < cap) {
+            memcpy(out, text, n);
+            out[n] = 0;
+        }
+        if (xip_cbor_get_int(m, h->manifest_size, 8, &v) == 0 && v >= 0 && v <= UINT32_MAX) *version = (uint32_t)v;
     }
     free(m);
 }
 
-/* Look at every page of the partition: a page that starts with an image header starts a module, which spans the pages its size says. */
-static void scan(void)
+/* The state of the page of an image that is now the active module: kept while it is the same image, started afresh otherwise. */
+static void adopt(uint32_t page, uint32_t static_addr, uint32_t version)
 {
-    em.found = 0;
+    xip_slot_state_t *st = &em.slots[page];
+    if (st->st.running || st->starting || st->inst) { st->st.version = version; return; }
+    if (st->st.installed && st->static_addr == static_addr && st->st.version == version) return;
+    free(st->request);
+    memset(st, 0, sizeof(*st));
+    st->static_addr = static_addr;
+    st->st.last_result = INT32_MIN;
+    st->st.installed = true;
+    st->st.version = version;
+}
+
+/* Look at every page of the partition: a page that starts with an image header holds an image, which spans the pages its size says.
+ * xip_select() picks the module of each name (the highest version); the others are listed as shadowed. The page an image sits on is
+ * of no importance to the chip (docs/abi.md, "Versions and pages"). */
+static int scan(void)
+{
+    xip_candidate_t *cand = calloc(em.capacity ? em.capacity : 1, sizeof(*cand));
+    xip_choice_t *choice = calloc(em.capacity ? em.capacity : 1, sizeof(*choice));
+    xip_slot_t *found = calloc(em.capacity ? em.capacity : 1, sizeof(*found));
+    xip_shadow_t *shadows = calloc(em.capacity ? em.capacity : 1, sizeof(*shadows));
+    uint16_t *tags = calloc(em.capacity ? em.capacity : 1, sizeof(*tags));
+    uint32_t *sizes = calloc(em.capacity ? em.capacity : 1, sizeof(*sizes));
+    if (!cand || !choice || !found || !shadows || !tags || !sizes) {
+        free(cand); free(choice); free(found); free(shadows); free(tags); free(sizes);
+        return XIP_LOADER_ERR_NOMEM;
+    }
+    size_t n = 0;
     for (uint32_t offset = 0; offset + XIP_SLOT_ALIGN <= em.part->size;) {
         xip_dmod_header h;
         if (esp_partition_read(em.part, offset, &h, sizeof(h)) != ESP_OK || h.magic != XIP_DMOD_MAGIC || h.image_size <= XIP_DMOD_HEADER_SIZE) {
             offset += XIP_SLOT_ALIGN;
             continue;
         }
+        if (h.image_size > em.part->size - offset) { offset += XIP_SLOT_ALIGN; continue; }
         const uint32_t size = ((h.image_size + XIP_SLOT_ALIGN - 1) / XIP_SLOT_ALIGN) * XIP_SLOT_ALIGN;
-        if (size > em.part->size - offset || (XIP_FIXED && (uint64_t)offset + size > XIP_WINDOW_MAX)) {
+        if (size > em.part->size - offset) {
             ESP_LOGW(TAG, "image at 0x%x does not fit its room", (unsigned)offset);
             offset += XIP_SLOT_ALIGN;
             continue;
@@ -235,23 +266,78 @@ static void scan(void)
             offset += size;
             continue;
         }
-        char *name = em.names_found[em.found];
-        name_of(offset, &h, name, sizeof(em.names_found[0]));
-        bool taken = false;
-        for (size_t i = 0; i < em.found; i++)
-            taken |= !strcmp(em.slots_found[i].name, name) || em.slots[i].static_addr == h.static_addr;
-        if (taken) {
-            ESP_LOGW(TAG, "duplicate name or module RAM cell for %s: image at 0x%x is ignored", name, (unsigned)offset);
-        } else {
-            em.slots_found[em.found] = (xip_slot_t){.name = name, .tag = h.tag, .offset = offset, .size = size};
-            memset(&em.slots[em.found], 0, sizeof(em.slots[em.found]));
-            em.slots[em.found].static_addr = h.static_addr;
-            em.slots[em.found].st.last_result = INT32_MIN;
-            em.slots[em.found].st.installed = true;
-            em.found++;
-        }
+        xip_candidate_t *c = &cand[n];
+        c->page = offset / XIP_SLOT_ALIGN;
+        c->static_addr = h.static_addr;
+        c->window_slots = XIP_FIXED ? size / XIP_SLOT_ALIGN : 1;
+        ident_of(offset, &h, c->name, sizeof(c->name), &c->version);
+        tags[n] = h.tag;
+        sizes[n] = size;
+        n++;
         offset += size;
     }
+    xip_select(cand, n, choice);
+
+    size_t nf = 0, ns = 0;
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t page = cand[i].page;
+        char *name = em.names_found[page];
+        if (!em.slots[page].st.running && !em.slots[page].starting) memcpy(name, cand[i].name, sizeof(cand[i].name));
+        const xip_candidate_t *by = choice[i].by >= 0 ? &cand[choice[i].by] : NULL;
+        switch (choice[i].role) {
+        case XIP_ROLE_ACTIVE:
+            found[nf++] = (xip_slot_t){.name = name, .tag = tags[i], .offset = page * XIP_SLOT_ALIGN, .size = sizes[i], .version = cand[i].version};
+            break;
+        case XIP_ROLE_SHADOWED:
+        case XIP_ROLE_DUPLICATE:
+            if (choice[choice[i].by].role == XIP_ROLE_ACTIVE)
+                shadows[ns++] = (xip_shadow_t){.name = name, .tag = tags[i], .offset = page * XIP_SLOT_ALIGN, .version = cand[i].version,
+                                               .shadowed_by = by->page * XIP_SLOT_ALIGN, .duplicate = choice[i].role == XIP_ROLE_DUPLICATE};
+            if (choice[i].role == XIP_ROLE_DUPLICATE)
+                ESP_LOGW(TAG, "duplicate of %s version %u: image at 0x%x is ignored", name, (unsigned)cand[i].version, (unsigned)(page * XIP_SLOT_ALIGN));
+            break;
+        case XIP_ROLE_CELL_CONFLICT:
+            ESP_LOGW(TAG, "module slot range of %s is held by %s: image at 0x%x is ignored", name, by->name, (unsigned)(page * XIP_SLOT_ALIGN));
+            break;
+        }
+    }
+    for (size_t i = 0; i < n; i++)
+        if (choice[i].role == XIP_ROLE_ACTIVE) adopt(cand[i].page, cand[i].static_addr, cand[i].version);
+    /* a page that holds no image any more: its state goes, unless a module still runs from it */
+    for (size_t p = 0; p < em.capacity; p++) {
+        bool present = false;
+        for (size_t i = 0; i < n; i++) present |= cand[i].page == p;
+        xip_slot_state_t *st = &em.slots[p];
+        if (!present && !st->st.running && !st->starting && !st->inst && st->st.installed) { free(st->request); memset(st, 0, sizeof(*st)); }
+    }
+    xSemaphoreTake(em.lock, portMAX_DELAY);
+    memcpy(em.slots_found, found, nf * sizeof(*found));
+    memcpy(em.shadows, shadows, ns * sizeof(*shadows));
+    em.found = nf;
+    em.shadow_found = ns;
+    xSemaphoreGive(em.lock);
+    free(cand); free(choice); free(found); free(shadows); free(tags); free(sizes);
+    return (int)nf;
+}
+
+int xip_loader_rescan(void)
+{
+    if (!em.inited) return XIP_LOADER_ERR_NOT_RUNNING;
+    int rc = scan();
+    if (rc >= 0) {
+        ESP_LOGI(TAG, "rescan: %d modules, %u shadowed", rc, (unsigned)em.shadow_found);
+        for (size_t i = 0; i < em.shadow_found; i++)
+            ESP_LOGI(TAG, "  %s version %u at 0x%x is %s 0x%x", em.shadows[i].name, (unsigned)em.shadows[i].version, (unsigned)em.shadows[i].offset,
+                     em.shadows[i].duplicate ? "a duplicate of" : "shadowed by", (unsigned)em.shadows[i].shadowed_by);
+    }
+    return rc;
+}
+
+size_t xip_loader_shadow_count(void) { return em.inited ? em.shadow_found : 0; }
+
+const xip_shadow_t *xip_loader_shadow(int index)
+{
+    return em.inited && index >= 0 && (size_t)index < em.shadow_found ? &em.shadows[index] : NULL;
 }
 
 esp_err_t xip_loader_init(const xip_loader_config_t *cfg)
@@ -264,17 +350,22 @@ esp_err_t xip_loader_init(const xip_loader_config_t *cfg)
     em.slots = calloc(em.capacity ? em.capacity : 1, sizeof(*em.slots));
     em.slots_found = calloc(em.capacity ? em.capacity : 1, sizeof(*em.slots_found));
     em.names_found = calloc(em.capacity ? em.capacity : 1, sizeof(*em.names_found));
+    em.shadows = calloc(em.capacity ? em.capacity : 1, sizeof(*em.shadows));
     em.lock = xSemaphoreCreateMutex();
-    if (!em.slots || !em.slots_found || !em.names_found || !em.lock) return ESP_ERR_NO_MEM;
+    if (!em.slots || !em.slots_found || !em.names_found || !em.shadows || !em.lock) return ESP_ERR_NO_MEM;
     em.cfg = *cfg;
     if (!em.cfg.default_stack_bytes) em.cfg.default_stack_bytes = 8192;
     xip_module_ram_init();
-    scan();
+    if (scan() < 0) return ESP_ERR_NO_MEM;
     em.inited = true;
     ESP_LOGI(TAG, "%u modules in \"%s\" (0x%x bytes at 0x%x)", (unsigned)em.found, cfg->partition,
              (unsigned)em.part->size, (unsigned)em.part->address);
     for (size_t i = 0; i < em.found; i++)
-        ESP_LOGI(TAG, "  %s: component %u at 0x%x", em.slots_found[i].name, (unsigned)em.slots_found[i].tag, (unsigned)em.slots_found[i].offset);
+        ESP_LOGI(TAG, "  %s: component %u version %u at 0x%x", em.slots_found[i].name, (unsigned)em.slots_found[i].tag,
+                 (unsigned)em.slots_found[i].version, (unsigned)em.slots_found[i].offset);
+    for (size_t i = 0; i < em.shadow_found; i++)
+        ESP_LOGI(TAG, "  %s version %u at 0x%x is %s 0x%x", em.shadows[i].name, (unsigned)em.shadows[i].version, (unsigned)em.shadows[i].offset,
+                 em.shadows[i].duplicate ? "a duplicate of" : "shadowed by", (unsigned)em.shadows[i].shadowed_by);
     return ESP_OK;
 }
 
@@ -310,7 +401,7 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
 {
     if (!xip_loader_slot(slot)) return XIP_LOADER_ERR_SLOT;
     if (request_len && !request) return XIP_ERR_ARG;
-    xip_slot_state_t *st = &em.slots[slot];
+    xip_slot_state_t *st = XIP_SLOT_STATE(slot);
     if (st->st.running || st->starting) return XIP_LOADER_ERR_RUNNING;
 
     xip_dmod_header h;
@@ -330,8 +421,10 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
     }
     xSemaphoreTake(em.lock, portMAX_DELAY);
     bool conflict = st->st.running || st->starting;
-    for (size_t i = 0; i < em.found; i++) {
-        if ((int)i != slot && em.slots[i].static_addr == h.static_addr) conflict = true;
+    for (size_t p = 0; p < em.capacity; p++) {      /* the cell is held by a running or starting instance, whichever version it is */
+        const xip_slot_state_t *o = &em.slots[p];
+        if (p != XIP_SLOT_PAGE(slot) && xip_slots_overlap(o->static_addr, o->window_slots, h.static_addr,
+                XIP_FIXED ? (h.image_size + XIP_SLOT_ALIGN - 1) / XIP_SLOT_ALIGN : 1) && (o->st.running || o->starting || o->inst)) conflict = true;
     }
     if (conflict) {
         xSemaphoreGive(em.lock);
@@ -340,6 +433,7 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
     }
     st->starting = true;
     st->static_addr = h.static_addr;
+    st->window_slots = XIP_FIXED ? (h.image_size + XIP_SLOT_ALIGN - 1) / XIP_SLOT_ALIGN : 1;
     xSemaphoreGive(em.lock);
     // The claim excludes every running or starting instance before any bytes
     // are cleared. PIC relocation never changes the cell's identity.
@@ -359,7 +453,7 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
     }
     const xip_instance_config_t ic = {.handler = (xip_handle_fn)((const uint8_t *)base + h.entry_offset),
                                          .state_bytes = h.state_bytes, .done = instance_done,
-                                         .done_ctx = (void *)(intptr_t)slot, .component = h.tag,
+                                         .done_ctx = (void *)(intptr_t)XIP_SLOT_PAGE(slot), .component = h.tag,
                                          .port = manifest_port(slot, &h, 9), .stream = manifest_port(slot, &h, 10)};
     ESP_LOGI(TAG, "%s: handler %p, image %u bytes, state %u", em.slots_found[slot].name, (void *)ic.handler,
              (unsigned)h.image_size, (unsigned)h.state_bytes);
@@ -386,7 +480,7 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
 int xip_loader_stop(int slot, uint32_t timeout_ms)
 {
     if (!xip_loader_slot(slot)) return XIP_LOADER_ERR_SLOT;
-    xip_slot_state_t *st = &em.slots[slot];
+    xip_slot_state_t *st = XIP_SLOT_STATE(slot);
     if (!st->st.running) return 0;
     xSemaphoreTake(em.lock, portMAX_DELAY);
     xip_instance_t *inst = st->inst;      /* NULL (already ending) is ignored */
@@ -403,7 +497,7 @@ int xip_loader_stop(int slot, uint32_t timeout_ms)
 
 static xip_instance_t *running_instance(int slot)
 {
-    xip_slot_state_t *st = &em.slots[slot];
+    xip_slot_state_t *st = XIP_SLOT_STATE(slot);
     xSemaphoreTake(em.lock, portMAX_DELAY);
     xip_instance_t *inst = st->st.running ? st->inst : NULL;
     xSemaphoreGive(em.lock);
@@ -430,7 +524,7 @@ void xip_loader_status(int slot, xip_slot_status_t *out)
 {
     if (!out) return;
     if (!xip_loader_slot(slot)) { memset(out, 0, sizeof(*out)); return; }
-    *out = em.slots[slot].st;
+    *out = XIP_SLOT_STATE(slot)->st;
 }
 
 /* ---- by name, for the ABI's module calls (the host's hooks) ---- */
@@ -494,8 +588,47 @@ int xip_loader_manifest_named(const uint8_t *name, size_t n, uint8_t *out, size_
     return slot < 0 ? XIP_ERR_NOTFOUND : xip_loader_manifest(slot, out, capacity);
 }
 
+/* Start `version` of a module, a shadowed one included: it takes the place of the active image in the slot list (until the next rescan). */
+int xip_loader_start_version(const uint8_t *name, size_t n, uint32_t version, const uint8_t *request, size_t request_len)
+{
+    int slot = find_named(name, n);
+    if (slot < 0) return XIP_ERR_NOTFOUND;
+    if (em.slots_found[slot].version == version) return xip_loader_start(slot, request, request_len);
+    xSemaphoreTake(em.lock, portMAX_DELAY);
+    int rc = XIP_ERR_NOTFOUND;
+    for (size_t i = 0; i < em.shadow_found && rc == XIP_ERR_NOTFOUND; i++) {
+        xip_shadow_t *sh = &em.shadows[i];
+        if (sh->duplicate || sh->version != version || strcmp(sh->name, em.slots_found[slot].name)) continue;
+        xip_slot_state_t *cur = XIP_SLOT_STATE(slot);
+        if (cur->st.running || cur->starting || cur->inst) { rc = XIP_LOADER_ERR_RUNNING; break; }
+        /* swap the roles of the two pages; both share the module's RAM cell */
+        xip_slot_t *act = &em.slots_found[slot];
+        const xip_slot_t old = *act;
+        const uint32_t new_page = sh->offset / XIP_SLOT_ALIGN;
+        act->offset = sh->offset;
+        act->tag = sh->tag;
+        act->version = sh->version;
+        act->size = old.size;                  /* one page on Xtensa; a larger image is checked by xip_loader_start */
+        *sh = (xip_shadow_t){.name = old.name, .tag = old.tag, .offset = old.offset, .version = old.version, .shadowed_by = sh->offset};
+        rc = 0;
+        for (size_t k = 0; k < em.shadow_found; k++)
+            if (k != i && em.shadows[k].shadowed_by == old.offset) em.shadows[k].shadowed_by = act->offset;
+        em.slots[new_page].st.installed = false;     /* adopt() below starts the page afresh */
+    }
+    xSemaphoreGive(em.lock);
+    if (rc) return rc;
+    {
+        xip_dmod_header h;
+        if (xip_read_header(slot, &h) != ESP_OK) return XIP_LOADER_ERR_IMAGE;
+        em.slots_found[slot].size = ((h.image_size + XIP_SLOT_ALIGN - 1) / XIP_SLOT_ALIGN) * XIP_SLOT_ALIGN;
+        adopt(XIP_SLOT_PAGE(slot), h.static_addr, version);
+    }
+    return xip_loader_start(slot, request, request_len);
+}
+
 /* CBOR: an array with a map per slot ({1: name, 2: tag, 3: installed, 4: running, 5: version, 6: last result, 7: runs,
- * 8: ms of the last run, 9: stack high-water mark, 10: result of the last image check}; `slot` of mod_con/API.md) */
+ * 8: ms of the last run, 9: stack high-water mark, 10: result of the last image check, 11: reboot needed, 12: flash page of the image,
+ * 13: the shadowed images of this module: an array of {1: page, 2: version, 3: duplicate}}; `Slot` of api/host.API.md) */
 int xip_loader_modules_info(uint8_t *out, size_t cap)
 {
     xip_cbor_w w;
@@ -506,7 +639,9 @@ int xip_loader_modules_info(uint8_t *out, size_t cap)
         const xip_slot_t *slot = xip_loader_slot((int)i);
         xip_slot_status_t st;
         xip_loader_status((int)i, &st);
-        xip_cbor_map(&w, 11);
+        size_t shadowed = 0;
+        for (size_t k = 0; k < em.shadow_found; k++) shadowed += em.shadows[k].shadowed_by == slot->offset;
+        xip_cbor_map(&w, 13);
         xip_cbor_uint(&w, 1); xip_cbor_text(&w, slot->name, strlen(slot->name));
         xip_cbor_uint(&w, 2); xip_cbor_uint(&w, slot->tag);
         xip_cbor_uint(&w, 3); xip_cbor_bool(&w, st.installed);
@@ -518,6 +653,16 @@ int xip_loader_modules_info(uint8_t *out, size_t cap)
         xip_cbor_uint(&w, 9); xip_cbor_uint(&w, st.stack_high_water_bytes);
         xip_cbor_uint(&w, 10); xip_cbor_int(&w, st.last_check);
         xip_cbor_uint(&w, 11); xip_cbor_bool(&w, st.needs_reboot);
+        xip_cbor_uint(&w, 12); xip_cbor_uint(&w, slot->offset / XIP_SLOT_ALIGN);
+        xip_cbor_uint(&w, 13); xip_cbor_array(&w, shadowed);
+        for (size_t k = 0; k < em.shadow_found; k++) {
+            const xip_shadow_t *sh = &em.shadows[k];
+            if (sh->shadowed_by != slot->offset) continue;
+            xip_cbor_map(&w, 3);
+            xip_cbor_uint(&w, 1); xip_cbor_uint(&w, sh->offset / XIP_SLOT_ALIGN);
+            xip_cbor_uint(&w, 2); xip_cbor_uint(&w, sh->version);
+            xip_cbor_uint(&w, 3); xip_cbor_bool(&w, sh->duplicate);
+        }
     }
     return xip_cbor_done(&w);
 }

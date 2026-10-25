@@ -2,8 +2,9 @@
 /* Runs module images from flash. A module is not a task: its image stays mapped
  * while the host's worker calls its handler.
  *
- * The loader scans the module partition: every flash page (XIP_SLOT_ALIGN) that starts with an image header is a module, named by its
- * manifest (key 1) and numbered by its header (the component). Nobody tells it where a module lives or what it is called. It maps an
+ * The loader scans the module partition: every flash page (XIP_SLOT_ALIGN) that starts with an image header is an image of a module, named by its
+ * manifest (key 1), versioned by it (key 8, a plain number, absent = 0) and numbered by its header (the component). Per name the highest version
+ * is the module (the slot list); older ones are shadowed (xip_loader_shadow). Nobody tells it where a module lives or what it is called. It maps an
  * image, runs it on the host and stops it; it has no network, crypto, or image installer. It knows no module by name.
  * Mapping, tasks and the host table are the part that depends on the chip; the checks before a
  * module is mapped are in xip_check.h. */
@@ -12,6 +13,7 @@
 #include <stdbool.h>
 #include "esp_err.h"
 #include "xip.h"
+#include "xip_select.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,8 +26,20 @@ typedef struct {
     const char *name;     /* from the manifest of the image (key 1), or "@<offset>" without one */
     uint16_t tag;         /* the component number: the tag in the image header */
     uint32_t offset;      /* in the module partition, multiple of XIP_SLOT_ALIGN */
-    uint32_t size;        /* the pages the image spans; xtensa: offset + size <= the fixed-address window */
+    uint32_t size;        /* the physical flash pages the image spans */
+    uint32_t version;     /* manifest key 8: higher is newer; 0 without one */
 } xip_slot_t;
+
+/* An image the scan did not pick: a lower version of an active module (shadowed: kept for recovery, its page is the first to be reused),
+ * or the same version twice (duplicate: the lowest page is the active one). */
+typedef struct {
+    const char *name;
+    uint16_t tag;
+    uint32_t offset;       /* in the module partition */
+    uint32_t version;
+    uint32_t shadowed_by;  /* offset of the active image of this name */
+    bool duplicate;
+} xip_shadow_t;
 
 typedef struct {
     const char *partition;          /* data partition holding the modules, e.g. "data" */
@@ -47,7 +61,7 @@ enum {
 typedef struct {
     bool installed;          /* a valid image header is present */
     bool running;
-    uint32_t version;        /* of the installed package (0 if unknown) */
+    uint32_t version;        /* of the installed image: manifest key 8 (0 if it has none) */
     int last_result;         /* what xip_entry returned the last time; INT32_MIN before the first run */
     uint32_t runs;
     uint32_t last_runtime_ms;
@@ -72,6 +86,15 @@ int xip_loader_modules_info(uint8_t *out, size_t capacity);
 int xip_loader_start_named(const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len);
 int xip_loader_stop_named(const uint8_t *name, size_t name_len);
 int xip_loader_manifest_named(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
+
+/* Look at the partition again (after an install): the highest version of each name becomes the module, older ones shadowed. A running
+ * module keeps running; its page must not have been rewritten. Slot indices may change. Returns the number of modules, or negative. */
+int xip_loader_rescan(void);
+size_t xip_loader_shadow_count(void);
+const xip_shadow_t *xip_loader_shadow(int index);
+/* Start the image of `name` with exactly `version`, active or shadowed. A shadowed version replaces the active one in the slot list until the
+ * next rescan, and only when the active one is not running. XIP_ERR_NOTFOUND when no such version is installed. */
+int xip_loader_start_version(const uint8_t *name, size_t name_len, uint32_t version, const uint8_t *request, size_t request_len);
 
 int xip_loader_find(const char *name);     /* module index or -1 */
 const xip_slot_t *xip_loader_slot(int slot);

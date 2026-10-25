@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "src/loader.c" "src/xip_check.c"
+    SRCS "src/loader.c" "src/xip_check.c" "src/xip_select.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "src"
     REQUIRES xip_runtime esp_partition esp_timer

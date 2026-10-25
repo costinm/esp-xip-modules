@@ -24,9 +24,17 @@ xip_dmod_result_t xip_dmod_check(const xip_dmod_header *h, const xip_slot_rules_
         h->static_addr - r->static_base >= XIP_DMOD_STATIC_SLOTS * XIP_DMOD_STATIC_SLOT_BYTES ||
         (h->static_addr - r->static_base) % XIP_DMOD_STATIC_SLOT_BYTES) return EMD_BAD_PLACEMENT;
     if (r->fixed_vma) {
-        /* Linked for one address: it must be the address this slot is mapped at. */
-        if (h->flags != (XIP_DMOD_FLAG_FIXED_VMA | XIP_DMOD_FLAG_STATIC_RAM) || h->code_vma != r->code_base + r->slot_offset ||
-            h->data_vma != r->data_base + r->slot_offset) return EMD_BAD_PLACEMENT;
+        /* Linked for one address, the window slot of its RAM cell: inside the window, page aligned (a multiple of the slot), one slot
+         * or more consecutive pages long. Flash placement is independent; active mapped ranges must not overlap. */
+        const uint32_t slot = (h->static_addr - r->static_base) / XIP_DMOD_STATIC_SLOT_BYTES;
+        const uint32_t window = r->window_bytes ? r->window_bytes : XIP_DMOD_STATIC_SLOTS * XIP_DMOD_WINDOW_SLOT_BYTES;
+        if (h->flags != (XIP_DMOD_FLAG_FIXED_VMA | XIP_DMOD_FLAG_STATIC_RAM) || (uint64_t)slot * XIP_DMOD_WINDOW_SLOT_BYTES >= window ||
+            h->code_vma != r->code_base + slot * XIP_DMOD_WINDOW_SLOT_BYTES ||
+            h->data_vma != r->data_base + slot * XIP_DMOD_WINDOW_SLOT_BYTES) return EMD_BAD_PLACEMENT;
+        /* The existing image length determines the consecutive mapped span;
+         * no new header/manifest field or module-to-module interface. */
+        const uint64_t mapped = ((uint64_t)h->image_size + XIP_DMOD_WINDOW_SLOT_BYTES - 1) / XIP_DMOD_WINDOW_SLOT_BYTES * XIP_DMOD_WINDOW_SLOT_BYTES;
+        if ((uint64_t)slot * XIP_DMOD_WINDOW_SLOT_BYTES + mapped > window) return EMD_BAD_SIZE;
     } else if (h->flags != XIP_DMOD_FLAG_STATIC_RAM || h->code_vma != 0 || h->data_vma != 0) {
         return EMD_BAD_PLACEMENT;
     }
