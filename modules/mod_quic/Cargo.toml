@@ -1,0 +1,26 @@
+[package]
+name = "esp-mod-quic"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Experimental bounded QUIC-lite endpoint on native C pool and links"
+publish = false
+[workspace]
+[dependencies]
+xip-abi = { path = "../../crates/xip-abi" }
+quic-lite = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+spin = { version = "0.10", default-features = false, features = ["mutex","spin_mutex"] }
+[package.metadata]
+mkmod = "--name quic --tag 48 --stack 12288 --state 8 --port 244"
+[features]
+flat-image = ["xip-abi/global-alloc"]
+[[bin]]
+name = "mod_quic"
+required-features = ["flat-image"]
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+debug = false
+strip = "none"
