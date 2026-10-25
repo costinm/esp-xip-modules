@@ -2,5 +2,5 @@
 nvs,        data, nvs,     0x9000,   0x6000,
 phy_init,   data, phy,     0xf000,   0x1000,
 loader,     app,  factory, 0x10000,  0xe0000,
-main,       app,  ota_0,   0xf0000,  0x2d0000,
-data,       data, fat,     0x3c0000, 0x400000,
+main,       app,  ota_0,   0xf0000,  0x190000,
+data,       data, fat,     0x280000, 0x580000,
