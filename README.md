@@ -26,7 +26,7 @@ Non-goal: an OS or framework. This is an API/ABI that other projects embed.
 
 ```sh
 . ./env.sh
-scripts/build.sh esp32c6                      # runtime image and all modules, under target/out/esp32c6
+scripts/build.sh esp32c6                      # Main, recovery and all modules under target/out/esp32c6
 scripts/build-host-modules.sh                 # the same modules for Linux
 cargo run --manifest-path crates/xip-runtime-host/Cargo.toml --bin xip-host
 ```
@@ -34,7 +34,15 @@ cargo run --manifest-path crates/xip-runtime-host/Cargo.toml --bin xip-host
 `xip-host` runs the console and an echo module on loopback TCP and UDP; see
 [the host runtime](crates/xip-runtime-host/README.md). `scripts/test-host.sh generated` and `scripts/test-host.sh ci-runtime` run the maintained host checks without the local root `tests/` tree.
 
-CI builds `fw/main` and the generic firmware/module images for ESP32, ESP32-S3 and ESP32-C6. A separate job builds and tests `dmesh-cli` with its checked-in catalog. The host-test script exposes `generated`, `ci-runtime` and `cli` groups for those independent checks. CI does not use the root `tests/` tree; legacy `all`/`runtime` checks remain local until rewritten. See [.github/workflows/build.yml](.github/workflows/build.yml).
+`main.bin` includes BLE by default; `loader.bin` is the recovery runtime without
+BLE. `XIP_BLE_PROFILE=off` builds Main without BLE too. `main-rs/build.sh CHIP`
+builds the Rust Main wrapper with the same default BLE profile. Radio startup
+remains controlled by the installed modules and saved settings.
+
+C Main is the execution target; `fw/` is retained to recover missing features.
+CI builds C Main and modules for ESP32, ESP32-S3 and ESP32-C6, and tests
+`dmesh-cli`. Use `scripts/test-host.sh cli` for CLI checks. See
+[the workflow](.github/workflows/build.yml) for the build matrix.
 
 The module interface is [include/xip.h](include/xip.h), generated from the Rust declarations in
 [crates/xip-abi](crates/xip-abi/README.md). [modules/mod_flash](modules/mod_flash/README.md) installs images over TCP (development).

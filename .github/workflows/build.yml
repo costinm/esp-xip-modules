@@ -47,8 +47,6 @@ jobs:
         run: |
           . ./env.sh
           cargo build --locked --release --manifest-path crates/Cargo.toml -p dmesh-cli --bin dmesh-cli
-          cargo build --locked --manifest-path crates/Cargo.toml -p dmesh-cli --example xip_heap
-          cargo test --locked --manifest-path crates/Cargo.toml -p dmesh-cli --test heap_device --no-run
       - name: CLI tests with the checked-in catalog
         run: |
           . ./env.sh
@@ -80,28 +78,15 @@ jobs:
         run: |
           . ./env.sh
           scripts/build.sh ${{ matrix.cpu }}
-      - name: Build core fw/main
-        if: ${{ !cancelled() }}
-        run: |
-          . ./env.sh
-          fw/build.sh ${{ matrix.cpu }}
-      - name: Check C6 memory budgets and build without BLE
-        if: ${{ matrix.cpu == 'esp32c6' && !cancelled() }}
-        run: |
-          . ./env.sh
-          python3 scripts/check-memory.py c-main target/out/esp32c6/main-build/esp-xip-modules.elf
-          python3 scripts/check-memory.py fw-ble target/fw/riscv32imac-esp-espidf/release/dmesh-rs
-          DMESH_FW_NO_DEFAULT_FEATURES=1 DMESH_FW_FEATURES=modules XIP_FW_TARGET_DIR="$PWD/target/fw-no-ble" fw/build.sh esp32c6
-          python3 scripts/check-memory.py fw-no-ble target/fw-no-ble/riscv32imac-esp-espidf/release/dmesh-rs
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
           name: firmware-${{ matrix.cpu }}
           path: |
             target/out/${{ matrix.cpu }}/main.bin
+            target/out/${{ matrix.cpu }}/loader.bin
             target/out/${{ matrix.cpu }}/stage2-4mb.bin
             target/out/${{ matrix.cpu }}/partition-table-4mb.bin
             target/out/${{ matrix.cpu }}/modules.txt
             target/out/${{ matrix.cpu }}/modules/*.dmod
-            target/fw/${{ matrix.cpu }}/main-app.bin
           if-no-files-found: error

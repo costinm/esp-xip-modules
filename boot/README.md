@@ -10,7 +10,7 @@ as checking quick resets and watchdog resets.
 It maps Main or loader (tests QIO, falls back to DIO for better speed) and boots it.
 
 ```sh
-scripts/build.sh esp32c6                   # also writes target/out/esp32c6/stage2-4mb.bin, wl-boot-4mb.bin and partition-table-4mb.bin
+scripts/build.sh esp32c6                   # also writes target/out/esp32c6/main.bin, loader.bin, stage2-4mb.bin and partition-table-4mb.bin
 XIP_FLASH_MB=16 scripts/build.sh esp32s3   # boards with 16 MB flash: the 16mb table and a 16 MB flash size setting
 ```
 
@@ -21,7 +21,7 @@ For S3, `XIP_FLASH_MB=16` also enables the PSRAM that ships with the 16 MB modul
 
 Deploy with `scripts/flash-serial.sh PORT --chip CHIP --table 4mb` (choose the
 board capacity). It writes Stage2 at 0x0 (0x1000 on ESP32), the table at 0x8000,
-`wl-boot` at 0x10000, C Main at 0xf0000 and modules using the selected table. Parts:
+`loader.bin` (C runtime without BLE) at 0x10000, C Main at 0xf0000 and modules using the selected table. Parts:
 
 | file | what |
 |---|---|
@@ -33,3 +33,8 @@ board capacity). It writes Stage2 at 0x0 (0x1000 on ESP32), the table at 0x8000,
 
 The C-only layout leaves 24, 88 or 216 module pages on 4, 8 or 16 MB boards.
 The module slots can also be used for data.
+
+The recovery image runs the C runtime and installed console/flash modules. Main
+includes BLE by default; recovery always builds it out. Both use the same
+build-time partition template. The build rejects a recovery image that reaches
+the journal in the final 8 KiB of the loader partition.
