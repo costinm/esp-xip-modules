@@ -12,7 +12,7 @@ use pool::{Buffer, Native, Pool};
 use quic_lite::{nostd::NoStdRuntime, *};
 use spin::Mutex;
 use xip_abi::{
-    cbor::{self, Item, Reader, Writer},
+    cbor::Writer,
     *,
 };
 const COMPONENT: i32 = 48;
@@ -418,15 +418,11 @@ impl Module for State {
             cx.tick();
             return RET_CONTINUE as i32;
         }
-        let envelope = call.flags & CALL_LINK != 0;
-        if !envelope && !call.wants_response() {
+        // a raw frame of the module's port is not a request (the runtime parses envelopes and delivers them as requests)
+        if call.flags & CALL_LINK != 0 || !call.wants_response() {
             return RET_CONTINUE as i32;
         }
-        let method = if envelope {
-            cbor::get_int(call.data, 2).ok().flatten().unwrap_or(0) as i32
-        } else {
-            call.method
-        };
+        let method = call.method;
         let mut out = [0; 256];
         let mut w = Writer::new(&mut out);
         if method == 1 {
@@ -461,37 +457,8 @@ impl Module for State {
         } else {
             w.int(ERR_UNSUPPORTED as i64);
         }
-        let result = w.finish().unwrap();
-        if envelope {
-            let Some(mut id) = cbor::get(call.data, 3).ok().flatten() else {
-                return RET_CONTINUE as i32;
-            };
-            let Some(Item::Uint(id)) = id.next() else {
-                return RET_CONTINUE as i32;
-            };
-            let mut reply = [0; 300];
-            let mut w = Writer::new(&mut reply);
-            w.map(4)
-                .uint(1)
-                .uint(COMPONENT as u64)
-                .uint(2)
-                .int(method as i64)
-                .uint(3)
-                .uint(id)
-                .uint(
-                    if matches!(Reader::new(result).next(), Some(Item::Neg(_))) {
-                        7
-                    } else {
-                        6
-                    },
-                )
-                .raw(result);
-            if let Some(data) = w.finish() {
-                hw.message(call.from, 0, 0, call.id, data);
-            }
-        } else {
-            hw.reply(call, result);
-        }
+        // an error is a bare negative integer: the runtime makes it `7: error` for an envelope
+        hw.reply(call, w.finish().unwrap());
         RET_CONTINUE as i32
     }
 }

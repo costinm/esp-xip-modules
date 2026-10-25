@@ -15,7 +15,7 @@ mod watch;
 mod station;
 use protocol::Engine;
 use xip_abi::{
-    cbor::{self, Item, Reader, Writer},
+    cbor::{self, Item, Writer},
     *,
 };
 const C_SELF: i32 = 46;
@@ -439,10 +439,17 @@ impl Context {
         let mut body=[0;96];let n=w.len;body[..n].copy_from_slice(&w.record[..n]);
         let _=self.enqueue_type(hw,path,&body[..n],now,2);
     }
-    fn deliver_event(&self, hw: &Hw, route: watch::Route, data: &[u8], now: u64) {
+    /// One event of a watch. A native route gets `result` as another answer to the request (`SEND_MORE`: the runtime wraps it with the request's id and
+    /// keeps the request open; `last` ends it); a radio route gets the envelope that goes over the air, which this module builds for the peer.
+    fn deliver_event(&self, hw: &Hw, route: watch::Route, id: u64, result: &[u8], last: bool, now: u64) {
         match route {
-            watch::Route::Native { address, token } => { hw.message(address,0,0,token,data); }
+            watch::Route::Native { address, token } => {
+                hw.message(address, C_SELF, 7 | if last { 0 } else { SEND_MORE }, token, result);
+            }
             watch::Route::Radio(path) => {
+                let mut enc=[0;1400];
+                let Some(n)=dmesh_server::tagged::encode_numeric_response(46,7,id,result,&mut enc) else { return };
+                let data=&enc[..n];
                 // No discovery backlog: a BUSY/failed destination loses this
                 // event and its lease immediately. Control replies keep their
                 // separate bounded transaction ownership.
@@ -466,10 +473,7 @@ impl Context {
             w.map(6).uint(1).uint(1).uint(2).bytes(&path.peer).uint(3).bytes(record)
                 .uint(4).uint(now).uint(5).boolean(path.now).uint(6).int(rssi as i64);
             let Some(result)=w.finish() else {continue};
-            let mut out=[0;1400];
-            if let Some(n)=dmesh_server::tagged::encode_numeric_response(46,7,listener.id,result,&mut out) {
-                self.deliver_event(hw,listener.route,&out[..n],now);
-            }
+            self.deliver_event(hw,listener.route,listener.id,result,false,now);
         }
     }
     fn expire_watches(&mut self, hw: &Hw, now: u64) {
@@ -477,10 +481,7 @@ impl Context {
         let mut ended=[None;4]; let mut n=0;
         self.watches.expire(now, |s| {ended[n]=Some(s);n+=1;});
         for s in ended.into_iter().flatten() {
-            let mut out=[0;64];
-            if let Some(n)=dmesh_server::tagged::encode_numeric_response(46,7,s.id,&[0xa1,1,2],&mut out) {
-                self.deliver_event(hw,s.route,&out[..n],now);
-            }
+            self.deliver_event(hw,s.route,s.id,&[0xa1,1,2],true,now);
         }
     }
     fn dispatch_record(
@@ -539,9 +540,9 @@ impl Context {
         let data = w.finish().ok_or(ERR_SIZE)?;
         let mut rc = hw.message(ADDR_MAIN, C_SELF, APP_MESSAGE, token, data);
         if rc == ERR_NOTFOUND {
-            // Generic Main: use the same console/native dispatcher as PPP,
-            // asynchronously on the shared worker, with a correlated reply.
-            rc = hw.message(20, 20, 4, token, record);
+            // Generic Main: the runtime's envelope dispatch (the code of the 0x444d0002 path) delivers the request to the module of its
+            // component, or to the console for a native one, and the wrapped answer comes back here with `token` as its id.
+            rc = hw.message(ADDR_ENVELOPE, 0, 0, token, record);
         }
         if rc < 0 {
             self.discovery.take(token, now);
@@ -1128,8 +1129,11 @@ impl Module for State {
             cx.tick(hw);
             return CONTINUE;
         }
+        // the answer of the application (APP_REPLY), or of the module the runtime's envelope dispatch (ADDR_ENVELOPE) delivered a peer's request to:
+        // a message from a module for another component than this one (the request's own component and method) whose id is the token of a peer that waits
         if (call.component == C_SELF && call.method == APP_REPLY && call.from == ADDR_MAIN)
-            || (call.from == 20 && call.component == 20 && call.method == 4)
+            || (call.component != C_SELF && call.component != HOST_COMPONENT as i32 && call.pkt != 0 && call.from != ADDR_MAIN && call.from < ADDR_LINK
+                && call.id != 0 && cx.discovery.pending(call.id))
         {
             let now = hw.now_us().unwrap_or(0);
             let (token, payload) = if call.method == APP_REPLY {
@@ -1155,14 +1159,10 @@ impl Module for State {
             }
             return CONTINUE;
         }
-        let envelope = call.flags & CALL_LINK != 0
-            && matches!(Reader::new(call.data).next(), Some(Item::Map(_)));
-        if envelope || call.wants_response() {
-            let method = if envelope {
-                cbor::get_int(call.data, 2).ok().flatten().unwrap_or(0) as i32
-            } else {
-                call.method
-            };
+        // A request, direct or taken by the runtime from an envelope (`call.is_envelope()`: component, method and the fields are the envelope's, the
+        // answer is wrapped by the runtime). Frames of a link are not requests.
+        if call.wants_response() {
+            let method = call.method;
             let mut out = [0u8; 1400];
             let n = if method == 1 {
                 cx.status(hw, &mut out)
@@ -1193,14 +1193,14 @@ impl Module for State {
                 }
                 w.finish().map_or(0, |b| b.len())
             } else if method == 11 {
-                let fields = if envelope { item(call.data, 5).unwrap_or(&[0xa0]) } else { call.data };
+                let fields = call.data;
                 let result = bytes(fields, 1).ok_or(ERR_ARG)
                     .and_then(|record| cx.engine.set_publication(record));
                 let mut w = Writer::new(&mut out);
                 match result { Ok(()) => { w.map(0); }, Err(rc) => { w.int(rc as i64); } }
                 w.finish().map_or(0, |b| b.len())
             } else if method == 10 {
-                let fields=if envelope {item(call.data,5).unwrap_or(&[0xa0])} else {call.data};
+                let fields=call.data;
                 let ms=cbor::get_int(fields,1).ok().flatten().unwrap_or(-1);
                 let rc=if !(0..=300_000).contains(&ms) {ERR_ARG} else {
                     hw.power().and_then(|p|p.awake_for).map_or(ERR_UNSUPPORTED,|f|unsafe {f(hw.ctx(),ms as u32)})
@@ -1208,7 +1208,7 @@ impl Module for State {
                 let mut w=Writer::new(&mut out);if rc<0 {w.int(rc as i64);}else{w.map(1).uint(1).uint(rc as u64);}
                 w.finish().map_or(0,|b|b.len())
             } else if method == 8 || method == 9 {
-                let fields=if envelope {item(call.data,5).unwrap_or(&[0xa0])} else {call.data};
+                let fields=call.data;
                 let result=(|| {
                     let via_now=match cbor::get(fields,3).ok().flatten().and_then(|mut r|r.next()) {None=>false,Some(Item::Bool(b))=>b,_=>return Err(ERR_ARG)};
                     let now=hw.now_us().unwrap_or(0);
@@ -1225,13 +1225,14 @@ impl Module for State {
                 let mut w=Writer::new(&mut out);match result {Ok(id)=>{w.map(1).uint(1).uint(id);},Err(rc)=>{w.int(rc as i64);}}
                 w.finish().map_or(0,|b|b.len())
             } else if method == 7 {
-                let fields=if envelope {item(call.data,5).unwrap_or(&[0xa0])} else {call.data};
-                let id=item(call.data,3).and_then(|b| match Reader::new(b).next() {Some(Item::Uint(n))=>Some(n),_=>None}).unwrap_or(call.id);
+                let fields=call.data;
+                // a watch is its request: keyed by the envelope id (the runtime puts it on every event of the route)
+                let id=call.request_id.unwrap_or(call.id);
                 let rc=watch_duration(fields).and_then(|ms|cx.watches.register(watch::Route::Native {address:call.from,token:call.id},id,ms,hw.now_us().unwrap_or(0)));
                 let mut w=Writer::new(&mut out);match rc {Ok(())=>{w.map(0);},Err(rc)=>{w.int(rc as i64);}}
                 w.finish().map_or(0,|b|b.len())
             } else if method == 6 {
-                let fields = if envelope { item(call.data, 5).unwrap_or(&[0xa0]) } else { call.data };
+                let fields = call.data;
                 let result = (|| {
                     let enabled = match cbor::get(fields, 1).ok().flatten().and_then(|mut r| r.next()) {
                         Some(Item::Bool(on)) => on,
@@ -1251,11 +1252,7 @@ impl Module for State {
                 match result { Ok(()) => { w.map(0); }, Err(rc) => { w.int(rc as i64); } }
                 w.finish().map_or(0, |b| b.len())
             } else if method == 5 {
-                let fields = if envelope {
-                    item(call.data, 5).unwrap_or(&[0xa0])
-                } else {
-                    call.data
-                };
+                let fields = call.data;
                 let result = (|| {
                     let peer: [u8; 6] = bytes(fields, 1)
                         .ok_or(ERR_ARG)?
@@ -1304,32 +1301,8 @@ impl Module for State {
             if (4..=10).contains(&method) {
                 cx.tick(hw);
             }
-            if envelope {
-                let Some(id) = item(call.data, 3) else {
-                    return CONTINUE;
-                };
-                let mut answer = [0; 1500];
-                let mut w = Writer::new(&mut answer);
-                w.map(4)
-                    .uint(1)
-                    .uint(C_SELF as u64)
-                    .uint(2)
-                    .int(method as i64)
-                    .uint(3)
-                    .raw(id);
-                if let Some(Item::Neg(_)) = Reader::new(&out[..n]).next() {
-                    w.uint(7).raw(&out[..n]);
-                } else if (1..=11).contains(&method) {
-                    w.uint(6).raw(&out[..n]);
-                } else {
-                    w.uint(7).int(ERR_UNSUPPORTED as i64);
-                }
-                if let Some(answer) = w.finish() {
-                    hw.message(call.from, 0, 0, call.id, answer);
-                }
-            } else {
-                hw.reply(call, &out[..n]);
-            }
+            // an error is a bare negative integer: `7: error` in an envelope, wrapped by the runtime
+            hw.reply(call, &out[..n]);
             return CONTINUE;
         }
         if call.flags & CALL_LINK != 0 && call.flags & CALL_LINK_EVENT == 0 {
@@ -1412,6 +1385,7 @@ mod packet_lifetime_tests {
         packets: BTreeMap<u32, Vec<u8>>,
         busy: bool,
         sent: Vec<Vec<u8>>,
+        sent_methods: Vec<i32>,
         freed: usize,
         context_freed: usize,
         wifi: WifiIntent,
@@ -1454,7 +1428,7 @@ mod packet_lifetime_tests {
         n: usize,
         _: u32,
         _: i32,
-        _: i32,
+        method: i32,
         _: u64,
     ) -> i32 {
         let f = fixture(p);
@@ -1463,6 +1437,7 @@ mod packet_lifetime_tests {
         }
         let data = f.packets.remove(&id).expect("send owns lease");
         f.sent.push(data[..n].to_vec());
+        f.sent_methods.push(method);
         0
     }
     unsafe extern "C" fn release_context(
@@ -1586,15 +1561,13 @@ mod packet_lifetime_tests {
             (&[0xa1,1,0x61,b'x'][..], ERR_ARG),
             (&[0xa0][..], ERR_ARG),
         ] {
-            let mut data = [0; 300]; let mut w = Writer::new(&mut data);
-            w.map(4).uint(1).uint(46).uint(2).uint(11).uint(3).uint(u64::MAX).uint(5).raw(fields);
-            let call = CallView { component: C_SELF, method: 0, value: 0, flags: CALL_LINK,
-                data: w.finish().unwrap(), time_us: 0, pkt: 0, from: ADDR_LINK, id: 9 };
+            // an envelope {1: 46, 2: 11, 3: id, 5: fields} as the runtime hands it over; it wraps the answer
+            let call = CallView { component: C_SELF, method: 11, value: 0, flags: 1 | CALL_ENVELOPE,
+                data: fields, time_us: 0, pkt: 0, from: ADDR_LINK, id: 9, request_id: None };
             state.handle(&hw, &call);
             let reply = f.sent.last().unwrap();
-            assert_eq!(cbor::get(reply,3).unwrap().unwrap().next(), Some(Item::Uint(u64::MAX)));
-            if expected == 0 { assert_eq!(item(reply,6),Some(&[0xa0][..])); }
-            else { assert_eq!(cbor::get_int(reply,7).unwrap(),Some(expected as i64)); }
+            if expected == 0 { assert_eq!(reply, &[0xa0]); }
+            else { assert_eq!(cbor::Reader::new(reply).next().and_then(|i| i.as_int()), Some(expected as i64)); }
             let cx = unsafe { &*ptr };
             assert_eq!(&cx.engine.info[..cx.engine.info_len], b"new");
             assert_eq!((cx.engine.nan.cluster(),cx.engine.master,cx.engine.started_us,cx.engine.wake_dw),clock);
@@ -1605,7 +1578,7 @@ mod packet_lifetime_tests {
         // A direct module call uses the same method, then an empty value clears.
         let fields = [0xa1,1,0x40];
         let call = CallView { component:C_SELF, method:11, value:0, flags:1, data:&fields,
-            time_us:0,pkt:0,from:52,id:19 };
+            time_us:0,pkt:0,from:52,id:19, request_id: None };
         state.handle(&hw,&call); assert_eq!(f.sent.last().unwrap(), &[0xa0]);
         assert_eq!(unsafe { &*ptr }.engine.info_len,0);
         assert!(unsafe { &*ptr }.engine.info.iter().all(|b|*b==0));
@@ -1613,18 +1586,18 @@ mod packet_lifetime_tests {
     }
 
     #[test]
-    fn sleepy_command_over_ppp_returns_a_success_envelope() {
+    fn sleepy_command_over_ppp_returns_a_success_result() {
         let mut f = Fixture::default(); let h = host(&mut f);
         let hw = unsafe { Hw::new(&h) }.unwrap();
         let ptr = std::boxed::Box::into_raw(std::boxed::Box::new(context()));
         let mut state = State { context: ptr as usize };
-        let data = &[0xa4, 1, 0x18, 46, 2, 6, 3, 0x18, 42, 5, 0xa1, 1, 0xf4];
-        let call = CallView { component: C_SELF, method: 0, value: 0,
-            flags: CALL_LINK, data, time_us: 0, pkt: 0, from: ADDR_LINK, id: 9 };
+        // {1: 46, 2: 6, 3: 42, 5: {1: false}} as the runtime hands it over: method 6, the fields; it wraps the answer in the envelope
+        let data = &[0xa1, 1, 0xf4];
+        let call = CallView { component: C_SELF, method: 6, value: 0,
+            flags: 1 | CALL_ENVELOPE, data, time_us: 0, pkt: 0, from: ADDR_LINK, id: 9, request_id: None };
         assert_eq!(state.handle(&hw, &call), CONTINUE);
         assert_eq!(f.sent.len(), 1);
-        assert_eq!(item(&f.sent[0], 6), Some(&[0xa0][..]));
-        assert!(item(&f.sent[0], 7).is_none());
+        assert_eq!(f.sent[0], [0xa0]);
         state.stop(&hw);
     }
     #[test]
@@ -1856,8 +1829,9 @@ mod packet_lifetime_tests {
         cx.observation(&hw,path,b"before",100,-43);assert_eq!(f.next,0);
         let route=watch::Route::Native {address:ADDR_LINK+1,token:246};
         cx.watches.register(route,77,1000,101).unwrap();cx.observation(&hw,path,b"new",102,-43);
-        assert_eq!(f.sent.len(),1);let result=item(&f.sent[0],6).unwrap();assert_eq!(bytes(result,3),Some(&b"new"[..]));
-        cx.expire_watches(&hw,1_000_101);assert_eq!(f.sent.len(),2);
+        assert_eq!(f.sent.len(),1);assert_eq!(bytes(&f.sent[0],3),Some(&b"new"[..]));
+        assert_eq!(f.sent_methods[0],7|SEND_MORE,"an event keeps the request open");
+        cx.expire_watches(&hw,1_000_101);assert_eq!(f.sent.len(),2);assert_eq!(f.sent_methods[1],7,"the last one ends it");
         cx.observation(&hw,path,b"after",1_000_102,-43);assert_eq!(f.sent.len(),2);
         cx.watches.register(watch::Route::Radio(path),78,1000,2_000_000).unwrap();f.busy=true;
         cx.observation(&hw,path,b"drop",2_000_001,-43);

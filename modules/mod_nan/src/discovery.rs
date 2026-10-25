@@ -82,6 +82,10 @@ impl Discovery {
         });
         Ok(self.next_token)
     }
+    /// A peer waits for the answer to `token`.
+    pub fn pending(&self, token: u64) -> bool {
+        self.pending.iter().any(|p| p.is_some_and(|p| p.token == token))
+    }
     pub fn take(&mut self, token: u64, now: u64) -> Option<ReturnPath> {
         let slot = self
             .pending

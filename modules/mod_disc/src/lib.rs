@@ -381,8 +381,7 @@ mod tests {
             time_us: 0,
             pkt: 0,
             from: 52,
-            id: 19,
-        }
+            id: 19, request_id: None }
     }
     #[test]
     fn repeated_reads_do_not_need_crypto_and_failed_refresh_keeps_the_cache() {
@@ -418,19 +417,9 @@ mod tests {
         let h = host(&mut f);
         let hw = unsafe { Hw::new(&h) }.unwrap();
         let mut s = state();
-        let mut data = [0; 40];
-        let mut w = Writer::new(&mut data);
-        w.map(4)
-            .uint(1)
-            .uint(47)
-            .uint(2)
-            .uint(2)
-            .uint(3)
-            .uint(u64::MAX)
-            .uint(5)
-            .map(0);
-        let mut request = call(0, w.finish().unwrap());
-        request.flags = CALL_LINK;
+        // an envelope {1: 47, 2: 2, 3: id, 5: {}} as the runtime hands it over: component, method and the fields, answered by (from, token)
+        let mut request = call(2, &[0xa0]);
+        request.flags = 1 | CALL_ENVELOPE;
         request.from = ADDR_LINK;
         request.id = 9;
         s.handle(&hw, &request);
@@ -456,15 +445,9 @@ mod tests {
         s.handle(&hw, &ack);
         assert_eq!(f.sent.len(), 2);
         let reply = &f.sent[1];
-        assert_eq!((reply.dst, reply.id), (ADDR_LINK, 9));
-        assert_eq!(
-            cbor::get(&reply.data, 3).unwrap().unwrap().next(),
-            Some(Item::Uint(u64::MAX))
-        );
-        assert!(matches!(
-            cbor::get(&reply.data, 6).unwrap().unwrap().next(),
-            Some(Item::Map(0))
-        ));
+        // the runtime matches this answer to the envelope by (link, token, component, method) and adds {1, 2, 3, 6: ..}
+        assert_eq!((reply.dst, reply.id, reply.component, reply.method), (ADDR_LINK, 9, COMPONENT, 2));
+        assert_eq!(reply.data, [0xa0]);
         s.handle(&hw, &ack);
         assert_eq!(f.sent.len(), 2, "duplicate ACK is not another request");
         assert_eq!(f.canceled, [1]);

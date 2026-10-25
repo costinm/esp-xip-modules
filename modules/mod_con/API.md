@@ -1,63 +1,13 @@
 # `console` API (20)
 
-Binary device control with a retained text interface. Binary methods operate directly on CBOR fields; `parse` and `render` remain compatible while callers migrate. Its manifest names a port (the serial line, a link
-like any other): each line arrives as a frame of that link (the line as bytes) and the text it answers goes back to the source of the line, with
-the `from` and `id` the frame carried, so a line from the network is answered on the network.
-A line is one of the commands below or `component.method key=value ...` (the spelling of the ssh-mesh `mesh` CLI), which
-becomes the tagged-CBOR request of the module `component` (names and tags from the `API.md` files of the modules,
-`mesh-api-gen`, `scripts/gen.sh`), and is sent as a packet with an id. Nothing waits for an answer: whatever packets modules send to the
-console, one or many, answers or not, are printed as they arrive. Dispatch forwards the component, method and fields to the module handler; it does not re-read or enforce a manifest method list. `parse` (1) and `render`
-(2) below are the two halves of that, for a caller that has its own transport. Binary clients use the methods below directly, or `dispatch` with the shared tagged envelope. No command string is involved.
+CBOR device control, and the home of the native components that no module hosts (Wi-Fi 10, power 11, ip 12, ...). The module has no port. Methods are reached
+as a numeric envelope in a 0x444d0002 datagram (the runtime parses it and sends the answer back the same way), or as direct calls from the application. The native components without a hosting module (`wifi.*`, `power.*`, `ip.*`) are served from the native method table. Method IDs 1–4 are retired (4 was `dispatch`: an envelope as an argument; a module that holds an envelope sends it to `ADDR_ENVELOPE` and the runtime dispatches it).
+Text lines, parsing, rendering and TCP console connections are not supported.
+Method IDs 1–4 are retired and must not be reused.
 
-Native calls: a method of a host component that has a native function (`wifi.get`, `wifi.set`, `wifi.tuning`, `wifi.set_tuning`; the `**C function:**` lines of `api/wifi.API.md`) is not sent to a module. The console looks the component up with `get_component`,
-fills the request struct of the function from the fields of the line, calls the function in its table, and prints the output struct as the answer. The layout of the structs and the position of the function come from `native.h`
-(`mesh-api-gen --out-console-native`, generated from the API.md and the Rust declaration), so adding a function to such an API adds no console code. A field the line does not name is zero, so `wifi.set` replaces the whole intent.
-
-Commands: `status` (the host device_info map, including Wi-Fi, heap, slots and cached component status), `start NAME [TEXT]`, `stop NAME`, `reset`,
-`wifi [ssid=NAME] [psk=SECRET] [start|stop]` (the network is a setting of this module, never in an image; an empty ssid is
-the flash network), `loader start NAME` / `loader stop` (the upload server, which announces that the device wants the
-package NAME), `help`.
-
-Line syntax: `method`, `component.method` or `component method`, then `key=value` words. A key is a field name or
-a number (`@3=5` and `3=5` are the same). Values: unsigned and negative integers, `true`/`false`, `hex:0a0b` for
-bytes, anything else text; a double-quoted value may contain spaces. The declared type of a field wins over what a
-value looks like (`name=123` stays text when `name` is a `string`).
-
-## 1. `parse` — text line to request
-
-### Request
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `line` | `string` | One line of text. |
-
-### Response
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `component` | `uint` | |
-| 2 | `method` | `uint` | |
-| 5 | `fields` | `map` | The request fields, keyed by tag. |
-| 12 | `local` | `string` | Present instead of the others when the line was answered here: `help`, or a syntax error. |
-
-## 2. `render` — answer to text
-
-### Request
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `component` | `uint` | The component of the request. |
-| 2 | `method` | `uint` | The method of the request. |
-| 6 | `result` | `map` | The answer (absent for an error). |
-| 7 | `error` | `string` | The error text (absent on success). |
-
-### Response
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `text` | `string` | `key=value` words on one line; a record list one record per line; `ok` for an empty answer. |
-
-The answers the console prints as lists, one record per line (`device_info` modules; the host's `modules_info`):
+Native Wi-Fi, power and BLE methods use the generated component tables and keep their
+existing schemas. Fields omitted from a native request are zero, so `wifi.set`
+replaces the whole intent.
 
 `Slot` fields:
 
@@ -67,47 +17,23 @@ The answers the console prints as lists, one record per line (`device_info` modu
 | 2 | `tag` | `uint` | The component number of the module. |
 | 3 | `installed` | `bool` | |
 | 4 | `running` | `bool` | |
-| 5 | `version` | `uint` | Of the installed package. |
+| 5 | `version` | `uint` | Of the active image: its manifest version (key 8, 0 without one); higher is newer. |
 | 6 | `last` | `int` | What the module returned the last time. |
 | 7 | `runs` | `uint` | |
 | 8 | `ms` | `uint` | Duration of the last run. |
 | 9 | `stack_free` | `uint` | Worker stack high-water mark. |
 | 10 | `check` | `int` | Result of the last start attempt's image check. |
 | 11 | `reboot` | `bool` | The module stopped with memory it had not freed: it cannot be replaced until the device restarts. |
+| 12 | `page` | `uint` | The 64 KiB page of the module partition the active image sits on. |
+| 13 | `shadowed` | `Shadowed[]` | The other installed images of this module name: lower versions (kept for recovery, the first pages to be reused) and duplicates. Empty when none. |
 
-`Event` fields:
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `module` | `string` | |
-| 2 | `id` | `uint` | The event id (`Hw::event`). |
-| 3 | `text` | `string` | The text, or the bytes as hex. |
-
-
-## 4. `dispatch` — binary envelope to binary answer
-
-Dispatch one shared numeric CBOR envelope. This bridge executes console operations 5–10 and the generated native host methods (`wifi.get/set/tuning/set_tuning/monitor`, `power.*`). It does not invoke `parse`, render text, or synchronously call another module from the shared module worker. Other components return `ERR_UNSUPPORTED` (-2). In `fw/main`, installed module methods are registered directly in the DMesh handler registry and need no console wrapper.
-
-The request itself is the envelope below, not a byte string or a command. The response retains its component, method and unsigned request ID. Result and error are mutually exclusive. Method 3 remains reserved for the existing internal text-line delivery path.
-
-### Request
+`Shadowed` fields:
 
 | Tag | Field | Type | Description |
 |---:|---|---|---|
-| 1 | `component` | `uint` | Target component number; console is 20. |
-| 2 | `method` | `uint` | Target method number. |
-| 3 | `id` | `uint` | Correlation ID, echoed unchanged; defaults to zero. |
-| 5 | `fields` | `map` | Target method request; defaults to an empty map. |
-
-### Response
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `component` | `uint` | Request component. |
-| 2 | `method` | `uint` | Request method. |
-| 3 | `id` | `uint` | Request correlation ID. |
-| 6 | `result` | `map` | Target method's unmodified successful CBOR result. |
-| 7 | `error` | `int` | Negative ABI error code on failure. |
+| 1 | `page` | `uint` | The page of the shadowed image. |
+| 2 | `version` | `uint` | Its version (manifest key 8). |
+| 3 | `duplicate` | `bool` | The same version as the active image (the lowest page is the active one) instead of a lower one. |
 
 ## 5. `status` — device snapshot
 
@@ -178,7 +104,13 @@ Kind 1 captures at most 1024 block descriptors into a temporary allocation, then
 |---:|---|---|---|
 | 1 | `value` | `bytes` | Present on reads; writes return an empty map. |
 
-Persistent Wi-Fi buffer settings are shared by C Main and FW Main:
+Persistent settings are shared by C Main and FW Main. `flash.auth` accepts the
+ASCII bytes `strict` (default) or `unsigned`; an empty value restores strict.
+The flash module reads it on start, including autostart after reboot. Changing
+NV does not alter an active upload service: stop/start `flash` to apply it.
+An explicit flash start request overrides NV for that activation.
+
+Wi-Fi buffer settings:
 
 | Key | Range | Default | Meaning |
 |---|---|---:|---|
@@ -194,12 +126,27 @@ resize an active driver. Volatile `wifi.set_tuning` buffer fields take precedenc
 until reset. These defaults describe the current application builds; the SDK's
 fixed RX storage must remain suitable for DMA.
 
-Direct methods 5–10 return their result map on success or a signed negative ABI error scalar on failure (the existing module-call convention). `dispatch` places these failures in envelope field 7. Start/stop/reset return an empty successful map. Native Wi-Fi methods retain their own existing schemas and may be invoked through `dispatch`; text `wifi` remains available during migration. Existing DMesh status/settings methods keep their IDs and shapes and coexist with these console methods.
+## 11. `link.send` — DEBUG ONLY: send one packet on a link
+
+Debugging aid. Sends one packet through the normal send path of the link at address `link` (the address the runtime reports for it, e.g. `0x40000001`
+for the first native link registered after the serial one): a pool packet is filled with `data` and sent, and the link owns
+it once it accepted. Errors are the link's: `ERR_BUSY` (-5, the link is still sending; nothing was kept, retry), `ERR_NOTFOUND` (-7, no such link),
+`ERR_IO` (-3, for example the CoC channel is not open), `ERR_SIZE` (-8, more than a pool packet), `ERR_NOMEM`. It does not wait for the frame to leave.
+
+### Request
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `link` | `uint` | Link address. |
+| 2 | `data` | `bytes` | The packet payload, 1 to 1500 bytes (the text `hex:...` is also accepted; it doubles the size). |
+| 3 | `token` | `uint` | The destination token on the link; absent: 0 (broadcast or the only peer). |
+
+Direct methods 5–11 return their result map on success or a signed negative ABI error scalar on failure (the existing module-call convention). An envelope request gets them in field 7. Start/stop/reset return an empty successful map. Native Wi-Fi methods retain their own existing schemas and are reached by envelope; text `wifi` remains available during migration. Existing DMesh status/settings methods keep their IDs and shapes and coexist with these console methods.
 
 
-On the generic C runtime's PPP console port (1), a CBOR map is dispatched as this
-numeric envelope and the response stays binary. Existing text records retain
-their compatibility path. Binary port calls do not invoke `parse` or `render`.
+The console has no PPP port. A request for component 20 (and for a native component that no module hosts) is an envelope in a 0x444d0002 long packet
+(PPP port 0xf7 for `dmesh-cli`); the runtime parses it and delivers the method to this module as an ordinary call, then wraps the answer. Binary calls do not
+invoke `parse` or `render`.
 
 `fw/main` also exposes the persistent boot setting `uart.baud` through `nv`
 (decimal ASCII bytes, e.g. `hex:393231363030` for 921600). It applies on reboot,

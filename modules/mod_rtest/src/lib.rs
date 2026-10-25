@@ -62,7 +62,6 @@ const MODE_NOW: u8 = 5;
 const MODE_MON: u8 = 6;
 
 /// The bench methods (30..): the frame and event handlers of the `espnow` / `promisc` links, the bench alarm and its guard.
-const M_NOW_FRAME: i32 = 30;
 const M_NOW_TXDONE: i32 = 31;
 const M_NOW_TICK: i32 = 32;
 const M_NOW_GUARD: i32 = 33;
@@ -77,8 +76,15 @@ const NOW_GUARD_MS: u32 = 15_000;
 const MON_GUARD_MS: u32 = 15_000;
 const BENCH_PRINT: u32 = 6;
 /// `NOWP` ping, `NOWQ` pong: only a ping is answered, so a pair of boards does not talk forever.
-const PING: [u8; 4] = *b"NOWP";
-const PONG: [u8; 4] = *b"NOWQ";
+/// The `now` bench speaks the common QUIC receive function's CBOR datagram: a 0x444d0002 long packet (first byte 0xc0, version, DCID 0x01, SCID 0x02)
+/// whose envelope is `{1: C_TEST, 2: PING | PONG, 3: seq, 4: total size, 5: pattern bytes}`. The pong is a bare envelope sent to the peer the ping came from: the
+/// runtime remembers the request (link, source, id) and adds the long header itself.
+const M_PING: i32 = 40;
+const M_PONG: i32 = 41;
+const NOW_HEADER: usize = 9;
+const NOW_FIXED: usize = 22;
+/// The smallest bench packet: header, the fixed fields and an empty pattern.
+const NOW_MIN: usize = NOW_HEADER + NOW_FIXED;
 
 /// Bytes of state the image asks for (`mkmod` in Cargo.toml). An all-zero `State` is the initial state.
 pub const STATE_BYTES: usize = 512;
@@ -330,7 +336,7 @@ impl State {
         self.alloc_checks(hw);
 
         // not a request: nothing to answer; connectivity is a plain query
-        let plain = CallView { component: C_TEST, method: 0, value: 0, flags: 0, data: &[], pkt: 0, from: 0, id: 0 };
+        let plain = CallView { component: C_TEST, method: 0, value: 0, flags: 0, time_us: 0, data: &[], pkt: 0, from: 0, id: 0, request_id: None };
         self.check(hw, "reply-no-request", hw.reply(&plain, b"x") == ERR_ARG, 0);
 
         // settings: own namespace, round trip, overwrite, erase, size error
@@ -483,18 +489,33 @@ impl State {
 fn now_byte(seq: u32, i: usize) -> u8 {
     (seq.rotate_left((i % 32) as u32) ^ (i as u32).wrapping_mul(73) ^ ((i as u32) >> 8)) as u8
 }
-fn fill_now(data: &mut [u8], magic: [u8; 4], seq: u32) {
-    let len = data.len() as u32;
-    data[..4].copy_from_slice(&magic);
-    data[4..8].copy_from_slice(&seq.to_le_bytes());
-    data[8..12].copy_from_slice(&len.to_le_bytes());
-    for (i, b) in data.iter_mut().enumerate().skip(12) { *b = now_byte(seq, i); }
+/// Fill `data` (the whole packet of `total` bytes, or the bare envelope when `header` is false) with a ping or pong.
+fn fill_now(data: &mut [u8], method: i32, seq: u32, total: u32, header: bool) -> bool {
+    let lead = if header { NOW_HEADER } else { 0 };
+    if (total as usize) < NOW_MIN || data.len() != total as usize - if header { 0 } else { NOW_HEADER } { return false; }
+    if header { data[..NOW_HEADER].copy_from_slice(&[0xc0, 0x44, 0x4d, 0x00, 0x02, 1, 0x01, 1, 0x02]); }
+    let pad = total as usize - NOW_MIN;
+    let mut w = Writer::new(&mut data[lead..lead + NOW_FIXED - 3]);
+    w.map(5).uint(1).uint(C_TEST as u64).uint(2).uint(method as u64);
+    let n = w.finish().map_or(0, |r| r.len());
+    let at = lead + n;
+    let mut x = [0u8; 16];
+    x[0] = 0x03; x[1] = 0x1a; x[2..6].copy_from_slice(&seq.to_be_bytes());
+    x[6] = 0x04; x[7] = 0x1a; x[8..12].copy_from_slice(&total.to_be_bytes());
+    x[12] = 0x05; x[13] = 0x59; x[14..16].copy_from_slice(&(pad as u16).to_be_bytes());
+    data[at..at + 16].copy_from_slice(&x);
+    for (i, b) in data[at + 16..].iter_mut().enumerate() { *b = now_byte(seq, i); }
+    true
 }
-fn valid_now(data: &[u8]) -> bool {
-    if data.len() < 12 { return false; }
-    let seq = u32::from_le_bytes(data[4..8].try_into().unwrap());
-    let len = u32::from_le_bytes(data[8..12].try_into().unwrap());
-    len as usize == data.len() && data.iter().enumerate().skip(12).all(|(i, b)| *b == now_byte(seq, i))
+/// A received envelope (the packet from the envelope on): its fields, the size declared by the sender, and the pattern all check.
+fn valid_now(data: &[u8], total: u32) -> bool {
+    let (Some(seq), Some(declared)) = (cbor::get_int(data, 3).ok().flatten(), cbor::get_int(data, 4).ok().flatten()) else { return false };
+    if declared as u32 != total || data.len() + NOW_HEADER != total as usize { return false; }
+    let Some(mut r) = cbor::get(data, 5).ok().flatten() else { return false };
+    match r.next() {
+        Some(cbor::Item::Bytes(b)) => b.len() + NOW_MIN == total as usize && b.iter().enumerate().all(|(i, x)| *x == now_byte(seq as u32, i)),
+        _ => false,
+    }
 }
 
 /// The bench's guard duration from a `secs=N` word of the start request; the mode's default otherwise.
@@ -539,6 +560,7 @@ impl State {
         w.finish()
     }
 
+    /// (An `info` envelope on the datagram port is an ordinary request now: the runtime parses envelopes, see `request`.)
     /// The traffic of the manifest's two ports, both an echo (the end-to-end test of a link, whatever the link): a **datagram** (port 3, a packet of
     /// a link with `CALL_LINK`) goes back to `from` with the token it came with, in the same packet; a **stream** (stream port 3, TCP 5228: a
     /// socket event) is read and written back. `CALL_LINK_EVENT`s of a link need no answer.
@@ -546,16 +568,10 @@ impl State {
         const CONTINUE: i32 = xip_abi::RET_CONTINUE as i32;
         if call.flags & xip_abi::CALL_LINK != 0 {
             if self.mode == MODE_NOW && call.flags & CALL_LINK_EVENT == 0 {
-                if cbor::get_int(call.data, 1).ok().flatten() == Some(C_TEST as i64)
-                    && cbor::get_int(call.data, 2).ok().flatten() == Some(M_INFO as i64) {
-                    let mut fields = [0u8; 192];
-                    if let Some(info) = self.info(&mut fields) {
-                        let id = cbor::get_int(call.data, 3).ok().flatten().unwrap_or(0);
-                        let mut answer = [0u8; 240];
-                        let mut w = Writer::new(&mut answer);
-                        w.map(4).uint(1).int(C_TEST as i64).uint(2).int(M_INFO as i64)
-                            .uint(3).int(id).uint(6).raw(info);
-                        if let Some(data) = w.finish() { hw.message(call.from, 0, 0, call.id, data); }
+                if cbor::get_int(call.data, 1).ok().flatten() == Some(C_TEST as i64) {
+                    match cbor::get_int(call.data, 2).ok().flatten() {
+                        Some(m) if m == M_PING as i64 || m == M_PONG as i64 => { self.now_frame(hw, call, m as i32); return CONTINUE; }
+                        _ => {}
                     }
                 }
                 return CONTINUE;
@@ -641,6 +657,17 @@ impl State {
         // SAFETY: the host's own table call
         unsafe { open(hw.ctx(), name.as_ptr(), C_TEST, method) }
     }
+    /// The address of a link for sending, without subscribing: QUIC datagrams reach the module by their envelope (the datagram port), not by link.
+    fn link_addr(&self, hw: &Hw, name: &core::ffi::CStr) -> i32 {
+        let rc = self.link_open(hw, name, 0);
+        if rc >= 0 {
+            if let Some(close) = hw.link().and_then(|l| l.close) {
+                // SAFETY: the host's own table call
+                unsafe { close(hw.ctx(), rc as u32); }
+            }
+        }
+        rc
+    }
 
     // ---- the `espnow` link bench (`start test now [fast]`) ----
 
@@ -660,7 +687,7 @@ impl State {
                 let mut pos = 0;
                 let n = parse_int(value, &mut pos);
                 let max = hw.pkt_info().map_or(0, |(_, max)| max);
-                if n < 12 || n as u32 > max { return ERR_SIZE; }
+                if (n as usize) < NOW_MIN || n as u32 > max { return ERR_SIZE; }
                 self.now_size = n as u32;
             }
         }
@@ -693,7 +720,7 @@ impl State {
 
     /// On the HOST_WIFI of the bench intent: subscribe to the `espnow` link, arm the tick and the guard.
     fn now_begin(&mut self, hw: &Hw) -> i32 {
-        self.now_link = self.link_open(hw, c"espnow", M_NOW_FRAME);
+        self.now_link = self.link_addr(hw, c"espnow");
         self.check(hw, "espnow-open", self.now_link >= xip_abi::ADDR_LINK as i32, self.now_link);
         if self.now_link < xip_abi::ADDR_LINK as i32 { return self.finish(hw); }
         hw.log(b"now: bench started");
@@ -746,7 +773,7 @@ impl State {
         if room < len { hw.pkt_free(pkt); self.now_txerr += 1; return; }
         self.now_seq = self.now_seq.wrapping_add(1);
         // Sole mutable pool lease; the C link writes only framing in headroom.
-        fill_now(unsafe { core::slice::from_raw_parts_mut(ptr, len) }, PING, self.now_seq);
+        if !fill_now(unsafe { core::slice::from_raw_parts_mut(ptr, len) }, M_PING, self.now_seq, self.now_size, true) { hw.pkt_free(pkt); self.now_txerr += 1; return; }
         let rc = hw.send(pkt, len, self.now_link as u32, C_TEST, M_NOW_TXDONE, dest);
         match rc {
             0 => self.now_sent += 1,
@@ -764,35 +791,37 @@ impl State {
         }
     }
 
-    /// A frame of the `espnow` link: a ping is answered with one unicast pong (a fresh packet, only pings are
+    /// A CBOR datagram of the bench (the envelope, delivered on the datagram port): a ping is answered with one unicast pong (a fresh packet, only pings are
     /// answered, so a pair never loops); a pong is only counted.
-    fn now_frame(&mut self, hw: &Hw, call: &CallView) {
-        if call.flags & CALL_LINK == 0 || call.flags & CALL_LINK_EVENT != 0 { return; }
+    fn now_frame(&mut self, hw: &Hw, call: &CallView, method: i32) {
         let data = call.data;
-        if data.len() < 4 || (data[..4] != PING && data[..4] != PONG) { return; }
-        // Ignore intact traffic from a preceding size row. A truncated packet
-        // declaring the current row's size must still fail integrity below.
-        if data.len() >= 12 && u32::from_le_bytes(data[8..12].try_into().unwrap()) != self.now_size { return; }
+        // Ignore intact traffic from a preceding size row. A truncated packet declaring the current row's size must still fail integrity below.
+        if cbor::get_int(data, 4).ok().flatten() != Some(self.now_size as i64) { return; }
         self.now_rx += 1;
-        if !valid_now(data) { self.now_bad += 1; return; }
-        let len = data.len();
+        if !valid_now(data, self.now_size) { self.now_bad += 1; return; }
+        let len = data.len() + NOW_HEADER;
         self.now_min_rx = if self.now_min_rx == 0 { len as u32 } else { self.now_min_rx.min(len as u32) };
         self.now_max_rx = self.now_max_rx.max(len as u32);
         self.now_peer = call.id;
-        if data[..4] == PING {
+        if method == M_PING {
             self.now_valid_ping += 1;
             if self.now_rx_only { return; }
-            let seq = u32::from_le_bytes(data[4..8].try_into().unwrap());
+            let seq = cbor::get_int(data, 3).ok().flatten().unwrap_or(0) as u32;
             if let Ok(p) = hw.pkt_alloc() {
                 let rc = if let Ok((ptr, room)) = hw.pkt_buf(p) {
-                    if room >= len {
-                        // Independent semantic response from validated sequence/length.
-                        fill_now(unsafe { core::slice::from_raw_parts_mut(ptr, len) }, PONG, seq);
-                        hw.send(p, len, self.now_link as u32, 0, 0, call.id)
+                    if room >= data.len() {
+                        // The answer is the bare envelope: the runtime adds the long header (the ping's CIDs swapped) because it holds the request.
+                        if fill_now(unsafe { core::slice::from_raw_parts_mut(ptr, data.len()) }, M_PONG, seq, self.now_size, false) {
+                            hw.send(p, data.len(), self.now_link as u32, 0, 0, call.id)
+                        } else { hw.pkt_free(p); ERR_ARG }
                     } else { hw.pkt_free(p); ERR_SIZE }
                 } else { hw.pkt_free(p); ERR_NOMEM };
                 if rc == 0 { self.now_echo += 1; }
-                else { self.now_txerr += 1; if rc == ERR_BUSY { hw.pkt_free(p); } }
+                else {
+                    self.now_txerr += 1;
+                    if self.now_printed < BENCH_PRINT { self.now_printed += 1; let mut l = Line::new("now: pong failed "); l.int(rc as i64); hw.log(l.bytes()); }
+                    if rc == ERR_BUSY { hw.pkt_free(p); }
+                }
             }
         } else { self.now_pong += 1; }
     }
@@ -866,7 +895,7 @@ impl State {
         hw.log(b"mon: listening");
         if self.now_interval != 0 {
             // the transmit side of the self-reception: the `espnow` link, pings every `interval` ms
-            self.now_link = self.link_open(hw, c"espnow", M_NOW_FRAME);
+            self.now_link = self.link_addr(hw, c"espnow");
             let mut l = Line::new("mon: espnow link ");
             l.int(self.now_link as i64);
             hw.log(l.bytes());
@@ -1133,10 +1162,6 @@ impl Module for State {
                 if call.flags & CALL_LINK != 0 && call.flags & CALL_LINK_EVENT != 0 && event_kind(call.flags) == LINK_EVENT_TX_DONE {
                     if call.value == 0 { self.now_txok += 1; } else { self.now_txerr += 1; }
                 }
-                xip_abi::RET_CONTINUE as i32
-            }
-            M_NOW_FRAME => {
-                self.now_frame(hw, call);
                 xip_abi::RET_CONTINUE as i32
             }
             M_MON_FRAME => {

@@ -2,7 +2,7 @@
 
 Optional experimental QUIC-lite echo endpoint for the C runtime. Start it through
 the module manager; it receives unhandled local QUIC packets on native links.
-Control requests use PPP port 244 and normal compact CBOR envelopes. No start
+Control requests are normal compact CBOR envelopes in 0x444d0002 datagrams (PPP port 0xf7 for dmesh-cli); PPP port 244 carries raw QUIC frames. No start
 parameters. This version is plaintext and unauthenticated: use trusted test peers.
 It does not implement a TCP proxy or an IP tunnel.
 

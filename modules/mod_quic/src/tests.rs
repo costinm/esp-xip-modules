@@ -272,8 +272,7 @@ fn receive(state: &mut State, hw: &Hw, fake: &mut Fake, bytes: &[u8]) {
         time_us: fake.now as u32,
         pkt: h,
         from: ADDR_LINK + 1,
-        id: 1,
-    };
+        id: 1, request_id: None };
     state.handle(hw, &call);
     if fake.held.get(&h).is_some_and(|s| !s.owned) {
         fake.held.remove(&h);
@@ -289,8 +288,7 @@ fn tick(state: &mut State, hw: &Hw) {
         time_us: 0,
         pkt: 0,
         from: 0,
-        id: 0,
-    };
+        id: 0, request_id: None };
     state.handle(hw, &call);
 }
 type ClientPool = HeapPacketPool<16, 1704>;
