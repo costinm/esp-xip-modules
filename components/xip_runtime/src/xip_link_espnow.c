@@ -126,11 +126,21 @@ static bool is_local_source(const uint8_t source[6])
     if (xip_wifi_interface_mac(WIFI_IF_STA, mac) && !memcmp(mac, source, 6)) return true;
     return xip_wifi_ap_only_active() && xip_wifi_interface_mac(WIFI_IF_AP, mac) && !memcmp(mac, source, 6);
 }
-static void deliver(now_state *s, const uint8_t *body, size_t len, const uint8_t source[6])
+static bool nan_sync_body(const uint8_t *body, size_t len)
+{
+    const size_t at = len >= 10 ? 10u + body[9] : len;
+    static const uint8_t magic[5] = {0x40, 0x4e, 0x53, 0x59, 0x31};
+    return at <= len && len - at >= sizeof(magic) && !memcmp(body + at, magic, sizeof(magic));
+}
+static void deliver(now_state *s, const uint8_t *body, size_t len, const uint8_t source[6], int32_t signal, uint32_t time_us)
 {
     if (is_local_source(source)) { COUNT(s, self_echoes); return; }
     xip_link_rx_buf buf;
-    const int rc = xip_link_native_rx_begin_cached(s->link, &buf);
+    /* Reserve only the NSY1 magic for NAN-over-NOW. QUIC's fixed bit alone
+     * is not a discriminator: its packets may also start with 0x40. */
+    const bool nan = nan_sync_body(body, len);
+    const int rc = nan ? xip_port_rx_begin_cached(XIP_PORT_NAN, &buf)
+                       : xip_link_native_rx_begin_cached(s->link, &buf);
     if (rc == 1) return;
     if (rc) { COUNT(s, drops); return; }
     const size_t cap = buf.capacity < XIP_NOW_MAX_PAYLOAD ? buf.capacity : XIP_NOW_MAX_PAYLOAD;
@@ -139,7 +149,9 @@ static void deliver(now_state *s, const uint8_t *body, size_t len, const uint8_t
     COUNT(s, actions);
     /* Commit consumes this reference. Fan-out lends it to consumers; retained
      * packets stay owned by them until send/free. No driver-held RX copy. */
-    xip_link_native_rx_commit(s->link, &buf, (size_t)used, mac_token(source), 0);
+    if (nan) xip_port_rx_commit_radio(s->link, XIP_PORT_NAN, &buf, (size_t)used,
+        mac_token(source), signal, time_us);
+    else xip_link_native_rx_commit(s->link, &buf, (size_t)used, mac_token(source), signal);
 }
 
 /* Registered by the radio owner. Generic STA form legitimately has first word 0. */
@@ -165,10 +177,22 @@ int xip_link_espnow_action_rx(void *context, size_t second, uint8_t *third, uint
         memcpy(source, header + 10, 6); len = (size_t)((uintptr_t)fourth - (uintptr_t)third);
     }
     COUNT(s, dispatcher);
-    deliver(s, body, len, source);
+    deliver(s, body, len, source, 0, (uint32_t)esp_timer_get_time());
     release(s); return 0;
 invalid:
     COUNT(s, invalid); COUNT(s, drops); release(s); return 0;
+}
+
+/* During monitor capture IDF may bypass the private action dispatcher. Only
+ * NSY1 is reserved here; regular NOW/QUIC keeps its existing delivery path.
+ * If both SDK callbacks fire the protocol sees repeated sync observations;
+ * deduplication does not belong to the radio link. */
+bool xip_link_espnow_nan_promisc(const uint8_t *frame, size_t len, int32_t signal, uint32_t time_us)
+{
+    if (len < 24 || frame[0] != 0xd0 || !nan_sync_body(frame + 24, len - 24)) return false;
+    now_state *s = acquire();
+    if (s) { deliver(s, frame + 24, len - 24, frame + 10, signal, time_us); release(s); }
+    return true;
 }
 
 static int action_tx_rx_callback(uint8_t *header, uint8_t *payload, size_t len, uint8_t channel)
@@ -178,7 +202,7 @@ static int action_tx_rx_callback(uint8_t *header, uint8_t *payload, size_t len, 
     if (!s) return 0;
     COUNT(s, tx_response_hook);
     if (!header || !payload || len > ACTION_BODY_MAX) { COUNT(s, invalid); COUNT(s, drops); }
-    else if (xip_rx_accept(header, 24)) deliver(s, payload, len, header + 10);
+    else if (xip_rx_accept(header, 24)) deliver(s, payload, len, header + 10, 0, (uint32_t)esp_timer_get_time());
     /* Parsing is reentrant: there is no global busy latch for a rejected
      * frame to strand, and every callback releases its lifetime reference. */
     release(s); return 0;
@@ -217,16 +241,21 @@ static int transmit(now_state *s, const uint8_t destination[6], const xip_link_p
     int result = XIP_ERR_IO;
     if (!xip_wifi_current_channel(&channel, &secondary)) return XIP_ERR_IO;
     r->channel = channel; r->sec_channel = secondary;
-    r->wait_time_ms = NOW_ACTION_TX_WAIT_MS;
     static const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-    r->no_ack = !memcmp(destination, broadcast, 6) || !atomic_load(&mac_ack_enabled);
+    const bool group = !memcmp(destination, broadcast, 6);
+    r->no_ack = group || !atomic_load(&mac_ack_enabled);
+    /* A broadcast has no response to await. Keep its SDK channel operation
+     * inside a short transmit opportunity rather than holding it across the
+     * next NAN DW. Native NOW RX is independently armed by the radio owner.
+     * Unicast retains the existing response window. */
+    r->wait_time_ms = group ? 10 : NOW_ACTION_TX_WAIT_MS;
     r->rx_cb = action_tx_rx_callback;
     memcpy(r->bssid, broadcast, 6);
     r->data_len = (uint32_t)(prefix + pkt->len);
     /* ESP-IDF has no tx_by_ref for raw action frames. Its synchronous API
      * allocates/copies internally; there is nothing we can avoid on our side
      * for now. The original pool lease remains the only adapter buffer. */
-    const esp_err_t sent = esp_wifi_action_tx_req(r);
+    const esp_err_t sent = xip_wifi_action_tx_req(r);
     LAST_ERROR(s, sent);
     if (sent == ESP_OK) { COUNT(s, tx); result = XIP_LINK_TX_DONE; }
     else { COUNT(s, tx_failures); result = sent == ESP_ERR_NO_MEM ? XIP_ERR_BUSY : XIP_ERR_IO; }

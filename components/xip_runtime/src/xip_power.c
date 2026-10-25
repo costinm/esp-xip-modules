@@ -39,7 +39,11 @@
  *   There is deliberately no option to force a physical sleep on USB. If someone needs to look at it again, the experiment is: build with the soft test removed,
  *   use a board you can replug, and expect to lose the USB port.
  *
- * Runs on the host worker. The Rust twin of the radio steps is crates/xip-runtime-esp/src/wifi.rs (power_suspend / power_resume); this file is shared by both runtimes. */
+ * TODO: coordinate USB shutdown/re-enumeration with the host so physical sleep
+ * can be supported there. Evaluate USB mode changes, including CDC Ethernet;
+ * retain the soft path until host recovery has explicit device-side proof.
+ *
+ * Runs on the host worker; the C Wi-Fi owner supplies suspend/resume. */
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -53,6 +57,7 @@
 #include "freertos/task.h"
 #include "xip_runtime.h"
 #include "xip_wifi.h"
+#include "xip_cbor.h"
 #include "internal.h"
 
 #define MIN_SLEEP_MS 10
@@ -62,7 +67,15 @@
 #define PM_MAX_MHZ 160
 
 /* BEGIN ACTIVITY WINDOW: monotonic milliseconds, no task/timer allocation. */
-static atomic_uint active_until_ms;
+static atomic_uint active_until_ms, activity_seq;
+static _Atomic(TaskHandle_t) sleep_task;
+static void signal_activity(void)
+{
+    atomic_fetch_add(&activity_seq, 1);
+    TaskHandle_t task = atomic_load(&sleep_task);
+    if (task) xTaskNotifyGive(task);
+    xip_host_wake_window_value(8);
+}
 static uint32_t activity_now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 uint32_t xip_power_active_remaining_ms(void)
 {
@@ -76,6 +89,7 @@ uint32_t xip_power_active_remaining_ms(void)
 void xip_power_activate(uint32_t ms)
 {
     if (!ms) return;
+    signal_activity();
     if (ms > INT32_MAX) ms = INT32_MAX;
     uint32_t now = activity_now_ms(), next = now + ms;
     if (!next) next = 1; /* zero is the inactive sentinel */
@@ -84,6 +98,24 @@ void xip_power_activate(uint32_t ms)
         if (current && (int32_t)(current - now) > 0 && (int32_t)(current - next) >= 0) return;
         if (atomic_compare_exchange_weak(&active_until_ms, &current, next)) return;
     }
+}
+/* Temporary module work is separate from UART/explicit active-mode intent.
+ * One wrap-safe monotonic deadline, no per-module allocations or vote table. */
+static atomic_uint work_until_ms;
+int xip_power_awake_for(uint32_t ms)
+{
+    if (ms > 300000) return XIP_ERR_ARG;
+    const uint32_t now = activity_now_ms();
+    unsigned current = atomic_load(&work_until_ms);
+    if (ms) {
+        uint32_t next = now + ms;
+        if (!next) next = 1;
+        for (;;) {
+            if (current && (int32_t)(current - now) > 0 && (int32_t)(current - next) >= 0) break;
+            if (atomic_compare_exchange_weak(&work_until_ms, &current, next)) { current = next; break; }
+        }
+    }
+    return current && (int32_t)(current - now) > 0 ? (int32_t)(current - now) : 0;
 }
 void xip_power_clear_activity(void) { atomic_store(&active_until_ms, 0); }
 /* END ACTIVITY WINDOW */
@@ -94,12 +126,59 @@ static atomic_bool busy;
 static atomic_uchar state_now;
 static atomic_ushort left;
 static atomic_uint duration_ms, awake_ms;
-static atomic_uint attempts, entries, skipped, last_requested, last_duration, last_resume;
-static atomic_uchar wake_cause, soft_now;
+/* All power measurements have one owner; no module-sized idle diagnostics. */
+static struct {
+    atomic_uint attempts, entries, skipped, last_requested, last_duration, last_resume;
+    atomic_uchar wake_cause, soft_now;
+    atomic_bool physical;
+} metrics;
 static esp_timer_handle_t awake_timer;
 static bool pm_done;
+/* Admission is serialized on the module worker; only UART activity is concurrent. */
+static uint32_t request_owner, request_activity, request_flags, request_wifi_generation;
+static uint32_t current_wifi_generation(void) {
+    xip_wifi_intent intent = {.size = sizeof(intent)}; uint32_t generation = 0;
+    (void)xip_wifi_get_intent(&intent, &generation); return generation;
+}
+static uint64_t request_deadline;
+
+static void trace_boundary(unsigned phase, unsigned cause)
+{
+    if (!(request_flags & XIP_POWER_TRACE_UART)) return;
+    uint8_t out[80];
+    xip_cbor_w w; xip_cbor_init(&w, out, sizeof(out));
+    xip_cbor_map(&w, 11);
+    xip_cbor_uint(&w, 1); xip_cbor_uint(&w, phase);
+    xip_cbor_uint(&w, 2); xip_cbor_uint(&w, esp_timer_get_time());
+    xip_cbor_uint(&w, 3); xip_cbor_uint(&w, cause);
+    xip_cbor_uint(&w, 4); xip_cbor_uint(&w, atomic_load(&metrics.last_requested));
+    xip_cbor_uint(&w, 5); xip_cbor_uint(&w, phase ? atomic_load(&metrics.last_duration) : 0);
+    xip_cbor_uint(&w, 6); xip_cbor_uint(&w, phase ? atomic_load(&metrics.last_resume) : 0);
+    xip_cbor_uint(&w, 7); xip_cbor_bool(&w, atomic_load(&metrics.soft_now));
+    xip_cbor_uint(&w, 8); xip_cbor_bool(&w, phase && atomic_load(&metrics.physical));
+    xip_cbor_uint(&w, 9); xip_cbor_uint(&w, atomic_load(&metrics.entries));
+    xip_cbor_uint(&w, 10); xip_cbor_uint(&w, atomic_load(&metrics.skipped));
+    xip_cbor_uint(&w, 11); xip_cbor_uint(&w, xip_host_network_sockets());
+    int n = xip_cbor_done(&w);
+    if (n > 0) (void)xip_serial_write_frame(250, out, (size_t)n);
+}
+
+int xip_power_cancel(uint32_t owner)
+{
+    if (request_owner != owner) return XIP_ERR_NOTFOUND;
+    atomic_store(&left, 0);
+    if (awake_timer) (void)esp_timer_stop(awake_timer);
+    atomic_store(&busy, false);
+    atomic_store(&state_now, XIP_POWER_IDLE);
+    request_owner = 0;
+    return XIP_OK;
+}
 
 void xip_power_set_radio(const xip_power_radio *r) { radio = r ? *r : (xip_power_radio){0}; }
+
+/* BLE's part of a sleep (xip_ble.c): it goes outside the radio's suspend and resume, and it may veto. */
+static const xip_power_ble *ble_hooks;
+void xip_power_set_ble(const xip_power_ble *b) { ble_hooks = b; }
 
 /* Frequency scaling needs the PM configured once; light sleep stays explicit (the timer sleep below), as DMesh's Active profile. */
 static void configure_pm(void)
@@ -124,61 +203,90 @@ static void rearm_uart(void)
 static void post_next(void *arg)
 {
     (void)arg;
-    xip_power_post();
+    if (xip_power_post() < 0) {
+        atomic_store(&left, 0);
+        atomic_store(&busy, false);
+        atomic_store(&state_now, XIP_POWER_IDLE);
+        xip_host_wake_window_value(-1);
+    }
 }
 
-/* One cycle, on the worker. */
+/* One cycle, on the worker. UART RX continues on its own task. */
 void xip_power_cycle(void)
 {
     if (!atomic_load(&left)) { atomic_store(&state_now, XIP_POWER_IDLE); atomic_store(&busy, false); return; }
     configure_pm();
-    const uint64_t asked_us = (uint64_t)atomic_load(&duration_ms) * 1000;
+    const uint64_t relative_us = (uint64_t)atomic_load(&duration_ms) * 1000;
+    const bool coordinated = request_deadline != 0;
+    /* A stale queued request or activity since admission cannot shut down Wi-Fi. */
+    if ((coordinated && (request_activity != atomic_load(&activity_seq) || xip_power_active_remaining_ms() || request_wifi_generation != current_wifi_generation())) || xip_power_awake_for(0)) {
+        atomic_store(&left, 0); atomic_store(&busy, false);
+        xip_host_wake_window_value(xip_power_active_remaining_ms() ? 8 : 4);
+        return;
+    }
+    atomic_fetch_add(&metrics.attempts, 1);
+    atomic_store(&metrics.last_requested, coordinated ? (uint32_t)(request_deadline > (uint64_t)esp_timer_get_time()
+        ? request_deadline - esp_timer_get_time() : 0) : (uint32_t)relative_us);
+    atomic_store(&metrics.soft_now, xip_serial_usb_active());
+    atomic_store(&metrics.physical, false);
+    atomic_store(&metrics.last_duration, 0);
+    atomic_store(&metrics.last_resume, 0);
+    if (ble_hooks && ble_hooks->suspend && ble_hooks->suspend() < 0) goto rejected;
+    trace_boundary(0, 0);
+    if (xip_serial_drain() < 0) {
+        if (ble_hooks && ble_hooks->resume) (void)ble_hooks->resume();
+        goto rejected;
+    }
     const bool had_radio = radio.suspend && radio.suspend();
     atomic_store(&state_now, XIP_POWER_SLEEPING);
-    atomic_fetch_add(&attempts, 1);
-    atomic_store(&last_requested, (uint32_t)asked_us);
-    /* Soft sleep while a host is attached to the USB-Serial/JTAG console: a physical sleep disconnects the port and the host does not recover it
-     * (see the header: the bench results, DMesh's usb_jtag_debug_hold, and why this is accepted). UART console, or no host attached: physical. */
-    const bool soft = xip_serial_usb_active();
-    atomic_store(&soft_now, soft);
+    const bool soft = atomic_load(&metrics.soft_now);
     esp_err_t rc = ESP_OK;
-    int64_t before = esp_timer_get_time(), after = before;
-    if (soft) {
-        vTaskDelay(pdMS_TO_TICKS(atomic_load(&duration_ms)));
-        after = esp_timer_get_time();
+    const int64_t before = esp_timer_get_time();
+    const uint64_t asked_us = coordinated
+        ? (request_deadline > (uint64_t)before ? request_deadline - before : 0) : relative_us;
+    uint8_t cause = 4;
+    bool waited = false;
+    /* Publish the waiter before checking activity, closing the soft-sleep RX race. */
+    (void)ulTaskNotifyTake(pdTRUE, 0);
+    atomic_store(&sleep_task, xTaskGetCurrentTaskHandle());
+    if ((coordinated && (request_activity != atomic_load(&activity_seq) || xip_power_active_remaining_ms() || request_wifi_generation != current_wifi_generation())) || xip_power_awake_for(0)) {
+        cause = xip_power_active_remaining_ms() ? 8 : 4;
+    } else if (asked_us < MIN_SLEEP_MS * 1000) {
+        rc = ESP_ERR_INVALID_STATE;
+    } else if (soft) {
+        waited = true;
+        TickType_t ticks = pdMS_TO_TICKS((asked_us + 999) / 1000);
+        if (ulTaskNotifyTake(pdTRUE, ticks ? ticks : 1)) cause = 8;
     } else {
         rc = esp_sleep_enable_timer_wakeup(asked_us);
         if (rc == ESP_OK) {
+            waited = true;
             rc = esp_light_sleep_start();
-            after = esp_timer_get_time();
+            const uint32_t causes = esp_sleep_get_wakeup_causes();
+            cause = 0;
+            /* UART wins over a simultaneous timer: the user requested awake. */
+            if (causes & (1u << ESP_SLEEP_WAKEUP_UART)) cause = 8;
+            else for (uint8_t b = 1; b < 32 && !cause; b++) if (causes & (1u << b)) cause = b;
         }
     }
-    atomic_store(&last_duration, (uint32_t)(after - before));
-    if (!soft) {   /* a bit mask of causes (1 << esp_sleep_wakeup_cause_t); report the lowest */
-        const uint32_t causes = esp_sleep_get_wakeup_causes();
-        uint8_t c = 0;
-        for (uint8_t b = 1; b < 32 && !c; b++) if (causes & (1u << b)) c = b;
-        atomic_store(&wake_cause, c);
-    }
-    if (rc == ESP_OK) atomic_fetch_add(&entries, 1);
-    else atomic_fetch_add(&skipped, 1);
+    atomic_store(&sleep_task, NULL);
+    atomic_store(&metrics.last_duration, (uint32_t)(esp_timer_get_time() - before));
+    atomic_store(&metrics.wake_cause, cause);
+    atomic_store(&metrics.physical, waited && !soft && rc == ESP_OK);
+    if (rc == ESP_OK && waited) atomic_fetch_add(&metrics.entries, 1);
+    else if (rc != ESP_OK) atomic_fetch_add(&metrics.skipped, 1);
     if (!soft) rearm_uart();
     atomic_store(&state_now, XIP_POWER_RESUMING);
     const int64_t resume_start = esp_timer_get_time();
     if (had_radio && radio.resume) radio.resume();
-    atomic_store(&last_resume, (uint32_t)(esp_timer_get_time() - resume_start));
-    if (rc != ESP_OK) {              /* not a wake: restored once, and no more cycles */
-        atomic_store(&left, 0);
-        atomic_store(&state_now, XIP_POWER_IDLE);
-        atomic_store(&busy, false);
-        return;
-    }
-    atomic_fetch_sub(&left, 1);
-    /* A wake that is not the timer (a person on the UART, a GPIO) swaps the device to active, as DMesh: the rest of the request is dropped and the module,
-     * which gets the cause as the value of HOST_WAKE, decides what follows. */
-    const uint8_t cause = soft ? 4 : atomic_load(&wake_cause);
-    if (cause != 4) atomic_store(&left, 0);
-    xip_host_wake_window_value(cause);   /* HOST_WAKE to the modules with a window alarm */
+    if (ble_hooks && ble_hooks->resume) (void)ble_hooks->resume();
+    atomic_store(&metrics.last_resume, (uint32_t)(esp_timer_get_time() - resume_start));
+    trace_boundary(rc == ESP_OK ? 1 : 2, cause);
+    if (rc != ESP_OK || cause != 4) atomic_store(&left, 0);
+    else atomic_fetch_sub(&left, 1);
+    /* Even a rejected request notifies the policy, so it can fall back to awake
+     * instead of repeatedly stopping/starting the radio against a PM veto. */
+    xip_host_wake_window_value(rc == ESP_OK ? cause : -1);
     if (!atomic_load(&left)) {
         atomic_store(&state_now, XIP_POWER_IDLE);
         atomic_store(&busy, false);
@@ -190,18 +298,49 @@ void xip_power_cycle(void)
         if (esp_timer_create(&args, &awake_timer) != ESP_OK) { atomic_store(&left, 0); atomic_store(&busy, false); return; }
     }
     (void)esp_timer_start_once(awake_timer, (uint64_t)atomic_load(&awake_ms) * 1000);
+    return;
+rejected:
+    atomic_fetch_add(&metrics.skipped, 1);
+    trace_boundary(2, 0);
+    atomic_store(&left, 0);
+    atomic_store(&state_now, XIP_POWER_IDLE);
+    atomic_store(&busy, false);
+    xip_host_wake_window_value(-1);
 }
 
-int xip_power_request(const xip_power_sleep *req)
+int xip_power_request(const xip_power_sleep *req, uint32_t owner)
 {
     if (!req || req->size < sizeof(*req) || req->duration_ms < MIN_SLEEP_MS) return XIP_ERR_ARG;
-    if (atomic_exchange(&busy, true)) return XIP_ERR_BUSY;
+    if (xip_power_awake_for(0) || atomic_exchange(&busy, true)) return XIP_ERR_BUSY;
+    request_owner = owner;
+    request_deadline = 0;
+    request_flags = 0;
+    request_activity = atomic_load(&activity_seq);
     atomic_store(&duration_ms, req->duration_ms);
     atomic_store(&awake_ms, req->awake_ms ? req->awake_ms : DEFAULT_AWAKE_MS);
     atomic_store(&left, req->cycles ? req->cycles : 1);
     atomic_store(&state_now, XIP_POWER_AWAKE);
-    xip_power_post();
-    return XIP_OK;
+    int rc = xip_power_post();
+    if (rc < 0) (void)xip_power_cancel(owner);
+    return rc;
+}
+
+int xip_power_until(uint32_t owner, uint64_t wake_at_us, uint32_t flags)
+{
+    const uint64_t now = esp_timer_get_time();
+    if ((flags & ~XIP_POWER_TRACE_UART) || wake_at_us < now + MIN_SLEEP_MS * 1000 || wake_at_us - now > UINT32_MAX) return XIP_ERR_ARG;
+    if (xip_power_active_remaining_ms() || xip_power_awake_for(0)) return XIP_ERR_BUSY;
+    if (atomic_exchange(&busy, true)) return XIP_ERR_BUSY;
+    request_owner = owner;
+    request_activity = atomic_load(&activity_seq);
+    request_wifi_generation = current_wifi_generation();
+    request_deadline = wake_at_us;
+    request_flags = flags;
+    atomic_store(&left, 1);
+    atomic_store(&state_now, XIP_POWER_AWAKE);
+    int rc = xip_power_post();
+    if (rc < 0) (void)xip_power_cancel(owner);
+    return rc;
 }
 
 int xip_power_get_info(xip_power_info *i)
@@ -212,15 +351,16 @@ int xip_power_get_info(xip_power_info *i)
     i->size = size;
     i->state = atomic_load(&state_now);
     i->active_window = xip_power_active_remaining_ms() != 0;
+    i->ip_sockets = xip_host_network_sockets();
     i->cycles_left = atomic_load(&left);
-    i->wake_cause = atomic_load(&wake_cause);
-        i->soft_sleep = atomic_load(&soft_now);       /* how the last sleep was done */
-    i->sleep_attempts = atomic_load(&attempts);
-    i->sleep_entries = atomic_load(&entries);
-    i->sleep_skipped = atomic_load(&skipped);
-    i->last_requested_us = atomic_load(&last_requested);
-    i->last_duration_us = atomic_load(&last_duration);
-    i->last_resume_us = atomic_load(&last_resume);
+    i->wake_cause = atomic_load(&metrics.wake_cause);
+    i->soft_sleep = atomic_load(&metrics.soft_now);       /* how the last sleep was done */
+    i->sleep_attempts = atomic_load(&metrics.attempts);
+    i->sleep_entries = atomic_load(&metrics.entries);
+    i->sleep_skipped = atomic_load(&metrics.skipped);
+    i->last_requested_us = atomic_load(&metrics.last_requested);
+    i->last_duration_us = atomic_load(&metrics.last_duration);
+    i->last_resume_us = atomic_load(&metrics.last_resume);
     i->tick_hz = configTICK_RATE_HZ;
     i->tasks = uxTaskGetNumberOfTasks();
     i->ticks = (uint32_t)xTaskGetTickCount();

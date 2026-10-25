@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include "lwip/sockets.h"
 #include "xip_lwip_io.h"
+#include "internal.h"
 
 #define IO_SLOTS 12
 #define IO_STACK 6144
@@ -154,7 +155,10 @@ static bool poll_once(bool *thread_initialized)
     io_entry snapshots[IO_SLOTS];
     struct pollfd fds[IO_SLOTS];
     unsigned count=0;
-    bool netif=esp_netif_next_unsafe(NULL) != NULL;
+    /* Native raw-IP interfaces join lwIP directly, not esp_netif's Wi-Fi
+     * registry. Runtime readiness includes them; keep the registry fallback
+     * for externally owned legacy adapters. */
+    bool netif=xip_connected() || esp_netif_next_unsafe(NULL) != NULL;
     if (netif && !*thread_initialized) {
         lwip_socket_thread_init(); *thread_initialized=true;
     }

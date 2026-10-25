@@ -9,6 +9,7 @@
 #include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "xip_runtime.h"
+#include "xip_envelope.h"
 
 #define XIP_IRQ_SLOTS 8
 #define XIP_SPI_DEVICES 4
@@ -35,6 +36,10 @@ typedef struct {
 } xip_spi_dev_t;
 
 void xip_periph_reserve(uint64_t mask);
+/* xip_quic_udp.c: start the receive on the default QUIC UDP port when the application sets its receive function. */
+void xip_quic_udp_ensure(void);
+void xip_quic_udp_stop(void);
+unsigned xip_quic_udp_sockets(void);
 /* xip_events.c: the CBOR of the Wi-Fi state, heap_info and heap_dump (the events ring went: events are messages, routed later) */
 int xip_wifi_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap);
 int xip_heap_dump(int kind);
@@ -102,6 +107,7 @@ struct xip_instance {
     xip_held held;             /* packets this module owns, and the one the current call lent it */
     struct { int16_t slot; uint16_t start, len; int32_t component, method; uint32_t from; uint64_t id; int32_t value; uint32_t lflags, time_us; } pkt_in[CONFIG_XIP_PKT_INBOX];
     uint8_t pkt_head, pkt_count;  /* the ring of packets waiting for this module (under the registry lock) */
+    xip_env_table env;            /* envelope requests handed to the module whose answer the runtime still wraps (registry lock) */
 };
 
 /* xip_runtime.c */
@@ -125,8 +131,13 @@ int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap);
 #define XIP_POWER_RESUMING 2
 #define XIP_POWER_AWAKE 3
 void xip_power_cycle(void);
-void xip_power_post(void);
-int xip_power_request(const xip_power_sleep *req);
+int xip_power_post(void);
+int xip_power_request(const xip_power_sleep *req, uint32_t owner);
+int xip_power_until(uint32_t owner, uint64_t wake_at_us, uint32_t flags);
+int xip_power_cancel(uint32_t owner);
 int xip_power_get_info(xip_power_info *info);
 int xip_power_dump(int kind);
 int xip_heap_dump(int kind);
+
+/* Shared temporary awake deadline; zero queries remaining milliseconds. */
+int xip_power_awake_for(uint32_t duration_ms);

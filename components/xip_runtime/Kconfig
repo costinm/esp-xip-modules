@@ -83,4 +83,18 @@ menu "esp-xip-modules host"
         help
             An SX126x read of a 255-byte packet needs 255 + 4.
 
+    config XIP_QUIC_UDP
+        bool "Receive QUIC datagrams on the default UDP port for the application"
+        default y
+        help
+            In active IP mode, deliver UDP datagrams to the common QUIC receive function (xip_quic_rx_set),
+            unparsed, as frames of the link "udp". Uses the shared readiness owner; no private task or receive buffer.
+            Standalone NAN/NOW operation has no listener. Off: no socket.
+
+    config XIP_QUIC_UDP_PORT
+        int "Default UDP port of QUIC packets"
+        depends on XIP_QUIC_UDP
+        default 3339
+
+
 endmenu

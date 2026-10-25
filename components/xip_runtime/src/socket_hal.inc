@@ -67,11 +67,20 @@ static int socket_ready(int fd,int16_t events,uint32_t expected)
     }
     xSemaphoreGive(sockets_lock);return rc;
 }
-static void socket_delivered(uint32_t handle)
+static void socket_delivered(uint32_t handle,int event)
 {
     if(!sockets_lock)return;
     xSemaphoreTake(sockets_lock,portMAX_DELAY);
-    for(sock_node *s=sockets;s;s=s->next)if(s->handle==handle)s->pending=false;
+    for(sock_node *s=sockets;s;s=s->next)if(s->handle==handle){
+        s->pending=false;
+        /* Readiness can arrive while OPEN/WRITE_DONE waits in the worker inbox.
+         * That callback suspends the watch but cannot enqueue another event.
+         * These notifications need no read/write call from their consumer, so
+         * restore read interest when delivered. READABLE retains explicit
+         * consumer rearming through socket_read (backpressure). */
+        if(event==XIP_SOCKET_EVENT_OPEN || event==XIP_SOCKET_EVENT_WRITE_DONE)
+            c_poll_update(s->watch,s->fd,POLLIN|(s->tx_slot>=0?POLLOUT:0));
+    }
     xSemaphoreGive(sockets_lock);
 }
 static void socket_destroy(sock_node **link)
@@ -93,13 +102,48 @@ static int h_tcp_accept(void *u,uint16_t port,uint32_t mode,int32_t c,int32_t m,
     if(mode!=XIP_SOCKET_MODE_DIRECT)return XIP_ERR_UNSUPPORTED;
     if(!sockets_lock)sockets_lock=xSemaphoreCreateMutex();
     if(!sockets_lock)return XIP_ERR_NOMEM;
-    esp_netif_init();int fd=lwip_socket(AF_INET6,SOCK_STREAM,0);if(fd<0)return XIP_ERR_IO;
+    esp_err_t rc=esp_netif_init();
+    if(rc!=ESP_OK && rc!=ESP_ERR_INVALID_STATE)return XIP_ERR_IO;
+    /* IDF requires a valid per-thread netconn semaphore. A UART-only boot
+     * has not passed through a Wi-Fi/socket adapter that initializes it. */
+    lwip_socket_thread_init();
+    int fd=lwip_socket(AF_INET6,SOCK_STREAM,0);if(fd<0)return XIP_ERR_IO;
     struct sockaddr_in6 addr={.sin6_len=sizeof(addr),.sin6_family=AF_INET6,.sin6_port=htons(port)};
     if(lwip_fcntl(fd,F_SETFL,O_NONBLOCK)<0 || lwip_bind(fd,(struct sockaddr *)&addr,sizeof(addr))<0 || lwip_listen(fd,2)<0){lwip_close(fd);return XIP_ERR_IO;}
     xSemaphoreTake(sockets_lock,portMAX_DELAY);
     sock_node *s=socket_add(fd,I(u)->id,true,c,m);
     if(s)*handle=s->handle;
     xSemaphoreGive(sockets_lock);if(!s){lwip_close(fd);return XIP_ERR_NOMEM;}return 0;
+}
+static void socket_network_down(void)
+{
+    if(!sockets_lock)return;
+    xSemaphoreTake(sockets_lock,portMAX_DELAY);
+    while(sockets){
+        if(!sockets->listener)(void)socket_event(sockets,XIP_SOCKET_EVENT_CLOSED);
+        socket_destroy(&sockets);
+    }
+    xSemaphoreGive(sockets_lock);
+}
+/* Declarative listeners wait for an interface. In particular, starting the
+ * PPP console on an unprovisioned/standalone NOW device must not initialize
+ * TCP/IP just to bind a TCP service nobody can reach. HOST_NETWORK retries. */
+static void stream_accept(struct xip_instance *in)
+{
+    if(!in->stream)return;
+    /* A worker-owned radio publishes its active IP state. Legacy external
+     * owners retain eager registration until they adopt that contract. */
+    if(hooks.wifi_reconcile && !xip_connected())return;
+    if(sockets_lock){
+        bool exists=false;
+        xSemaphoreTake(sockets_lock,portMAX_DELAY);
+        for(sock_node *s=sockets;s;s=s->next)exists|=s->owner==in->id && s->listener;
+        xSemaphoreGive(sockets_lock);
+        if(exists)return;
+    }
+    uint32_t listener;
+    int rc=h_tcp_accept(in,(uint16_t)(XIP_PORT_NET+in->stream),XIP_SOCKET_MODE_DIRECT,in->component,0,&listener);
+    if(rc)ESP_LOGW(TAG,"%s: stream port %u not listening: %d",in->name,(unsigned)in->stream,rc);
 }
 static int h_socket_read(void *u,uint32_t handle,uint8_t *out,size_t len)
 {

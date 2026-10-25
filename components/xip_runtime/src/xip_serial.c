@@ -169,14 +169,22 @@ static void chunk(const uint8_t *buf, int n)
     else if (codec && codec->on_bytes) codec->on_bytes(buf, (size_t)n);
 }
 
-int xip_serial_write_frame(uint32_t port, const void *data, size_t len)
+static int write_frame(uint32_t port, const void *data, size_t len)
 {
-    if (s.client.on_bytes && !s.packets.rx_begin) return XIP_ERR_UNSUPPORTED;
     if (!s.frame_lock || xSemaphoreTake(s.frame_lock, portMAX_DELAY) != pdTRUE) return XIP_ERR_BUSY;
     int rc = codec && codec->tx ? codec->tx(port, data, len) : xip_serial_write(data, len);
     xSemaphoreGive(s.frame_lock);
     if (!atomic_load(&s.tx_state)) packet_event(7, 1);
     return rc;
+}
+
+/* Native module PPP is synchronous. A packet client must use the one
+ * ownership-bearing admission slot; no caller may bypass it with a borrowed
+ * frame while an accepted packet is waiting/sending. */
+int xip_serial_write_frame(uint32_t port, const void *data, size_t len)
+{
+    if (s.client.on_bytes) return XIP_ERR_UNSUPPORTED;
+    return write_frame(port, data, len);
 }
 
 /* One pool writer per received frame, from the module pool or an application's
@@ -231,7 +239,7 @@ static void packet_tx(void *ctx)
     unsigned expected = 2;
     if (!atomic_compare_exchange_strong(&s.tx_state, &expected, 3)) return;
     xip_serial_packet_tx packet = s.sending;
-    int rc = xip_serial_write_frame(packet.port, packet.data, packet.len);
+    int rc = write_frame(packet.port, packet.data, packet.len);
     /* Complete while admission is closed: the callback destroys the typed
      * token. Only then publish free and wake a sender that observed busy. */
     packet.complete(packet.owner, rc);
@@ -355,6 +363,16 @@ static void serial_tx_task(void *arg)
 }
 
 void xip_serial_tx_ready(void) { if (s.tx_task) xTaskNotifyGive(s.tx_task); }
+
+int xip_serial_drain(void)
+{
+    if (!s.running || s.stop) return XIP_ERR_NOTFOUND;
+    if (atomic_load(&s.tx_state)) return XIP_ERR_BUSY;
+#if CONFIG_IDF_TARGET_ESP32C6
+    if (s.usb) return XIP_OK;
+#endif
+    return uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(100)) == ESP_OK ? XIP_OK : XIP_ERR_IO;
+}
 
 int xip_serial_buffered_bytes(size_t *bytes)
 {

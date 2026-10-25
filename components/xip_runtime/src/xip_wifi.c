@@ -74,6 +74,7 @@ int xip_wifi_nv(const char *key, size_t key_len, const uint8_t *value, size_t va
     static const struct { const char *name, *nvs_key; uint16_t lo, hi; } keys[] = {
         {"wifi.rx_static", "rx_static", 2, 64}, {"wifi.rx_dynamic", "rx_dynamic", 2, 128},
         {"wifi.tx_dynamic", "tx_dynamic", 4, 128}, {"wifi.rx_ba", "rx_ba", 2, 64},
+        {"ble.boot", "ble_boot", 0, 1},   /* the BLE component starts at boot (module ble, main.c) */
     };
     if (!key || (!value && !out)) return -1;
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
@@ -199,6 +200,8 @@ static bool connected;                /* the station has an address */
 static bool associated;               /* the station is associated (the driver's transition is the authority) */
 static bool owner_disconnect_pending;
 static bool want_sta, ap_enabled;
+static bool auto_reconnect = true;
+int xip_wifi_auto_reconnect(bool enabled) { bool old = auto_reconnect; auto_reconnect = enabled; return old; }
 static bool scan_only, scanning, scan_done;
 static char active_ssid[33];
 /* the driver epoch: it stays initialized across radio epochs; a changed pre-start policy (AMPDU, 11b rates) is consumed by a full re-init */
@@ -276,9 +279,12 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t event, void 
         ensure_link_local(sta_netif);
     } else if (base == WIFI_EVENT && event == WIFI_EVENT_AP_START) {
         ensure_link_local(ap_netif);
+        if (ap_enabled) xip_host_set_connected(true);
     } else if (base == WIFI_EVENT && event == WIFI_EVENT_STA_CONNECTED) {
+        if (!want_sta) return; /* stale association after a switch to NOW-only */
         ensure_link_local(sta_netif);
         associated = true;
+        xip_host_set_connected(true);
         if (data) xip_rx_filter_bssid(((wifi_event_sta_connected_t *)data)->bssid);
     } else if (base == WIFI_EVENT && event == WIFI_EVENT_STA_DISCONNECTED) {
         uint8_t reason = data ? ((wifi_event_sta_disconnected_t *)data)->reason : 0;
@@ -286,11 +292,12 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t event, void 
         owner_disconnect_pending = false;
         bool intentional = reason == REASON_STA_LEAVING || (owner_leave && (reason == 3 || reason == 8));
         associated = connected = false;
+        if (!ap_enabled) xip_host_set_connected(false);
         xip_rx_filter_bssid(NULL);
         /* DMesh's Main decides when to look for the network again; the simple owner retries the configured one */
-        if (!intentional && started && want_sta) esp_wifi_connect();
+        if (!intentional && started && want_sta && auto_reconnect) esp_wifi_connect();
     } else if (base == IP_EVENT && event == IP_EVENT_STA_GOT_IP) {
-        connected = true;
+        if (want_sta) connected = true;
     }
 }
 
@@ -384,9 +391,8 @@ static void wifi_down(void);
  * (no ESP-NOW, the modem power save on instead): ESPNOW.md "Radio states", the same states in DMesh's transport
  * (whose product policy keeps the modem awake even in the plain station). ESP-NOW (xip_link_espnow.c) runs
  * with the radio when the intent wants it and needs the modem awake for it (power save below); the AP is a small
- * extra on top. The earlier hook-only setup required AP for unassociated RX;
- * the native connectionless initialization below reproduces the missing SDK
- * setup before the next AP-free receive experiment. */
+ * extra on top. NOW-only initialization below supplies the native connectionless
+ * wake-window vote; AP-free receive is confirmed on C6 without ROC. */
 /* BEGIN NOW RADIO SETUP: native SDK-boundary tests compile this exact region. */
 /* Pinned IDF 6.0.2 private entry points, as called by esp_now_init/mt_init.
  * The lower vendor-spec callback used by mt_init reassembles IE data and would
@@ -432,6 +438,18 @@ int xip_wifi_now_enable(int (*callback)(void *, size_t, uint8_t *, uint8_t *), b
     return XIP_OK;
 }
 /* END NOW RADIO SETUP */
+
+/* Modules control capture policy; submission briefly yields that capture to
+ * the driver and restores it before returning. No protocol work here. */
+esp_err_t xip_wifi_action_tx_req(wifi_action_tx_req_t *request)
+{
+    bool monitor = false;
+    (void)esp_wifi_get_promiscuous(&monitor);
+    if (monitor && esp_wifi_set_promiscuous(false) != ESP_OK) return ESP_FAIL;
+    esp_err_t rc = esp_wifi_action_tx_req(request);
+    if (monitor && esp_wifi_set_promiscuous(true) != ESP_OK && rc == ESP_OK) return ESP_FAIL;
+    return rc;
+}
 
 static int start_now(bool now_only)
 {
@@ -490,6 +508,7 @@ static int wifi_up(const xip_wifi_intent *p, const xip_wifi_tuning *tuning)
     /* after init and before start; it includes the negotiated legacy/basic-rate set, so it is never applied to a running driver */
     if (!driver_running && esp_wifi_config_11b_rate(WIFI_IF_STA, rates_11b_disabled) != ESP_OK) return -3;
     associated = connected = false;
+    want_sta = sta; ap_enabled = ap;
     rc = start_driver_once();
     if (rc != ESP_OK && rc != ESP_ERR_INVALID_STATE) return -3;
     if (!set_bssid_check_disabled(0, bssid_check_disabled)) return -3;
@@ -524,6 +543,7 @@ static int wifi_up(const xip_wifi_intent *p, const xip_wifi_tuning *tuning)
      * the epoch, after the driver is live and its channel is pinned (the hook is registered at every radio-up:
      * xip_wifi.c); a plain-STA epoch (now 0) leaves the link stopped, its callback inert */
     if (now) { int rc = start_now(!sta && !ap); if (rc) { wifi_down(); return rc; } }
+    if (xip_link_wifi_action_start() != XIP_OK) { wifi_down(); return XIP_ERR_IO; }
     return 0;
 }
 
@@ -538,12 +558,14 @@ static void wifi_down(void)
         return;
     }
     if (!started) return;
+    xip_host_network_suspend();
     started = false;
     xip_rx_filter_local(NULL, NULL);
     xip_rx_filter_bssid(NULL);
     xip_link_promisc_stop();
     (void)xip_wifi_now_disable();
     xip_link_espnow_stop();
+    xip_link_wifi_action_stop();
     driver_running = false;
     scanning = scan_done = false;
     want_sta = ap_enabled = false;
@@ -566,29 +588,39 @@ int xip_wifi_owner_monitor(const xip_wifi_monitor *m)
 
 static int wifi_state(xip_wifi_state *st)
 {
-    uint32_t size = st->size;
-    memset(st, 0, sizeof(*st)); st->size = size;
-    if (!started) return 0;
-    st->ap = ap_enabled;
-    uint8_t channel; wifi_second_chan_t second;
-    if (xip_wifi_current_channel(&channel, &second)) st->channel = channel;
-    if (!want_sta) return 0;
-    st->sta = connected ? 2 : 1;
-    if (connected) {
-        esp_netif_ip_info_t info;
-        wifi_ap_record_t ap;
-        if (esp_netif_get_ip_info(sta_netif, &info) == ESP_OK) memcpy(st->ip4, &info.ip.addr, 4);
-        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-            st->rssi = ap.rssi; memcpy(st->bssid, ap.bssid, 6); st->channel = ap.primary;
-            st->ssid_len = strnlen((const char *)active_ssid, 32); memcpy(st->ssid, active_ssid, st->ssid_len);
+    if (!st || st->size < 52) return XIP_ERR_SIZE;
+    /* Preserve the original 52-byte prefix for already-installed modules. */
+    const uint32_t size = st->size;
+    xip_wifi_state out = {.size = size};
+    (void)xip_wifi_interface_mac(WIFI_IF_STA, out.sta_mac);
+    (void)xip_wifi_interface_mac(WIFI_IF_AP, out.ap_mac);
+    out.radio = started;
+    bool monitoring = false;
+    if (started) (void)esp_wifi_get_promiscuous(&monitoring);
+    out.monitoring = monitoring;
+    out.now = started && ((const xip_wifi_intent *)applied)->now;
+    if (started) {
+        out.ap = ap_enabled;
+        uint8_t channel; wifi_second_chan_t second;
+        if (xip_wifi_current_channel(&channel, &second)) out.channel = channel;
+        if (want_sta) out.sta = associated ? 2 : 1;
+        if (associated) {
+            esp_netif_ip_info_t info;
+            wifi_ap_record_t ap;
+            if (connected && esp_netif_get_ip_info(sta_netif, &info) == ESP_OK) memcpy(out.ip4, &info.ip.addr, 4);
+            if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+                out.rssi = ap.rssi; memcpy(out.bssid, ap.bssid, 6); out.channel = ap.primary;
+                out.ssid_len = strnlen((const char *)active_ssid, 32); memcpy(out.ssid, active_ssid, out.ssid_len);
+            }
         }
     }
+    memcpy(st, &out, size < sizeof(out) ? size : sizeof(out));
     return 0;
 }
 
 /* The scan works in every radio mode (a control plane decides the topology from it). The station interface exists in all of them; a scan
  * leaves the channel, so an unassociated radio is put back on the channel this owner pinned when it is done. */
-static int wifi_scan(xip_ap_t *aps, size_t max)
+static int wifi_scan_with(xip_ap_t *aps, size_t max, const wifi_scan_config_t *config)
 {
     if (!started && !scan_only) {
         xip_wifi_tuning tuning = current_tuning();
@@ -600,7 +632,7 @@ static int wifi_scan(xip_ap_t *aps, size_t max)
     }
     if (!scanning) {
         scan_done = false;
-        esp_err_t rc = esp_wifi_scan_start(NULL, false);
+        esp_err_t rc = esp_wifi_scan_start(config, false);
         if (rc != ESP_OK) {
             if (scan_only) wifi_stop();
             return rc == ESP_ERR_WIFI_STATE ? -5 : -3;      /* busy joining: try again */
@@ -630,6 +662,16 @@ static int wifi_scan(xip_ap_t *aps, size_t max)
     }
     if (scan_only) wifi_stop();
     return count;
+}
+
+static int wifi_scan(xip_ap_t *aps, size_t max) { return wifi_scan_with(aps, max, NULL); }
+int xip_wifi_scan_channels(xip_ap_t *aps, size_t max, uint16_t channels, uint16_t dwell_ms)
+{
+    if (!aps || !max || !channels || (channels & 0x8001) || dwell_ms < 10 || dwell_ms > 120) return XIP_ERR_ARG;
+    const wifi_scan_config_t config = {.scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time.active = {.min = dwell_ms, .max = dwell_ms},
+        .channel_bitmap = {.ghz_2_channels = channels, .ghz_5_channels = 1}};
+    return wifi_scan_with(aps, max, &config);
 }
 
 /* The radio around a light sleep (xip_power.c): stopped the way an epoch ends; the classic ESP32 releases the driver too, or esp_light_sleep_start

@@ -13,6 +13,7 @@
 #include "esp_err.h"
 #include "xip.h"
 #include "xip_pool.h"
+#include "xip_quic.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +45,8 @@ typedef struct {
     int (*module_start)(const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len);
     int (*module_stop)(const uint8_t *name, size_t name_len);
     int (*module_manifest)(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
+    /* Look at the module partition again (include/xip.h, module_rescan): the number of modules, or negative. NULL: ERR_UNSUPPORTED. */
+    int (*module_rescan)(void);
     /* A module sent a packet to ADDR_MAIN (include/xip.h, send): `from` is its component, `data` the message. The packet is
      * lent for the call and goes back to the pool when the hook returns: copy what must stay. */
     int (*packet)(void *ctx, const char *module, uint32_t from, int component, int method, uint64_t id, const uint8_t *data, size_t len);
@@ -95,6 +98,7 @@ typedef struct {
     int (*wifi_tuning_set)(const xip_wifi_tuning *tuning);
     int (*wifi_tuning_get)(xip_wifi_tuning *tuning);
     int (*wifi_monitor)(const xip_wifi_monitor *monitor);
+    int (*module_rescan)(void);   /* appended: see xip_host_hooks_t */
 } xip_host_ext_t;
 esp_err_t xip_host_init_simple(const xip_host_ext_t *ext);
 
@@ -109,8 +113,22 @@ typedef struct {
 } xip_power_radio;
 void xip_power_set_radio(const xip_power_radio *radio);
 
+/* The BLE component's part of a sleep (xip_ble): `suspend` runs before the radio is stopped and returns a negative XIP_ERR_* to veto the sleep (a
+ * live BLE link or service, per its mode); `resume` runs after the radio is back, also after a rejected sleep. NULL clears. The table must outlive the runtime. */
+typedef struct {
+    int (*suspend)(void);
+    int (*resume)(void);
+} xip_power_ble;
+void xip_power_set_ble(const xip_power_ble *ble);
+
+/* A component of another ESP-IDF component (xip_ble) offers its table to get_component(name). The name and table must stay valid. */
+int xip_component_register(const char *name, const void *table);
+
 /* Connectivity changed (any task): every module gets HOST_NETWORK, and CONNECTED alarms that were waiting are armed. */
 void xip_host_set_connected(bool connected);
+/* Serialized radio owner: release IP listeners/connections before teardown. */
+void xip_host_network_suspend(void);
+uint8_t xip_host_network_sockets(void);
 /* A wake window opened (any task): modules with a WINDOW alarm get HOST_WAKE. */
 void xip_host_wake_window(void);
 /* The same, with the reason as the value of HOST_WAKE (a sleep ended: the wake cause). */
@@ -147,6 +165,75 @@ void xip_link_native_rx_prepare(void);
 int xip_link_native_rx_begin_cached(int addr, xip_link_rx_buf *buf);
 void xip_link_native_rx_commit(int addr, const xip_link_rx_buf *buf, size_t len, uint64_t source, int32_t signal);
 void xip_link_native_rx_abort(const xip_link_rx_buf *buf);
+
+/* The common QUIC receive function (in process, one function for every link). Frames that are QUIC datagrams reach `rx` in a pool packet with the
+ * link described in `info`: a frame of a link that carries no port (ESP-NOW, the BLE CoC channel, the UDP link on the default port 3339), and a
+ * PPP record of the port XIP_PORT_QUIC (0xf7). Ownership, not fan-out: `rx` returns whether it TOOK the frame. If it did, the frame is its
+ * own (it copied what it keeps; the runtime returns the packet to the pool) and nobody else sees it; if it declined, normal routing goes on
+ * (routes, then the subscribers of the link or the module bound to the port). The payload is in the pool packet and the headroom in front of it
+ * stays empty, so a frame can be forwarded as IPv6/UDP without a copy. Called on the receiving task (a driver's task): must not block. Other
+ * UDP ports, TCP, the NAN port and the other PPP ports keep their dispatch. Events (`ready`, `state`) are broadcast. Modules do not use this
+ * function: they subscribe to ports or to a component and message. NULL clears. */
+typedef struct {
+    int link;                  /* the link's address */
+    const char *name;          /* "espnow", "ble", ...; valid for the call */
+    uint64_t source;           /* the far end's token */
+    int32_t signal;            /* RSSI or 0 */
+    uint32_t time_us;          /* radio receive time */
+    uint32_t port;             /* 0: the link has no port; XIP_PORT_QUIC for a PPP record of that port */
+} xip_rx_info;
+typedef struct {
+    void *ctx;
+    bool (*rx)(void *ctx, const xip_rx_info *info, const uint8_t *data, size_t len);
+    void (*ready)(void *ctx, int link);
+    void (*state)(void *ctx, int link, uint32_t state);
+} xip_quic_rx_ops;
+void xip_quic_rx_set(const xip_quic_rx_ops *ops);
+
+/* ---- The classifier behind the common QUIC receive function (xip_quic.h has the formats) ----
+ * Enabled by the application (main.c does): after
+ * `xip_quic_classifier_enable(true)` every frame of a QUIC link is classified by its first byte BEFORE `xip_quic_rx_set`'s function is asked. QUIC links: the PPP record of port XIP_PORT_QUIC, the links `ble`, `udp` and `espnow` (the NAN carrier is told by its NSY1 magic and goes to the NAN port before the link), and the names added with
+ * `xip_quic_link_enable`. Exactly one handler gets a packet and
+ * is responsible for it:
+ *  - fixed bit clear: not QUIC, DECLINED: the old path goes on (`xip_quic_rx_set`'s function, routes, subscribers);
+ *  - truncated or invalid header, or more than XIP_QUIC_MAX_PACKET bytes: dropped and counted;
+ *  - SHORT header: the DCID (length from the quic-lite class rule, or the fixed `xip_quic_short_cid_len`) is looked up in the relay table. A LOCAL
+ *    entry hands the packet to the `local` callback (ownership passes: it must release it with xip_quic_pkt_release or pass it on with
+ *    xip_quic_pkt_send). A RELAY entry forwards the same pool packet to its link and peer address with the DCID replaced (forward or drop and count: no queue, no retransmission). Unknown DCID: dropped, counted;
+ *  - LONG header, version XIP_QUIC_VERSION_CBOR (0x444d0002): after the SCID comes the CBOR envelope {1: component, 2: method, 3: id, 5: fields}. It
+ *    goes to the module whose component is the envelope's and that has a datagram port bound (as an envelope that arrives on its port does: the
+ *    runtime parses it, see xip_envelope.h, and the handler gets an ordinary request, XIP_CALL_ENVELOPE); otherwise to the console module
+ *    (component 20), which answers console and native methods and returns an error for others. The module's answer to the link and token it came from is sent as a 0x444d0002 long packet (DCIDs
+ *    swapped), within XIP_QUIC_REPLY_MS;
+ *  - LONG header, any other version (0x444d0001 of quic-lite, versions that are not ours): given to the same `local` callback, else dropped and counted. */
+typedef struct { int slot; uint16_t start, len; } xip_quic_pkt;           /* a pool packet that the callback owns */
+const uint8_t *xip_quic_pkt_data(const xip_quic_pkt *p, size_t *len);      /* the whole QUIC packet (headroom in front stays empty) */
+void xip_quic_pkt_release(xip_quic_pkt *p);                                /* return it to the pool; any task; p->slot = -1 */
+/* Send the packet on a link as it is (no copy). Like every send: consumed on success and on every failure except XIP_ERR_BUSY, which leaves it with
+ * the caller to retry after the link's `ready` or to release. This is the primitive; relay forwarding by the table is not implemented. */
+int xip_quic_pkt_send(xip_quic_pkt *p, int link, uint64_t token);
+typedef struct {
+    void *ctx;
+    /* `hdr` points into the packet. Called on the receiving task (a driver's task): must not block. */
+    void (*rx)(void *ctx, const xip_rx_info *info, const xip_quic_hdr *hdr, xip_quic_pkt *pkt);
+} xip_quic_local_ops;
+void xip_quic_local_set(const xip_quic_local_ops *ops);                    /* NULL clears */
+void xip_quic_classifier_enable(bool on);
+/* The relay table (runtime-issued IDs; a vector that grows to XIP_QUIC_TABLE_MAX). Callable from any task. */
+/* kind: xip_quic_kind. RELAY: `egress_link` (xip_link_find) and `token` (the peer's address on it) say where short packets go, `out_cid` is the DCID the next hop
+ * knows the circuit by. LOCAL: the other arguments are unused. */
+int xip_quic_table_add_dcid(const uint8_t *cid, size_t len, unsigned kind, int egress_link, uint64_t token, const uint8_t *out_cid, size_t out_len);
+/* The runtime issues the IDs: the lowest free quic-lite CID (1 byte up to 127 entries) is added and returned in `cid` (XIP_QUIC_CID_MAX bytes); reuse after remove. */
+int xip_quic_table_alloc_dcid(unsigned kind, int egress_link, uint64_t token, const uint8_t *out_cid, size_t out_len, uint8_t *cid, size_t *len);
+int xip_quic_table_remove_dcid(const uint8_t *cid, size_t len);
+unsigned xip_quic_table_count(void);
+void xip_quic_short_cid_len(unsigned len);                                 /* 0 (default): the quic-lite class rule */
+int xip_quic_link_enable(const char *name);                                /* one more QUIC link by name (up to 4) */
+void xip_quic_stats_get(xip_quic_stats *out);
+/* The address of the native link `name`, or XIP_ERR_NOTFOUND; whether it is XIP_LINK_UP; and one frame sent on it (see xip_link_native_send). */
+int xip_link_find(const char *name);
+bool xip_link_native_up(int addr);
+int xip_link_native_send(int addr, uint64_t dest, const uint8_t *data, size_t len);
 
 /* The wanted state for C owners (the same as the wifi component). Copies a coherent snapshot. */
 int xip_wifi_set_intent(const xip_wifi_intent *intent, uint32_t *generation);
@@ -252,6 +339,8 @@ int xip_serial_buffered_bytes(size_t *bytes);
 void xip_serial_stop(void);
 /* Write text; returns the bytes taken, or a negative XIP_ERR_*. The runtime's log calls use this outside the codec. */
 int xip_serial_write(const void *data, size_t len);
+/* Drain the current UART frame before explicit light sleep; never closes RX. */
+int xip_serial_drain(void);
 
 /* The framing of the serial line. `on_bytes` gets every chunk the driver reads (reader task) and
  * cuts records with xip_serial_rx_begin / commit; `on_reset` drops a partial record when the
@@ -275,6 +364,10 @@ void xip_serial_rx_commit(uint32_t port, const xip_link_rx_buf *buf, size_t len)
 void xip_serial_rx_abort(const xip_link_rx_buf *buf);
 /* The same for any link: `link` is its address and `token` the id of the far end (a connection, a port). */
 int xip_port_rx_begin(uint32_t port, xip_link_rx_buf *buf);
+/* Radio RX never grows the pool. Missing cached storage means drop. */
+int xip_port_rx_begin_cached(uint32_t port, xip_link_rx_buf *buf);
+void xip_port_rx_commit_radio(int link, uint32_t port, const xip_link_rx_buf *buf,
+    size_t len, uint64_t token, int32_t signal, uint32_t time_us);
 void xip_port_rx_commit(int link, uint32_t port, const xip_link_rx_buf *buf, size_t len, uint64_t token);
 void xip_port_rx_abort(const xip_link_rx_buf *buf);
 

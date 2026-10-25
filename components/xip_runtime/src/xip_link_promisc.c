@@ -5,6 +5,7 @@
  * Deliberately small: on/off and a channel. The early filter (xip_rx_filter.c) runs before a packet is taken; the runtime does not touch power save; the module decides the window (DMesh's NAN
  * owner uses 64 ms in a 512 ms discovery window), when to stop, and what to do about power save. The callback only copies. */
 #include <stdatomic.h>
+#include "sdkconfig.h"
 #include <string.h>
 #include "esp_attr.h"
 #include "esp_timer.h"
@@ -17,7 +18,14 @@
 
 static int link_addr = -1;
 static atomic_bool on;
-static atomic_uint rx_frames, rx_drops;
+/* Driver-only diagnostics share the existing radio debug switch. Production
+ * has no resident counters; protocol diagnostics belong to the module. */
+#if CONFIG_XIP_ESPNOW_DIAGNOSTICS
+static struct { atomic_uint frames, drops; } stats;
+#define COUNT(field) atomic_fetch_add(&stats.field, 1)
+#else
+#define COUNT(field) ((void)0)
+#endif
 
 static uint64_t mac_token(const uint8_t m[6])
 {
@@ -42,17 +50,26 @@ static void IRAM_ATTR rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
     if (len < MAC_HEADER + FCS_LEN) return;
     len -= FCS_LEN;
     if (!xip_rx_accept(p->payload, len)) return;       /* the early filter: before a pool packet is taken */
+    const int32_t signal = (int32_t)(uint16_t)(int16_t)p->rx_ctrl.rssi;
+    const uint32_t time_us = (uint32_t)esp_timer_get_time();
+    if (xip_link_espnow_nan_promisc(p->payload, len, signal, time_us)) return;
     xip_link_rx_buf b;
-    int rc = xip_link_native_rx_begin(link_addr, &b);
+    /* NAN is a protocol destination, not a promiscuous-link subscriber.
+     * Classify before acquiring storage and route the original frame once. */
+    const bool nan = p->payload[16] == 0x50 && p->payload[17] == 0x6f && p->payload[18] == 0x9a;
+    int rc = nan ? xip_port_rx_begin_cached(XIP_PORT_NAN, &b)
+                 : xip_link_native_rx_begin_cached(link_addr, &b);
     if (rc == 1) return;                       /* nobody listens */
     if (rc || len > b.capacity || len > LINK_MTU) {
         if (!rc) xip_link_native_rx_abort(&b);
-        atomic_fetch_add(&rx_drops, 1);
+        COUNT(drops);
         return;
     }
     memcpy(b.data, p->payload, len);
-    atomic_fetch_add(&rx_frames, 1);
-    xip_link_native_rx_commit(link_addr, &b, len, mac_token(p->payload + 10), (int32_t)(uint16_t)(int16_t)p->rx_ctrl.rssi);   /* packed signal: rssi low 16 bits, no snr */
+    COUNT(frames);
+    if (nan) xip_port_rx_commit_radio(link_addr, XIP_PORT_NAN, &b, len,
+        mac_token(p->payload + 10), signal, time_us);
+    else xip_link_native_rx_commit(link_addr, &b, len, mac_token(p->payload + 10), signal);   /* packed signal: rssi low 16 bits, no snr */
 }
 
 int xip_link_promisc_set(const xip_wifi_monitor *m)
@@ -69,6 +86,7 @@ int xip_link_promisc_set(const xip_wifi_monitor *m)
         if (link_addr < 0) return link_addr;
     }
     if (m->channel && !xip_wifi_associated() && !xip_wifi_set_channel(m->channel)) return XIP_ERR_IO;
+    xip_link_native_rx_prepare();
     if (esp_wifi_set_promiscuous_rx_cb(rx_cb) != ESP_OK) return XIP_ERR_IO;
     atomic_store(&on, true);
     if (esp_wifi_set_promiscuous(true) != ESP_OK) { atomic_store(&on, false); return XIP_ERR_IO; }
@@ -84,5 +102,11 @@ void xip_link_promisc_stop(void)
     if (link_addr >= 0) (void)xip_link_native_set_state(link_addr, XIP_LINK_DOWN, 0);
 }
 
-unsigned xip_link_promisc_frames(void) { return atomic_load(&rx_frames); }
+unsigned xip_link_promisc_frames(void) {
+#if CONFIG_XIP_ESPNOW_DIAGNOSTICS
+    return atomic_load(&stats.frames);
+#else
+    return 0;
+#endif
+}
 unsigned xip_link_promisc_on(void) { return atomic_load(&on); }

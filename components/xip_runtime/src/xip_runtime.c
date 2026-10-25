@@ -20,13 +20,16 @@
 #include "esp_netif.h"
 #include "lwip/sockets.h"
 #include <errno.h>
+#include "xip_cbor.h"
 #include "internal.h"
 #include "xip_wifi.h"
+#include "xip_ip_netif.h"
 
 static const char *TAG = "xip";
 static xip_host_hooks_t hooks;
 static bool inited;
 static volatile bool net_connected;
+static bool physical_connected, virtual_connected;
 static QueueHandle_t worker_queue;
 static TaskHandle_t worker_task;
 static struct xip_instance *registry[XIP_MAX_INSTANCES];
@@ -42,17 +45,30 @@ static int dispatch(struct xip_instance *in, int component, int method, int valu
 static int dispatch_packet(struct xip_instance *in, int component, int method, const uint8_t *data, size_t len, uint32_t pkt,
                            uint32_t from, uint64_t id, uint32_t flags, int32_t value, uint32_t time_us);
 static const xip_link *link_table(void);
+static const xip_quic *quic_module_table(void);
+static void quic_module_release(struct xip_instance *in);
+static bool quic_module_complete(int slot, int sender, int component, int method, int outcome, uint32_t elapsed);
+static struct xip_instance *find(uint32_t id);
 static void links_release(struct xip_instance *in);
 static int link_send(struct xip_instance *in, uint32_t pkt, size_t len, uint32_t dst, int component, int method, uint64_t token);
+static int quic_reply_prefix(uint32_t dst, uint64_t token, uint64_t id, int slot, uint16_t *start, uint16_t *len);
+static void quic_reply_finish(uint32_t dst, uint64_t token, uint64_t id);
 static void link_tx_returned(uint32_t from, int slot);
 static void serial_release(struct xip_instance *in);
 static int h_tcp_accept(void *u, uint16_t port, uint32_t mode, int32_t c, int32_t m, uint32_t *handle);
+static void stream_accept(struct xip_instance *in);
 static xip_pool *pool_get(void);
+static const xip_quic_rx_ops *_Atomic quic_rx;      /* xip_quic_rx_set */
+static const xip_quic_local_ops *_Atomic quic_local;   /* xip_quic_local_set */
+static _Atomic uint32_t quic_module_owner;
+static _Atomic bool quic_classifier;                    /* xip_quic_classifier_enable */
+static inline bool quic_active(void) { return atomic_load(&quic_rx) || atomic_load(&quic_local) || atomic_load(&quic_classifier) || atomic_load(&quic_module_owner); }
 static void drop_slot(int slot);
 static bool link_drop_pending(int slot);
 static void wake_reader_waiters(void);
 static uint32_t now_us32(void);
 static void link_fanout(uint32_t addr, uint32_t port, int slot, uint16_t start, uint16_t len, uint64_t source, int32_t signal, uint32_t time_us);
+static bool quic_common_rx(uint32_t addr, uint32_t port, int slot, uint16_t start, uint16_t len, uint64_t source, int32_t signal, uint32_t time_us);
 static struct xip_instance *by_component(int component, const struct xip_instance *except);
 static bool known_locked(const struct xip_instance *in);
 
@@ -71,13 +87,15 @@ static int h_log(void *user, const uint8_t *data, size_t len)
     return n == len ? XIP_OK : XIP_ERR_SIZE;
 }
 
+static uint64_t h_now_us(void *user) { (void)user; return (uint64_t)esp_timer_get_time(); }
 static uint64_t h_now_ms(void *user) { (void)user; return (uint64_t)(esp_timer_get_time() / 1000); }
 
 int xip_wifi_set_intent(const xip_wifi_intent *i, uint32_t *gen) { return hooks.wifi_set ? hooks.wifi_set(i, gen) : XIP_ERR_UNSUPPORTED; }
 int xip_wifi_get_intent(xip_wifi_intent *i, uint32_t *gen) { return hooks.wifi_get ? hooks.wifi_get(i, gen) : XIP_ERR_UNSUPPORTED; }
 int xip_wifi_get_tuning(xip_wifi_tuning *t) { return hooks.wifi_tuning_get ? hooks.wifi_tuning_get(t) : XIP_ERR_UNSUPPORTED; }
 
-static atomic_bool wifi_pending;
+static atomic_bool wifi_pending, wake_pending;
+static atomic_int wake_value;
 static atomic_uint wifi_generation;
 
 /* get_component("wifi"): no context argument; usable from any task. */
@@ -98,7 +116,7 @@ static int c_wifi_get(void *ctx, xip_wifi_intent *i, uint32_t *gen)
 static int c_wifi_state(void *ctx, xip_wifi_state *st)
 {
     (void)ctx;
-    if (!st || st->size < sizeof(*st)) return XIP_ERR_ARG;
+    if (!st || st->size < 52) return XIP_ERR_ARG;
     return hooks.wifi_state ? hooks.wifi_state(st) : XIP_ERR_UNSUPPORTED;
 }
 _Static_assert(sizeof(xip_ap_t) == sizeof(xip_wifi_ap), "the scan record of the host and of the component");
@@ -114,19 +132,31 @@ static int c_wifi_monitor(void *ctx, const xip_wifi_monitor *m)
     if (!m || m->size < sizeof(*m)) return XIP_ERR_ARG;
     return hooks.wifi_monitor ? hooks.wifi_monitor(m) : XIP_ERR_UNSUPPORTED;
 }
+static int c_wifi_reconnect(void *ctx, bool enabled) {
+    (void)ctx; return hooks.wifi_reconcile ? xip_wifi_auto_reconnect(enabled) : XIP_ERR_UNSUPPORTED;
+}
+static int c_wifi_scan_channels(void *ctx, xip_wifi_ap *out, size_t max, uint16_t channels, uint16_t dwell_ms) {
+    (void)ctx; return hooks.wifi_reconcile ? xip_wifi_scan_channels((xip_ap_t *)out, max, channels, dwell_ms) : XIP_ERR_UNSUPPORTED;
+}
 static const xip_wifi wifi_component = {
-    .version = 1, .size = sizeof(xip_wifi), .set = c_wifi_set, .get = c_wifi_get, .state = c_wifi_state,
+    .version = 2, .size = sizeof(xip_wifi), .set = c_wifi_set, .get = c_wifi_get, .state = c_wifi_state,
     .scan = c_wifi_scan, .monitor = c_wifi_monitor,
+    .auto_reconnect = c_wifi_reconnect, .scan_channels = c_wifi_scan_channels,
 };
 
 /* get_component("power") */
-static int c_power_sleep(void *ctx, const xip_power_sleep *r) { (void)ctx; return xip_power_request(r); }
+static int c_power_sleep(void *ctx, const xip_power_sleep *r) { return xip_power_request(r, I(ctx)->id); }
 static int c_power_info(void *ctx, xip_power_info *i) { (void)ctx; return xip_power_get_info(i); }
 static int c_power_dump_locks(void *ctx) { (void)ctx; return xip_power_dump(0); }
 static int c_power_dump_tasks(void *ctx) { (void)ctx; return xip_power_dump(1); }
+static int c_power_until(void *ctx, uint64_t at, uint32_t flags) { return xip_power_until(I(ctx)->id, at, flags); }
+static int c_power_cancel(void *ctx) { return xip_power_cancel(I(ctx)->id); }
+static int c_power_activate(void *ctx, uint32_t ms) { (void)ctx; if (ms) xip_power_activate(ms); else xip_power_clear_activity(); return 0; }
+static int c_power_awake_for(void *ctx, uint32_t ms) { (void)ctx; return xip_power_awake_for(ms); }
 static const xip_power power_component = {
-    .version = 1, .size = sizeof(xip_power), .sleep = c_power_sleep, .info = c_power_info,
+    .version = 3, .size = sizeof(xip_power), .sleep = c_power_sleep, .info = c_power_info,
     .dump_locks = c_power_dump_locks, .dump_tasks = c_power_dump_tasks,
+    .sleep_until = c_power_until, .cancel = c_power_cancel, .activate = c_power_activate, .awake_for = c_power_awake_for,
 };
 
 /* get_component("wifi-tuning") */
@@ -156,8 +186,41 @@ static int h_heap_info(void *user, uint8_t *out, size_t capacity)
 static int h_nv(void *user, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len, uint8_t *out, size_t capacity)
 {
     (void)user;
-    if (!hooks.nv) return XIP_ERR_UNSUPPORTED;
     if (!key || !key_len || key_len > 32 || (value_len && !value) || (!value && (!out || !capacity))) return XIP_ERR_ARG;
+    /* Shared device policy, independent of the application's Wi-Fi/NV hook.
+     * mod_flash reads this only on activation; there is no live-mode switch. */
+    if (key_len == 10 && !memcmp(key, "flash.auth", 10)) {
+        if (value && value_len &&
+            !((value_len == 6 && !memcmp(value, "strict", 6)) ||
+              (value_len == 8 && !memcmp(value, "unsigned", 8)))) return XIP_ERR_ARG;
+        nvs_handle_t ns;
+        esp_err_t rc = nvs_open("wl", value ? NVS_READWRITE : NVS_READONLY, &ns);
+        char mode[9] = "strict";
+        if (rc != ESP_OK) {
+            if (value || rc != ESP_ERR_NVS_NOT_FOUND) return XIP_ERR_IO;
+        } else {
+            if (value) {
+                if (value_len) {
+                    memcpy(mode, value, value_len); mode[value_len] = 0;
+                    rc = nvs_set_str(ns, "flash_auth", mode);
+                } else rc = nvs_erase_key(ns, "flash_auth");
+                if (rc == ESP_ERR_NVS_NOT_FOUND) rc = ESP_OK;
+                if (rc == ESP_OK) rc = nvs_commit(ns);
+            } else {
+                size_t n = sizeof(mode);
+                rc = nvs_get_str(ns, "flash_auth", mode, &n);
+                if (rc == ESP_ERR_NVS_NOT_FOUND) { memcpy(mode, "strict", 7); rc = ESP_OK; }
+            }
+            nvs_close(ns);
+            if (rc != ESP_OK) return XIP_ERR_IO;
+        }
+        if (value) return XIP_OK;
+        size_t n = strlen(mode);
+        if (n > capacity) return XIP_ERR_SIZE;
+        memcpy(out, mode, n);
+        return (int)n;
+    }
+    if (!hooks.nv) return XIP_ERR_UNSUPPORTED;
     int rc = hooks.nv((const char *)key, key_len, value, value_len, out, capacity);
     return rc >= 0 ? rc : rc == -1 ? XIP_ERR_ARG : rc == -3 ? XIP_ERR_IO : rc == -5 ? XIP_ERR_SIZE : XIP_ERR_NOTFOUND;
 }
@@ -317,17 +380,27 @@ static bool port_bound(uint32_t port)
 
 /* A frame for `port` without a copy: begin returns 0 and a pool packet to fill (capacity XIP_PKT_MAX, with the headroom in front, as every
  * packet), 1 when no module has the port (skip the frame), or an error (XIP_ERR_NOMEM: the pool is empty). Then commit or abort. */
-int xip_port_rx_begin(uint32_t port, xip_link_rx_buf *buf)
+static int port_rx_begin(uint32_t port, xip_link_rx_buf *buf, bool cached)
 {
     xip_pool *p = pool_get();
     if (!p || !buf) return XIP_ERR_ARG;
-    if (!port_bound(port)) return 1;
-    int slot = xip_pool_acquire(p, 0);
+    if (!port_bound(port) && !(port == XIP_PORT_QUIC && quic_active())) return 1;
+    int slot = cached ? xip_pool_acquire_cached(p, 0) : xip_pool_acquire(p, 0);
     if (slot < 0) return XIP_ERR_NOMEM;
     buf->slot = slot;
     buf->data = xip_pool_slot(p, slot) + XIP_PKT_HEADROOM;
     buf->capacity = XIP_PKT_MAX;
     return XIP_OK;
+}
+
+int xip_port_rx_begin(uint32_t port, xip_link_rx_buf *buf) { return port_rx_begin(port, buf, false); }
+int xip_port_rx_begin_cached(uint32_t port, xip_link_rx_buf *buf) { return port_rx_begin(port, buf, true); }
+
+void xip_port_rx_commit_radio(int link, uint32_t port, const xip_link_rx_buf *buf,
+    size_t len, uint64_t token, int32_t signal, uint32_t time_us)
+{
+    if (len > XIP_PKT_MAX || link < 0) { drop_slot(buf->slot); return; }
+    link_fanout((uint32_t)link, port, buf->slot, XIP_PKT_HEADROOM, (uint16_t)len, token, signal, time_us);
 }
 
 void xip_port_rx_commit(int link, uint32_t port, const xip_link_rx_buf *buf, size_t len, uint64_t token)
@@ -382,17 +455,41 @@ static int h_info_publish(void *user, int32_t component, int32_t method, const u
     return xip_rt_info_publish(I(user)->id, component, method, data, len);
 }
 
+/* Optional components of other ESP-IDF components (xip_ble): they register a table by name, so the runtime does not link them. */
+#define XIP_EXTRA_COMPONENTS 4
+static struct { const char *name; const void *table; } extra_components[XIP_EXTRA_COMPONENTS];
+int xip_component_register(const char *name, const void *table)
+{
+    if (!name || !table) return XIP_ERR_ARG;
+    for (int i = 0; i < XIP_EXTRA_COMPONENTS; i++) {
+        if (extra_components[i].name && strcmp(extra_components[i].name, name) == 0) { extra_components[i].table = table; return XIP_OK; }
+    }
+    for (int i = 0; i < XIP_EXTRA_COMPONENTS; i++) {
+        if (!extra_components[i].name) { extra_components[i].table = table; extra_components[i].name = name; return XIP_OK; }
+    }
+    return XIP_ERR_NOMEM;
+}
+
+#include "xip_ip_netif.inc"
+
 static const void *h_get_component(void *user, const char *name)
 {
     (void)user; /* Requester context; native component functions take no extra argument. */
     extern const xip_psa *xip_psa_component(void);
+    extern const xip_identity *xip_identity_component(void);
     if (!name) return NULL;
+    if (!strcmp(name, "ip")) return &ip_component;
     if (strcmp(name, "psa") == 0) return xip_psa_component();
+    if (strcmp(name, "identity") == 0) return xip_identity_component();
     if (strcmp(name, "link") == 0) return link_table();
+    if (strcmp(name, "quic") == 0) return quic_module_table();
     if (strcmp(name, "power") == 0) return &power_component;
     if (strcmp(name, "hw") == 0) return xip_periph_table();
     if (strcmp(name, "wifi") == 0) return hooks.wifi_set ? &wifi_component : NULL;
     if (strcmp(name, "wifi-tuning") == 0) return hooks.wifi_tuning_set ? &tuner_component : NULL;
+    for (int i = 0; i < XIP_EXTRA_COMPONENTS; i++) {
+        if (extra_components[i].name && strcmp(extra_components[i].name, name) == 0) return extra_components[i].table;
+    }
     return NULL;
 }
 
@@ -426,6 +523,12 @@ static int h_module_manifest(void *user, const uint8_t *name, size_t name_len, u
     if (!hooks.module_manifest) return XIP_ERR_UNSUPPORTED;
     if (!name || !name_len || (capacity && !out)) return XIP_ERR_ARG;
     return hooks.module_manifest(name, name_len, out, capacity);
+}
+
+static int h_module_rescan(void *user)
+{
+    (void)user;
+    return hooks.module_rescan ? hooks.module_rescan() : XIP_ERR_UNSUPPORTED;
 }
 
 static void restart_later(void *arg) { (void)arg; esp_restart(); }
@@ -568,13 +671,13 @@ static int h_pkt_info(void *user, uint32_t *headroom, uint32_t *max)
 }
 
 /* The packet goes to the target's inbox ring and a worker event; on success the target owns the reference. */
-static int deliver(struct xip_instance *t, int slot, uint16_t start, uint16_t len, int component, int method,
+static int deliver_checked(struct xip_instance *t, uint32_t expected_id, int slot, uint16_t start, uint16_t len, int component, int method,
                    uint32_t from, uint64_t id, int32_t value, uint32_t lflags, uint32_t time_us)
 {
     uint32_t tid = 0;
     int rc = XIP_ERR_NOTFOUND;
     portENTER_CRITICAL(&registry_lock);
-    if (known_locked(t)) {
+    if (known_locked(t) && (!expected_id || t->id == expected_id)) {
         if (t->pkt_count >= CONFIG_XIP_PKT_INBOX) rc = XIP_ERR_BUSY;
         else {
             unsigned at = (t->pkt_head + t->pkt_count++) % CONFIG_XIP_PKT_INBOX;
@@ -591,7 +694,7 @@ static int deliver(struct xip_instance *t, int slot, uint16_t start, uint16_t le
     xip_event_t ev = {.kind = XIP_EV_PACKET, .inst = tid};
     if (xQueueSend(worker_queue, &ev, 0) == pdTRUE) return 0;
     portENTER_CRITICAL(&registry_lock);              /* no room for the event: take the packet back out */
-    if (known_locked(t)) {
+    if (known_locked(t) && (!expected_id || t->id == expected_id)) {
         for (unsigned k = 0; k < t->pkt_count; k++) {
             unsigned at = (t->pkt_head + k) % CONFIG_XIP_PKT_INBOX;
             if (t->pkt_in[at].slot != slot) continue;
@@ -605,10 +708,100 @@ static int deliver(struct xip_instance *t, int slot, uint16_t start, uint16_t le
     return XIP_ERR_BUSY;
 }
 
+static int deliver(struct xip_instance *t, int slot, uint16_t start, uint16_t len, int component, int method,
+                   uint32_t from, uint64_t id, int32_t value, uint32_t lflags, uint32_t time_us)
+{
+    return deliver_checked(t,0,slot,start,len,component,method,from,id,value,lflags,time_us);
+}
+
+/* ---- envelopes: parsed and answered by the runtime, never by a module (include/xip_envelope.h) ---- */
+static void env_add(struct xip_instance *in, uint32_t dst, uint64_t token, int32_t component, int32_t method, uint64_t id)
+{
+    portENTER_CRITICAL(&registry_lock);
+    xip_env_add(&in->env, dst, token, component, method, id);
+    portEXIT_CRITICAL(&registry_lock);
+}
+static bool env_find(struct xip_instance *in, uint32_t dst, uint64_t token, int32_t component, int32_t method, xip_env_slot *out)
+{
+    portENTER_CRITICAL(&registry_lock);
+    const bool found = xip_env_find(&in->env, dst, token, component, method, out);
+    portEXIT_CRITICAL(&registry_lock);
+    return found;
+}
+static void env_done(struct xip_instance *in, const xip_env_slot *s)
+{
+    portENTER_CRITICAL(&registry_lock);
+    xip_env_done(&in->env, s->dst, s->token, s->component, s->method, s->id);
+    portEXIT_CRITICAL(&registry_lock);
+}
+
 static int h_send(void *user, uint32_t pkt, size_t len, uint32_t dst, int component, int method, uint64_t id)
 {
     struct xip_instance *in = I(user);
-    if (dst >= XIP_ADDR_LINK) return link_send(in, pkt, len, dst, component, method, id);   /* ERR_BUSY keeps the packet */
+    if (dst >= XIP_ADDR_LINK) {                                  /* ERR_BUSY keeps the packet */
+        /* The answer to a 0x444d0002 datagram goes back as one: the long header (the request's CIDs swapped) is written into the empty
+         * headroom in front of the payload, and the packet is sent from there. A retry after BUSY writes the same prefix again. */
+        xip_held_entry *he = xip_held_get(&in->held, pkt);
+        /* The answer to an envelope request (CALL_ENVELOPE) is wrapped here: {1: component, 2: method, 3: id, 6: the module's map} or, for a bare
+         * negative integer, {.., 7: error}. The head goes in front of the payload at the same start (the payload moves up), as the datagram header
+         * below does; BUSY takes both off again. */
+        const bool more = (method & XIP_SEND_MORE) != 0;           /* another answer to an open envelope request (a subscription's events) */
+        method &= ~XIP_SEND_MORE;
+        xip_env_slot env = {0};
+        size_t env_head = 0;
+        const size_t env_len = len;
+        if (he && he->state == XIP_HELD_OWNED && len <= XIP_PKT_MAX && env_find(in, dst, id, component, method, &env)) {
+            uint8_t head[40];
+            uint8_t *at = xip_pool_slot(pool, he->slot) + he->start;
+            int32_t error = 0;
+            const bool failed = xip_envelope_is_error(at, len, &error);
+            env_head = xip_envelope_head(head, sizeof head, env.component, env.method, env.id, failed ? error : 0);
+            if (!env_head || len + env_head > XIP_PKT_MAX || (size_t)he->start + len + env_head > xip_pool_slot_size(pool)) {
+                const int slot = he->slot;
+                if (!more) env_done(in, &env);
+                (void)xip_held_take(&in->held, pkt);
+                drop_slot(slot);
+                in->stats.pkt_dropped++;
+                return XIP_ERR_SIZE;
+            }
+            memmove(at + env_head, at, len);
+            memcpy(at, head, env_head);
+            len = failed ? env_head : len + env_head;          /* the error head is the whole answer; the old payload stays behind it */
+        }
+        const uint16_t orig_start = he ? he->start : 0;
+        uint16_t pstart = orig_start, plen = (uint16_t)len;
+        int wrapped = 0;
+        uint64_t rid = 0;                                               /* the answer must carry the request's id (field 3; absent = 0) */
+        if (he && he->state == XIP_HELD_OWNED && len <= XIP_PKT_MAX) {
+            int64_t v = 0;
+            if (xip_cbor_get_int(xip_pool_slot(pool, he->slot) + he->start, len, 3, &v) == 0 && v >= 0) rid = (uint64_t)v;
+            wrapped = quic_reply_prefix(dst, id, rid, he->slot, &pstart, &plen);
+        }
+        if (wrapped < 0) {
+            const int slot = he->slot;
+            if (env_head && !more) env_done(in, &env);
+            (void)xip_held_take(&in->held, pkt);
+            drop_slot(slot);
+            in->stats.pkt_dropped++;
+            return wrapped;
+        }
+        const size_t olen = len;
+        if (wrapped) len = plen;
+        const int rc = link_send(in, pkt, len, dst, component, method, id);
+        if (wrapped && rc != XIP_ERR_BUSY) quic_reply_finish(dst, id, rid);
+        if (wrapped && rc == XIP_ERR_BUSY && (he = xip_held_get(&in->held, pkt)) != NULL) {      /* the sender keeps the packet and retries: take the header off again */
+            uint8_t *at = xip_pool_slot(pool, he->slot) + he->start;
+            memmove(at, at + (len - olen), olen);
+        }
+        if (env_head) {
+            if (rc != XIP_ERR_BUSY) { if (!more) env_done(in, &env); }
+            else if ((he = xip_held_get(&in->held, pkt)) != NULL) {                              /* and the envelope head */
+                uint8_t *at = xip_pool_slot(pool, he->slot) + he->start;
+                memmove(at, at + env_head, env_len);
+            }
+        }
+        return rc;
+    }
     xip_held_entry e = xip_held_take(&in->held, pkt);       /* consumed on success and on failure */
     if (e.slot < 0) return XIP_ERR_ARG;
     int rc;
@@ -778,6 +971,9 @@ static int c_link_provide(void *ctx, const char *name, int component, int method
 /* An event for every subscriber of the link (READY, STATE): queued for the worker, never dropped silently by a full inbox. */
 static void link_event(uint32_t addr, uint32_t kind, int32_t value, uint64_t id)
 {
+    const xip_quic_rx_ops *ops = atomic_load(&quic_rx);
+    if (ops && kind == XIP_LINK_EVENT_READY && ops->ready) ops->ready(ops->ctx, (int)addr);
+    if (ops && kind == XIP_LINK_EVENT_STATE && ops->state) ops->state(ops->ctx, (int)addr, (uint32_t)value);
     struct { int owner, component, method; } subs[XIP_LINK_SUBS];
     unsigned n = 0;
     portENTER_CRITICAL(&registry_lock);
@@ -847,6 +1043,7 @@ static void link_return(int slot, const typeof(pending[0]) *p, int outcome)
 {
     struct xip_instance *t = by_component(p->sender, NULL);
     const uint32_t elapsed = (uint32_t)(esp_timer_get_time() - p->t0_us);
+    if (quic_module_complete(slot,p->sender,p->component,p->method,outcome,elapsed)) return;
     if (!t || deliver(t, slot, p->start, p->len, p->component, p->method, p->addr, p->token, outcome,
                       XIP_CALL_LINK | XIP_CALL_LINK_EVENT | (XIP_LINK_EVENT_TX_DONE << 8), elapsed)) drop_slot(slot);
 }
@@ -1030,6 +1227,272 @@ static bool link_route(uint32_t addr, int slot, uint16_t start, uint16_t len)
     return !copy;
 }
 
+/* The application's single receive function (xip_quic_rx_set): every frame of a link that carries no port is shown to it before the
+ * subscribers see it. The runtime keeps the packet; the application copies what it keeps. */
+void xip_quic_rx_set(const xip_quic_rx_ops *ops)
+{
+    atomic_store(&quic_rx, ops);
+    if (ops && ops->rx) xip_quic_udp_ensure();      /* the default UDP port's datagrams are QUIC packets for this function */
+}
+int xip_link_find(const char *name)
+{
+    int addr = XIP_ERR_NOTFOUND;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_named_locked(name, false);
+    if (l) addr = (int)link_addr(l);
+    portEXIT_CRITICAL(&registry_lock);
+    return addr;
+}
+bool xip_link_native_up(int addr)
+{
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked((uint32_t)addr);
+    const bool up = l && l->state == XIP_LINK_UP;
+    portEXIT_CRITICAL(&registry_lock);
+    return up;
+}
+static bool quic_rx_offer(uint32_t addr, uint32_t port, int slot, uint16_t start, uint16_t len, uint64_t source, int32_t signal, uint32_t time_us)
+{
+    const xip_quic_rx_ops *ops = atomic_load(&quic_rx);
+    if ((port && port != XIP_PORT_QUIC) || !len || !ops || !ops->rx) return false;
+    char name[sizeof(links[0].name)] = {0};
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    if (l) memcpy(name, l->name, sizeof(name));
+    const bool stream = l && (l->flags & XIP_LINK_FLAG_STREAM);
+    portEXIT_CRITICAL(&registry_lock);
+    if (stream && !port) return false;       /* the serial line dispatches its records by port; only the QUIC port is a datagram */
+    const xip_rx_info info = {.link = (int)addr, .name = name, .source = source, .signal = signal, .time_us = time_us, .port = port};
+    return ops->rx(ops->ctx, &info, xip_pool_slot(pool, slot) + start, len);
+}
+
+
+/* ---- the classifier behind the common QUIC receive function (include/xip_quic.h; the API is documented in xip_runtime.h) ----
+ * Tables and counters here; the pure parsing is in xip_quic.c. The mutex is taken on receiving tasks (never in an ISR) for a binary search. */
+#define QUIC_CONSOLE_COMPONENT 20                /* answers console and native envelope methods (mod_con) */
+static xip_quic_table quic_table;
+static xip_quic_replies quic_replies;
+static xip_quic_stats quic_stats;
+static unsigned quic_short_cid;
+static char quic_names[4][16];
+static SemaphoreHandle_t quic_mutex;
+static StaticSemaphore_t quic_mutex_buf;
+#define QSTAT(field) __atomic_fetch_add(&quic_stats.field, 1u, __ATOMIC_RELAXED)
+
+static SemaphoreHandle_t quic_lock(void)
+{
+    if (!quic_mutex) {
+        portENTER_CRITICAL(&registry_lock);
+        if (!quic_mutex) quic_mutex = xSemaphoreCreateMutexStatic(&quic_mutex_buf);
+        portEXIT_CRITICAL(&registry_lock);
+    }
+    xSemaphoreTake(quic_mutex, portMAX_DELAY);
+    return quic_mutex;
+}
+static uint32_t quic_now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+void xip_quic_local_set(const xip_quic_local_ops *ops)
+{
+    atomic_store(&quic_local, ops);
+    if (ops && ops->rx) xip_quic_udp_ensure();
+}
+void xip_quic_classifier_enable(bool on)
+{
+    atomic_store(&quic_classifier, on);
+    if (on) xip_quic_udp_ensure();
+}
+void xip_quic_short_cid_len(unsigned len) { quic_short_cid = len; }
+int xip_quic_link_enable(const char *name)
+{
+    if (!name || !*name || strlen(name) >= sizeof(quic_names[0])) return XIP_ERR_ARG;
+    int rc = XIP_ERR_NOMEM;
+    portENTER_CRITICAL(&registry_lock);
+    for (unsigned i = 0; i < 4 && rc; i++) {
+        if (!strcmp(quic_names[i], name)) rc = XIP_OK;
+        else if (!quic_names[i][0]) { strcpy(quic_names[i], name); rc = XIP_OK; }
+    }
+    portEXIT_CRITICAL(&registry_lock);
+    return rc;
+}
+int xip_quic_table_add_dcid(const uint8_t *cid, size_t len, unsigned kind, int egress_link, uint64_t token, const uint8_t *out_cid, size_t out_len)
+{
+    SemaphoreHandle_t m = quic_lock();
+    const int rc = xip_quic_table_add(&quic_table, cid, (unsigned)len, kind, (uint32_t)egress_link, token, out_cid, (unsigned)out_len);
+    xSemaphoreGive(m);
+    return rc;
+}
+int xip_quic_table_alloc_dcid(unsigned kind, int egress_link, uint64_t token, const uint8_t *out_cid, size_t out_len, uint8_t *cid, size_t *len)
+{
+    unsigned n = 0;
+    SemaphoreHandle_t m = quic_lock();
+    const int rc = xip_quic_table_alloc(&quic_table, kind, (uint32_t)egress_link, token, out_cid, (unsigned)out_len, cid, &n);
+    if (len) *len = n;
+    xSemaphoreGive(m);
+    return rc;
+}
+int xip_quic_table_remove_dcid(const uint8_t *cid, size_t len)
+{
+    SemaphoreHandle_t m = quic_lock();
+    const int rc = xip_quic_table_remove(&quic_table, cid, (unsigned)len);
+    xSemaphoreGive(m);
+    return rc;
+}
+unsigned xip_quic_table_count(void)
+{
+    SemaphoreHandle_t m = quic_lock();
+    const unsigned n = quic_table.n;
+    xSemaphoreGive(m);
+    return n;
+}
+void xip_quic_stats_get(xip_quic_stats *out)
+{
+    if (!out) return;
+    const uint32_t *src = (const uint32_t *)&quic_stats;
+    uint32_t *dst = (uint32_t *)out;
+    for (size_t i = 0; i < sizeof(*out) / sizeof(uint32_t); i++) dst[i] = __atomic_load_n(&src[i], __ATOMIC_RELAXED);
+}
+
+const uint8_t *xip_quic_pkt_data(const xip_quic_pkt *p, size_t *len)
+{
+    if (!p || p->slot < 0 || !pool) return NULL;
+    if (len) *len = p->len;
+    return xip_pool_slot(pool, p->slot) + p->start;
+}
+void xip_quic_pkt_release(xip_quic_pkt *p)
+{
+    if (!p || p->slot < 0) return;
+    drop_slot(p->slot);
+    p->slot = -1;
+}
+int xip_quic_pkt_send(xip_quic_pkt *p, int link, uint64_t token)
+{
+    if (!p || p->slot < 0 || link < 0) return XIP_ERR_ARG;
+    const int rc = link_tx((uint32_t)link, p->slot, p->start, p->len, token, 0, 0, 0);
+    if (rc == 0) { p->slot = -1; return 0; }
+    if (rc == XIP_ERR_BUSY) return rc;                       /* the lease stays with the caller */
+    drop_slot(p->slot);
+    p->slot = -1;
+    return rc;
+}
+
+/* The answer to a CBOR datagram: prefix the long header (version 0x444d0002, the request's CIDs swapped) in the empty headroom. 0: no note for
+ * (link, token), the packet goes as it is; 1: prefixed; negative: it does not fit. */
+static int quic_reply_prefix(uint32_t dst, uint64_t token, uint64_t id, int slot, uint16_t *start, uint16_t *len)
+{
+    if (!quic_mutex) return 0;
+    xip_quic_reply r = {0};
+    SemaphoreHandle_t m = quic_lock();
+    const xip_quic_reply *f = xip_quic_reply_find(&quic_replies, dst, token, id, quic_now_ms());
+    if (f) r = *f;
+    xSemaphoreGive(m);
+    if (!f) return 0;
+    uint8_t hdr[1 + 4 + 1 + XIP_QUIC_CID_MAX + 1 + XIP_QUIC_CID_MAX];
+    const size_t hl = xip_quic_long_build(hdr, sizeof hdr, XIP_QUIC_VERSION_CBOR, r.dcid, r.dcid_len, r.scid, r.scid_len);
+    /* The header goes in FRONT of the payload at the same start: the links need the packet where they expect it (ESP-NOW wants the 144-byte
+     * headroom and its alignment for its request), so the payload moves up by the header length. Best effort: a copy of at most one packet. */
+    if (!hl || (size_t)*len + hl > XIP_PKT_MAX || (size_t)*start + *len + hl > xip_pool_slot_size(pool)) { quic_reply_finish(dst, token, id); return XIP_ERR_SIZE; }
+    uint8_t *at = xip_pool_slot(pool, slot) + *start;
+    memmove(at + hl, at, *len);
+    memcpy(at, hdr, hl);
+    *len = (uint16_t)(*len + hl);
+    return 1;
+}
+static void quic_reply_finish(uint32_t dst, uint64_t token, uint64_t id)
+{
+    SemaphoreHandle_t m = quic_lock();
+    const xip_quic_reply *f = xip_quic_reply_find(&quic_replies, dst, token, id, quic_now_ms());
+    if (f) xip_quic_reply_done(&quic_replies, f);
+    xSemaphoreGive(m);
+}
+
+static bool quic_link_is_quic(const char *name)
+{
+    /* "espnow": the NAN carrier (the NSY1 magic after the vendor IE) never reaches the link, it goes to the NAN port first */
+    if (!strcmp(name, "ble") || !strcmp(name, "udp") || !strcmp(name, "espnow")) return true;
+    for (unsigned i = 0; i < 4; i++) if (quic_names[i][0] && !strcmp(quic_names[i], name)) return true;
+    return false;
+}
+
+#include "xip_quic_module.inc"
+
+/* True when the packet has gone to its one handler (or was dropped and counted): the caller must not touch `slot` any more. False: declined. */
+static bool quic_common_rx(uint32_t addr, uint32_t port, int slot, uint16_t start, uint16_t len, uint64_t source, int32_t signal, uint32_t time_us)
+{
+    if (!len || (port && port != XIP_PORT_QUIC) || !(atomic_load(&quic_classifier) || atomic_load(&quic_module_owner)) || !pool) return false;
+    char name[sizeof(links[0].name)] = {0};
+    bool found = false, stream = false;
+    portENTER_CRITICAL(&registry_lock);
+    link_t *l = link_at_locked(addr);
+    if (l) { memcpy(name, l->name, sizeof(name)); stream = l->flags & XIP_LINK_FLAG_STREAM; found = true; }
+    portEXIT_CRITICAL(&registry_lock);
+    if (!found || (stream && !port) || !(port == XIP_PORT_QUIC || quic_link_is_quic(name))) return false;
+    const uint8_t *data = xip_pool_slot(pool, slot) + start;
+    xip_quic_hdr h;
+    const xip_quic_class cls = xip_quic_classify(data, len, quic_short_cid, &h);
+    QSTAT(rx);
+    if (cls == XIP_QUIC_NOT_QUIC) { QSTAT(declined); return false; }
+    if (cls == XIP_QUIC_MALFORMED) { QSTAT(malformed); drop_slot(slot); return true; }
+    if (len > XIP_QUIC_MAX_PACKET) { QSTAT(oversize); drop_slot(slot); return true; }
+    const xip_rx_info info = {.link = (int)addr, .name = name, .source = source, .signal = signal, .time_us = time_us, .port = port};
+    const xip_quic_local_ops *local = atomic_load(&quic_local);
+    xip_quic_pkt pkt = {.slot = slot, .start = start, .len = len};
+    if (!h.is_long) {
+        xip_quic_entry ent = {0};
+        bool hit = false;
+        SemaphoreHandle_t m = quic_lock();
+        const xip_quic_entry *e = xip_quic_table_find(&quic_table, h.dcid, h.dcid_len);
+        if (e) { ent = *e; hit = true; }
+        xSemaphoreGive(m);
+        if (!hit) { if (quic_module_offer(&info,slot,start,len)) return true; QSTAT(short_unknown); drop_slot(slot); return true; }
+        if (ent.kind == XIP_QUIC_DCID_RELAY) {
+            /* forward or drop, no queue: the DCID is replaced in the empty headroom (as quic-lite's rewrite_dcid_in_place), the same
+             * pool packet goes to the egress link and the peer address stored in the entry. TODO: long-header packets, per-circuit counters. */
+            int shift = 0;
+            int rc = xip_quic_short_rewrite(xip_pool_slot(pool, slot) + start, len, &h, ent.out_cid, ent.out_len, start, &shift);
+            if (!rc) rc = link_tx(ent.egress, slot, (uint16_t)(start + shift), (uint16_t)(len - shift), ent.token, 0, 0, 0);
+            if (rc) { QSTAT(short_relay_failed); drop_slot(slot); return true; }
+            QSTAT(short_relay);
+            return true;
+        }
+        if (quic_module_offer(&info,slot,start,len)) return true;
+        if (!local || !local->rx) { QSTAT(short_no_handler); drop_slot(slot); return true; }
+        QSTAT(short_local);
+        local->rx(local->ctx, &info, &h, &pkt);                  /* ownership passes: it releases or passes the packet on */
+        return true;
+    }
+    if (h.version != XIP_QUIC_VERSION_CBOR) {
+        if (quic_module_offer(&info,slot,start,len)) return true;
+        if (!local || !local->rx) { QSTAT(long_other_dropped); drop_slot(slot); return true; }
+        QSTAT(long_other);
+        local->rx(local->ctx, &info, &h, &pkt);
+        return true;
+    }
+    /* a CBOR datagram: the envelope follows the SCID; routed like an envelope that arrives on a module's port */
+    xip_quic_env env;
+    const uint16_t elen = (uint16_t)(len - h.body);
+    if (!elen || xip_quic_envelope(data + h.body, elen, &env)) { QSTAT(long_cbor_bad); drop_slot(slot); return true; }
+    if (env.response) {                                          /* an answer (6 or 7), e.g. to a request this device sent: never a request */
+        if (!local || !local->rx) { QSTAT(long_cbor_response); drop_slot(slot); return true; }
+        QSTAT(long_cbor_response);
+        local->rx(local->ctx, &info, &h, &pkt);
+        return true;
+    }
+    struct xip_instance *t = by_component(env.component, NULL);
+    if (!t || !t->port) t = by_component(QUIC_CONSOLE_COMPONENT, NULL);
+    if (!t) { QSTAT(long_cbor_no_target); drop_slot(slot); return true; }
+    SemaphoreHandle_t m = quic_lock();
+    xip_quic_reply_note(&quic_replies, addr, source, env.has_id ? env.id : 0, &h, quic_now_ms());
+    xSemaphoreGive(m);
+    if (deliver(t, slot, (uint16_t)(start + h.body), elen, t->component, 0, addr, source, signal, XIP_CALL_LINK | XIP_CALL_ENVELOPE, time_us)) {
+        QSTAT(long_cbor_no_target);                               /* its inbox is full */
+        quic_reply_finish(addr, source, env.has_id ? env.id : 0);
+        drop_slot(slot);
+        return true;
+    }
+    QSTAT(long_cbor);
+    return true;
+}
+
 /* The packet in `slot` (one reference is the caller's) goes to the route or to every subscriber: one reference each. */
 static void link_fanout(uint32_t addr, uint32_t port, int slot, uint16_t start, uint16_t len, uint64_t source, int32_t signal, uint32_t time_us)
 {
@@ -1039,6 +1502,9 @@ static void link_fanout(uint32_t addr, uint32_t port, int slot, uint16_t start, 
     link_t *l = link_at_locked(addr);
     if (l) l->received++;
     portEXIT_CRITICAL(&registry_lock);
+    /* ownership, not fan-out: the QUIC receive function takes the frame (and the packet goes back to the pool here), or routing goes on */
+    if (quic_common_rx(addr, port, slot, start, len, source, signal, time_us)) return;      /* the packet went to its one handler */
+    if (quic_rx_offer(addr, port, slot, start, len, source, signal, time_us)) { drop_slot(slot); return; }
     if (!port && link_route(addr, slot, start, len)) return;
     portENTER_CRITICAL(&registry_lock);
     l = link_at_locked(addr);
@@ -1052,7 +1518,8 @@ static void link_fanout(uint32_t addr, uint32_t port, int slot, uint16_t start, 
     for (unsigned k = 0; k < n; k++) {
         if (k + 1 < n) xip_pool_retain(pool, slot);          /* the last subscriber takes the caller's reference */
         struct xip_instance *t = by_component(subs[k].owner, NULL);
-        if (!t || deliver(t, slot, start, len, subs[k].component, subs[k].method, addr, source, signal, XIP_CALL_LINK, time_us)) {
+        /* a frame of a module's port is parsed as an envelope by the runtime when the module's turn comes (handle_packets) */
+        if (!t || deliver(t, slot, start, len, subs[k].component, subs[k].method, addr, source, signal, XIP_CALL_LINK | (port ? XIP_CALL_ENVELOPE : 0), time_us)) {
             drop_slot(slot);
             lost++;
         }
@@ -1223,7 +1690,7 @@ static int native_rx_begin(int addr, xip_link_rx_buf *buf, bool cached)
     if (l) { subs = l->nsubs; routed = l->nroutes != 0; }
     portEXIT_CRITICAL(&registry_lock);
     if (!l || !buf || !p) return XIP_ERR_ARG;
-    if (!subs && !routed) return 1;
+    if (!subs && !routed && !quic_active()) return 1;
     int slot = cached ? xip_pool_acquire_cached(p, 0) : xip_pool_acquire(p, 0);
     if (slot < 0) {
         portENTER_CRITICAL(&registry_lock);
@@ -1265,7 +1732,7 @@ int xip_link_native_rx(int addr, uint64_t source, int32_t signal, const uint8_t 
     if (l) { subs = l->nsubs; routed = l->nroutes != 0; }
     portEXIT_CRITICAL(&registry_lock);
     if (!l || (len && !data) || !p) return XIP_ERR_ARG;
-    if (!subs && !routed) return XIP_OK;                                 /* nobody listens: not worth a packet */
+    if (!subs && !routed && !quic_active()) return XIP_OK;        /* nobody listens: not worth a packet */
     if (len > XIP_PKT_MAX) return XIP_ERR_SIZE;
     int slot = xip_pool_acquire(p, 0);
     if (slot < 0) {
@@ -1278,6 +1745,20 @@ int xip_link_native_rx(int addr, uint64_t source, int32_t signal, const uint8_t 
     if (len) memcpy(xip_pool_slot(p, slot) + XIP_PKT_HEADROOM, data, len);
     link_fanout((uint32_t)addr, 0, slot, XIP_PKT_HEADROOM, (uint16_t)len, source, signal, time_us);
     return XIP_OK;
+}
+
+/* The application sends one frame on a native link: copied into a pool packet (payload window after the headroom). 0: the link has it (the
+ * runtime owns the packet); XIP_ERR_BUSY: the link refused it, nothing is kept, retry after the READY callback; other negatives: dropped. */
+int xip_link_native_send(int addr, uint64_t dest, const uint8_t *data, size_t len)
+{
+    xip_pool *p = pool_get();
+    if (!p || !data || !len || len > XIP_PKT_MAX) return XIP_ERR_ARG;
+    const int slot = xip_pool_acquire(p, 0);
+    if (slot < 0) return XIP_ERR_NOMEM;
+    memcpy(xip_pool_slot(p, slot) + XIP_PKT_HEADROOM, data, len);
+    const int rc = link_tx((uint32_t)addr, slot, XIP_PKT_HEADROOM, (uint16_t)len, dest, 0, 0, 0);
+    if (rc) drop_slot(slot);
+    return rc;
 }
 
 /* Release what a module still holds or has waiting (it ended): on the worker, in finish(). */
@@ -1338,6 +1819,9 @@ static void finish(struct xip_instance *in, int result)
         esp_timer_delete(in->alarms[i].timer);
         alarm_ctx[in->slot * XIP_ALARMS + i].seq++;   /* a callback already in flight is stale */
     }
+    xip_ip_release(in->id);
+    quic_module_release(in);
+    xip_power_cancel(in->id);
     xip_info_release(in->id);
     socket_release(in->id);
     flash_release(in->id);
@@ -1445,6 +1929,27 @@ static void handle_request(struct xip_instance *in, const xip_event_t *ev)
     settle(in, rc);
 }
 
+/* The runtime answers an envelope request itself (the module never saw it, or it is not one the module serves): an error answer through the
+ * same path as a module's reply, so the wrapping, the datagram header and the reply bookkeeping are the same. */
+static void env_reject(struct xip_instance *in, uint32_t from, uint64_t token, int32_t component, int32_t method, uint64_t id, int32_t rc)
+{
+    uint32_t pkt;
+    uint8_t *buf;
+    size_t cap;
+    if (h_pkt_alloc(in, &pkt) != XIP_OK) return;
+    if (h_pkt_buf(in, pkt, &buf, &cap) != XIP_OK || cap < 9) { (void)h_pkt_free(in, pkt); return; }
+    xip_cbor_w w;
+    xip_cbor_init(&w, buf, cap);
+    xip_cbor_int(&w, rc);
+    const int n = xip_cbor_done(&w);
+    env_add(in, from, token, component, method, id);
+    if (n < 0 || h_send(in, pkt, (size_t)n, from, component, method, token) != XIP_OK) {
+        xip_env_slot s = {.dst = from, .token = token, .id = id, .component = component, .method = method};
+        env_done(in, &s);
+        (void)h_pkt_free(in, pkt);                 /* BUSY keeps the packet; other failures consumed it: the free is then ARG */
+    }
+}
+
 /* Deliver what is waiting, one call each: the packet is lent for the call and goes back to the pool when the handler
  * returns, unless the module kept it. */
 static void handle_packets(struct xip_instance *in)
@@ -1472,11 +1977,38 @@ static void handle_packets(struct xip_instance *in)
         portEXIT_CRITICAL(&registry_lock);
         if (slot < 0) return;
         if (was_full && hooks.inbox_ready) hooks.inbox_ready(hooks.packet_ctx, in->component);
+        const uint8_t *data = xip_pool_slot(pool, slot) + start;
+        size_t dlen = len;
+        bool envelope = false;
+        if (lflags & XIP_CALL_ENVELOPE) {
+            /* a frame of this module's port or a 0x444d0002 datagram: a CBOR envelope is parsed here and the module gets an ordinary request;
+             * anything else is a raw frame of the link, as before */
+            lflags &= ~(uint32_t)XIP_CALL_ENVELOPE;
+            xip_envelope env;
+            const bool console = in->component == QUIC_CONSOLE_COMPONENT;
+            const xip_envelope_kind kind = xip_envelope_parse(data, len, &env);
+            if (kind == XIP_ENV_REQUEST && (console || env.component == in->component)) {
+                envelope = true;
+                component = env.component; method = env.method;
+                data = env.fields; dlen = env.fields_len;
+                lflags = XIP_CALL_ENVELOPE;
+                env_add(in, from, id, env.component, env.method, env.has_id ? env.id : 0);
+            } else if (kind == XIP_ENV_REQUEST || (console && (kind == XIP_ENV_INVALID || kind == XIP_ENV_NOT_MAP))) {
+                /* the console answers whatever is not an envelope with an error; another module takes a map or bytes that are not an envelope
+                 * for a raw frame of its port */
+                in->stats.pkt_received++;
+                const int32_t c = env.component, m = env.method;
+                const uint64_t rid = env.has_id ? env.id : 0;
+                drop_slot(slot);
+                env_reject(in, from, id, c, m, rid, kind == XIP_ENV_REQUEST ? XIP_ERR_UNSUPPORTED : XIP_ERR_ARG);
+                continue;
+            }
+        }
         uint32_t h = xip_held_add(&in->held, slot, start, len, XIP_HELD_BORROWED);
         if (!h) { drop_slot(slot); in->stats.pkt_dropped++; continue; }
         in->stats.pkt_received++;
-        const bool wants = id != 0 && !(lflags & XIP_CALL_LINK);      /* a frame of a link has an address token in `id`, not a request to answer */
-        const int rc = dispatch_packet(in, component, method, xip_pool_slot(pool, slot) + start, len, h, from, id,
+        const bool wants = envelope || (id != 0 && !(lflags & XIP_CALL_LINK));      /* a frame of a link has an address token in `id`, not a request to answer */
+        const int rc = dispatch_packet(in, component, method, data, dlen, h, from, id,
                                        (wants ? 1u : 0u) | lflags, value, time_us);
         xip_held_entry *e = xip_held_get(&in->held, h);
         if (e && e->state == XIP_HELD_BORROWED) {         /* not kept, not sent on */
@@ -1495,17 +2027,23 @@ static void worker(void *arg)
     (void)arg;
     xip_event_t ev;
     for (;;) {
-        if (atomic_exchange(&wifi_pending, false)) {
+        if (atomic_exchange(&wake_pending, false)) {
+            ev = (xip_event_t){.kind = XIP_EV_WAKE, .value = atomic_load(&wake_value)};
+        } else if (atomic_exchange(&wifi_pending, false)) {
             ev = (xip_event_t){.kind = XIP_EV_WIFI, .value = (int32_t)atomic_load(&wifi_generation)};
         } else {
             if (xQueueReceive(worker_queue, &ev, portMAX_DELAY) != pdTRUE) continue;
-            if (ev.kind == XIP_EV_WIFI) {
+            if (ev.kind == XIP_EV_WAKE) {
+                if (!atomic_exchange(&wake_pending, false)) continue;
+                ev.value = atomic_load(&wake_value);
+            } else if (ev.kind == XIP_EV_WIFI) {
                 if (!atomic_exchange(&wifi_pending, false)) continue;
                 ev.value = (int32_t)atomic_load(&wifi_generation);
             }
         }
         if (ev.kind == XIP_EV_SLEEP) { xip_power_cycle(); continue; }
         if (ev.kind == XIP_EV_NETWORK || ev.kind == XIP_EV_WAKE || ev.kind == XIP_EV_WIFI) {
+            if (ev.kind == XIP_EV_NETWORK && ev.value && quic_active()) xip_quic_udp_ensure();
             if (ev.kind == XIP_EV_WIFI && hooks.wifi_reconcile) hooks.wifi_reconcile();
             for (int i = 0; i < XIP_MAX_INSTANCES; i++) {
                 struct xip_instance *in = registry[i];
@@ -1518,6 +2056,7 @@ static void worker(void *arg)
                     if (!want) continue;
                     if (settle(in, dispatch(in, XIP_HOST_COMPONENT, XIP_HOST_WAKE, ev.value, 0, NULL, 0))) continue;
                 } else {
+                    if (ev.value) stream_accept(in);
                     if (settle(in, dispatch(in, XIP_HOST_COMPONENT, XIP_HOST_NETWORK, ev.value, 0, NULL, 0))) continue;
                     if (!ev.value) continue;
                     for (int k = 0; k < XIP_ALARMS; k++) {
@@ -1554,7 +2093,7 @@ static void worker(void *arg)
             break;
         }
         case XIP_EV_IO: {
-            if (ev.value >= XIP_SOCKET_EVENT_OPEN && ev.value <= XIP_SOCKET_EVENT_WRITE_DONE) socket_delivered((uint32_t)ev.id);
+            if (ev.value >= XIP_SOCKET_EVENT_OPEN && ev.value <= XIP_SOCKET_EVENT_WRITE_DONE) socket_delivered((uint32_t)ev.id,ev.value);
             xip_call call = {.size = sizeof(call), .component = ev.component, .method = ev.method,
                                 .value = ev.value, .id = ev.id};
             (void)settle(in, dispatch_x(in, &call));
@@ -1595,7 +2134,7 @@ esp_err_t xip_host_init(const xip_host_hooks_t *h)
     }
     /* the link the records travel on: registered with the wire, not when a module binds the console
      * port — a record of any port a module holds must reach it, with or without a console. */
-    serial_link = xip_link_native_register("serial", 256, XIP_LINK_FLAG_STREAM, serial_tx, NULL);
+    serial_link = xip_link_native_register("serial", XIP_PKT_MAX, XIP_LINK_FLAG_STREAM, serial_tx, NULL);
     if (serial_link < 0) {
         inited = false;
         ESP_LOGE(TAG, "the serial link did not register");
@@ -1614,7 +2153,7 @@ esp_err_t xip_host_init_simple(const xip_host_ext_t *ext)
         h.wifi_set = ext->wifi_set; h.wifi_get = ext->wifi_get; h.wifi_state = ext->wifi_state;
         h.nv = ext->nv; h.pool = ext->pool; h.wifi_scan = ext->wifi_scan; h.wifi_monitor = ext->wifi_monitor;
         h.modules_info = ext->modules_info; h.module_start = ext->module_start; h.module_stop = ext->module_stop;
-        h.module_manifest = ext->module_manifest;
+        h.module_manifest = ext->module_manifest; h.module_rescan = ext->module_rescan;
         h.wifi_reconcile = ext->wifi_reconcile;
         h.wifi_tuning_set = ext->wifi_tuning_set; h.wifi_tuning_get = ext->wifi_tuning_get;
         h.packet = ext->packet; h.inbox_ready = ext->inbox_ready;
@@ -1622,25 +2161,57 @@ esp_err_t xip_host_init_simple(const xip_host_ext_t *ext)
     return xip_host_init(&h);
 }
 
-void xip_host_set_connected(bool connected)
+uint8_t xip_host_network_sockets(void)
 {
-    if (!inited || net_connected == connected) return;
-    net_connected = connected;
-    xip_event_t ev = {.kind = XIP_EV_NETWORK, .value = connected};
-    (void)xQueueSend(worker_queue, &ev, 0);
+    unsigned count=xip_quic_udp_sockets();
+    if(sockets_lock){
+        xSemaphoreTake(sockets_lock,portMAX_DELAY);
+        for(sock_node *s=sockets;s;s=s->next)count++;
+        xSemaphoreGive(sockets_lock);
+    }
+    return count>255 ? 255 : (uint8_t)count;
 }
 
-void xip_power_post(void)
+void xip_host_network_suspend(void)
+{
+    xip_quic_udp_stop();
+    socket_network_down();
+    xip_ip_suspend_all();
+    xip_host_set_connected(false);
+}
+
+static void network_connectivity(bool physical,bool connected)
 {
     if (!inited) return;
+    portENTER_CRITICAL(&registry_lock);
+    if (physical) physical_connected=connected; else virtual_connected=connected;
+    const bool ready=physical_connected || virtual_connected;
+    const bool changed=net_connected!=ready;
+    net_connected=ready;
+    portEXIT_CRITICAL(&registry_lock);
+    if (changed) {
+        xip_event_t ev={.kind=XIP_EV_NETWORK,.value=ready};
+        (void)xQueueSend(worker_queue,&ev,0);
+    }
+}
+void xip_host_set_connected(bool connected) { network_connectivity(true,connected); }
+void xip_host_ip_connected(bool connected) { network_connectivity(false,connected); }
+
+int xip_power_post(void)
+{
+    if (!inited) return XIP_ERR_UNSUPPORTED;
     xip_event_t ev = {.kind = XIP_EV_SLEEP};
-    (void)xQueueSend(worker_queue, &ev, 0);
+    return xQueueSend(worker_queue, &ev, 0) == pdTRUE ? XIP_OK : XIP_ERR_BUSY;
 }
 
 void xip_host_wake_window_value(int32_t value)
 {
     if (!inited) return;
-    xip_event_t ev = {.kind = XIP_EV_WAKE, .value = value};
+    atomic_store(&wake_value, value);
+    atomic_store(&wake_pending, true);
+    /* Coalesce UART chunks. Even if the queue is full the worker observes the
+     * pending wake before taking another event; activity cannot be lost. */
+    xip_event_t ev = {.kind = XIP_EV_WAKE};
     (void)xQueueSend(worker_queue, &ev, 0);
 }
 
@@ -1677,7 +2248,7 @@ xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_
         .abi_version = XIP_ABI_VERSION,
         .size = sizeof(xip_host),
         .user = in,
-        .log = h_log, .now_ms = h_now_ms,
+        .log = h_log, .now_ms = h_now_ms, .now_us = h_now_us,
         .get_setting = h_get_setting, .set_setting = h_set_setting,
         .alarm_set = h_alarm_set, .alarm_cancel = h_alarm_cancel,
         .modules_info = h_modules_info, .module_start = h_module_start, .module_stop = h_module_stop,
@@ -1686,7 +2257,7 @@ xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_
         .pkt_info = h_pkt_info, .mem_alloc = h_mem_alloc, .mem_free = h_mem_free, .pkt_span = h_pkt_span,
         .socket_read = h_socket_read, .socket_write = h_socket_write,
         .socket_close = h_socket_close, .socket_peer = h_socket_peer, .socket_write_pkt = h_socket_write_pkt,
-        .flash_erase = h_flash_erase, .flash_write = h_flash_write, .flash_read = h_flash_read, .module_manifest = h_module_manifest, .nv = h_nv, .heap_info = h_heap_info, .heap_dump = h_heap_dump,
+        .flash_erase = h_flash_erase, .flash_write = h_flash_write, .flash_read = h_flash_read, .module_manifest = h_module_manifest, .module_rescan = h_module_rescan, .nv = h_nv, .heap_info = h_heap_info, .heap_dump = h_heap_dump,
     };
     for (int i = 0; i < XIP_IRQ_SLOTS; i++) in->irq[i].inst = in;
     portENTER_CRITICAL(&registry_lock);
@@ -1699,13 +2270,7 @@ xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_
         int rc = port_bind(in);
         if (rc) ESP_LOGW(TAG, "%s: port %u not bound: %d", in->name, (unsigned)in->port, rc);
     }
-    if (in->stream) {
-        /* Declarative accept: the stream port listens on TCP port XIP_PORT_NET + stream, and each connection arrives as a socket event
-         * (component, method 0, value SOCKET_EVENT_*, id = the handle) that the module reads and writes with socket_read / socket_write. */
-        uint32_t listener;
-        int rc = h_tcp_accept(in, (uint16_t)(XIP_PORT_NET + in->stream), XIP_SOCKET_MODE_DIRECT, in->component, 0, &listener);
-        if (rc) ESP_LOGW(TAG, "%s: stream port %u not listening: %d", in->name, (unsigned)in->stream, rc);
-    }
+    stream_accept(in);
     return in;
 }
 

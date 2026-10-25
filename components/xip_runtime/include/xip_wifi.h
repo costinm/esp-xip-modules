@@ -39,6 +39,8 @@ int xip_wifi_now_enable(int (*callback)(void *, size_t, uint8_t *, uint8_t *), b
 int xip_wifi_now_disable(void);
 int xip_link_espnow_start(void);
 void xip_link_espnow_stop(void);
+/* Monitor fallback for the virtual NAN port; frame excludes radio FCS. */
+bool xip_link_espnow_nan_promisc(const uint8_t *frame, size_t len, int32_t signal, uint32_t time_us);
 /* Optional per-enabled-epoch debug counters (CONFIG_XIP_ESPNOW_DIAGNOSTICS; zeros when off), as the `now` record of the wifi status
  * (api/host.API.md): where a received frame died, without a host attached. */
 typedef struct {
@@ -73,3 +75,13 @@ unsigned xip_rx_filter_dropped(void);
 /* Promiscuous counters, for the power component's info. */
 unsigned xip_link_promisc_frames(void);
 unsigned xip_link_promisc_on(void);
+
+/* Full 802.11 action frames sent through a pool-backed native link. */
+int xip_link_wifi_action_start(void);
+
+/* Serialize action submission against temporary promiscuous capture. Native SDK signature. */
+esp_err_t xip_wifi_action_tx_req(wifi_action_tx_req_t *request);
+void xip_link_wifi_action_stop(void);
+
+int xip_wifi_auto_reconnect(bool enabled);
+int xip_wifi_scan_channels(xip_ap_t *aps, size_t max, uint16_t channels, uint16_t dwell_ms);

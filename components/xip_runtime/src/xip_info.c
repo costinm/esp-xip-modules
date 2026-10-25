@@ -3,6 +3,7 @@
 #include <string.h>
 #include "esp_chip_info.h"
 #include "esp_flash.h"
+#include "esp_mac.h"
 #include "esp_cpu.h"
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
@@ -70,7 +71,9 @@ int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
     if (esp_flash_get_size(NULL, &flash_size) != ESP_OK) return XIP_ERR_IO;
     const esp_partition_t *part = running_partition();
     xip_cbor_map(&w, 5);
-    xip_cbor_uint(&w, 1); xip_cbor_map(&w, part ? 6 : 3);
+    uint8_t mac[6];
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return XIP_ERR_IO;
+    xip_cbor_uint(&w, 1); xip_cbor_map(&w, part ? 7 : 4);
     xip_cbor_uint(&w, 1); xip_cbor_uint(&w, (uint64_t)(esp_timer_get_time() / 1000));
     xip_cbor_uint(&w, 2); xip_cbor_uint(&w, chip.model);
     xip_cbor_uint(&w, 3); xip_cbor_uint(&w, flash_size);
@@ -79,6 +82,7 @@ int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
         xip_cbor_uint(&w, 5); xip_cbor_uint(&w, part->address);
         xip_cbor_uint(&w, 6); xip_cbor_uint(&w, part->size);
     }
+    xip_cbor_uint(&w, 7); xip_cbor_bytes(&w, mac, sizeof(mac));
     /* Let each existing encoder use the unused tail of the caller's buffer. */
     xip_cbor_uint(&w, 2);
     if (w.overflow) return XIP_ERR_SIZE;
