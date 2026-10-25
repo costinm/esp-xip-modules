@@ -1,0 +1,132 @@
+[
+  {
+    "description": "create the virtual interface",
+    "inputSchema": {
+      "properties": {
+        "gateway": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bytes"
+        },
+        "ipv4": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "ipv6": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bytes"
+        },
+        "mtu": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u16"
+        },
+        "netmask": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "ip.open",
+    "outputSchema": {
+      "properties": {
+        "link": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 12,
+    "x-method-index": 1,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "enable or pause",
+    "inputSchema": {
+      "properties": {
+        "link": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u32"
+        },
+        "up": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "ip.set_up",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 12,
+    "x-method-index": 2,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "remove the interface",
+    "inputSchema": {
+      "properties": {
+        "link": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "ip.close",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 12,
+    "x-method-index": 3,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  }
+]

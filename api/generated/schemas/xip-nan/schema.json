@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "const": "nan.status"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 1
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "nan.tracking"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 2
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "nan.announce"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 3
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "nan.discover"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 4
+    },
+    {
+      "properties": {
+        "instance": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "method": {
+          "const": "nan.send"
+        },
+        "now": {
+          "type": "boolean",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bool"
+        },
+        "payload": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        },
+        "peer": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 5
+    },
+    {
+      "properties": {
+        "cadence": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "enabled": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "method": {
+          "const": "nan.sleepy"
+        },
+        "trace": {
+          "type": "boolean",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 6
+    },
+    {
+      "properties": {
+        "duration_ms": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "method": {
+          "const": "nan.watch"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 7
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "nan.post"
+        },
+        "now": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "payload": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "subscribe": {
+          "type": "boolean",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 8
+    },
+    {
+      "properties": {
+        "kind": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "method": {
+          "const": "nan.wake"
+        },
+        "now": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "target": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 9
+    },
+    {
+      "properties": {
+        "duration_ms": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "method": {
+          "const": "nan.awake"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 10
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "nan.set_announce"
+        },
+        "record": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 11
+    }
+  ]
+}

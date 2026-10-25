@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "const": "quic.status"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 48,
+      "x-method-index": 1
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "quic.reset"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 48,
+      "x-method-index": 2
+    }
+  ]
+}

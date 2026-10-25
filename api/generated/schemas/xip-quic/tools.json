@@ -1,0 +1,92 @@
+[
+  {
+    "description": "endpoint state",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "quic.status",
+    "outputSchema": {
+      "properties": {
+        "allocated": {
+          "type": "boolean",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bool"
+        },
+        "associations": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "errors": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "last_error": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "int"
+        },
+        "protected": {
+          "type": "boolean",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "bool"
+        },
+        "received": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "stream_limit": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 48,
+    "x-method-index": 1,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "discard endpoint associations",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "quic.reset",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 48,
+    "x-method-index": 2,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  }
+]

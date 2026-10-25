@@ -1,0 +1,614 @@
+[
+  {
+    "description": "local synchronization and policy",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.status",
+    "outputSchema": {
+      "properties": {
+        "announce_bytes": {
+          "type": "string",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "uint"
+        },
+        "beacon_interval_tu": {
+          "type": "string",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "uint"
+        },
+        "beacons": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "uint"
+        },
+        "capturing": {
+          "type": "boolean",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "bool"
+        },
+        "clock_master": {
+          "type": "string",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "bytes"
+        },
+        "clock_source": {
+          "type": "string",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "uint"
+        },
+        "cluster": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        },
+        "diagnostics": {
+          "type": "boolean",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "bool"
+        },
+        "identities": {
+          "type": "array",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "array"
+        },
+        "ip_sockets": {
+          "type": "string",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "uint"
+        },
+        "last_error": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "int"
+        },
+        "mac": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "master": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "max_beacon_gap_us": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "peers": {
+          "type": "array",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "array"
+        },
+        "received_us": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "resume_lead_us": {
+          "type": "string",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "uint"
+        },
+        "sdf_rx": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "sdf_tx": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "uint"
+        },
+        "selected_beacons": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "uint"
+        },
+        "signed_announce": {
+          "type": "boolean",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "bool"
+        },
+        "sleep_pending": {
+          "type": "boolean",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "bool"
+        },
+        "sleepy": {
+          "type": "boolean",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "bool"
+        },
+        "sync_rx": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "sync_tx": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "uint"
+        },
+        "tsf_us": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "tx_errors": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 1,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "optional capture diagnostics",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.tracking",
+    "outputSchema": {
+      "properties": {
+        "attribute_source": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "bytes"
+        },
+        "attribute_tsf_us": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "uint"
+        },
+        "attributes_truncated": {
+          "type": "boolean",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "bool"
+        },
+        "availability": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "bytes"
+        },
+        "bytes": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "uint"
+        },
+        "device_capability": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "bytes"
+        },
+        "enabled": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "last_response_id": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "uint"
+        },
+        "last_response_now": {
+          "type": "boolean",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "bool"
+        },
+        "last_response_peer": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "bytes"
+        },
+        "lead_ms": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "uint"
+        },
+        "miss_wait_ms": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "missed": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "opens": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "recovered": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "samples": {
+          "type": "array",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "array"
+        },
+        "timed_out": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 2,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "cached local publication",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.announce",
+    "outputSchema": {
+      "properties": {
+        "record": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 3,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "queue an active NAN Subscribe",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.discover",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 4,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "queue an application record",
+    "inputSchema": {
+      "properties": {
+        "instance": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "now": {
+          "type": "boolean",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bool"
+        },
+        "payload": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        },
+        "peer": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.send",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 5,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "arm or leave coordinated sleep",
+    "inputSchema": {
+      "properties": {
+        "cadence": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "enabled": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "trace": {
+          "type": "boolean",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.sleepy",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 6,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "fresh observations for a bounded interval",
+    "inputSchema": {
+      "properties": {
+        "duration_ms": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.watch",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 7,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "arbitrary discovery SUB/PUB content",
+    "inputSchema": {
+      "properties": {
+        "now": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "payload": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "subscribe": {
+          "type": "boolean",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.post",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 8,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "targeted activation through this device",
+    "inputSchema": {
+      "properties": {
+        "kind": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "now": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "target": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.wake",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 9,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "extend/query shared temporary awake time",
+    "inputSchema": {
+      "properties": {
+        "duration_ms": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.awake",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 10,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "replace cached publication without restarting",
+    "inputSchema": {
+      "properties": {
+        "record": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.set_announce",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 11,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  }
+]

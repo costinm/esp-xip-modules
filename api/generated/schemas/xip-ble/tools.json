@@ -1,0 +1,556 @@
+[
+  {
+    "description": "Start the service",
+    "inputSchema": {
+      "properties": {
+        "paired": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.start",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 104,
+    "x-method-index": 80,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Stop the service",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.stop",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 104,
+    "x-method-index": 81,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Scan for advertisements",
+    "inputSchema": {
+      "properties": {
+        "duration_ms": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.scan",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 104,
+    "x-errors": [
+      {
+        "description": "The stack is not started or not synchronized yet.",
+        "name": "timeout"
+      }
+    ],
+    "x-method-index": 82,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "The state",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.status",
+    "outputSchema": {
+      "properties": {
+        "advertising": {
+          "type": "boolean",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bool"
+        },
+        "bonded": {
+          "type": "boolean",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "bool"
+        },
+        "boot_enabled": {
+          "type": "boolean",
+          "x-protobuf-index": 29,
+          "x-protobuf-type": "bool"
+        },
+        "coc_connected": {
+          "type": "boolean",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bool"
+        },
+        "coc_rx": {
+          "type": "integer",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "u32"
+        },
+        "coc_rx_rejected": {
+          "type": "integer",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "u32"
+        },
+        "coc_tx_pending": {
+          "type": "boolean",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "bool"
+        },
+        "connected": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "egress_attempts": {
+          "type": "integer",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "u32"
+        },
+        "egress_blocked_disconnected": {
+          "type": "integer",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "u32"
+        },
+        "egress_blocked_pending": {
+          "type": "integer",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "u32"
+        },
+        "egress_send_errors": {
+          "type": "integer",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "u32"
+        },
+        "egress_sent": {
+          "type": "integer",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "u32"
+        },
+        "encrypted": {
+          "type": "boolean",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "bool"
+        },
+        "generation": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "handle": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u16"
+        },
+        "ingress_accepted": {
+          "type": "integer",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "u32"
+        },
+        "ingress_enqueued": {
+          "type": "integer",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "u32"
+        },
+        "ingress_rejected": {
+          "type": "integer",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "u32"
+        },
+        "last_scan_addr": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "bytes"
+        },
+        "last_scan_addr_type": {
+          "type": "integer",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "u8"
+        },
+        "last_scan_rssi": {
+          "type": "integer",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "i32"
+        },
+        "local_addr": {
+          "type": "string",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "bytes"
+        },
+        "local_addr_type": {
+          "type": "integer",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "u8"
+        },
+        "mode": {
+          "type": "integer",
+          "x-protobuf-index": 28,
+          "x-protobuf-type": "u8"
+        },
+        "ready": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "scan_matches": {
+          "type": "integer",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "u32"
+        },
+        "scan_reports": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u32"
+        },
+        "scanning": {
+          "type": "boolean",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "bool"
+        },
+        "suspended": {
+          "type": "boolean",
+          "x-protobuf-index": 30,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "authenticated",
+    "x-component-index": 104,
+    "x-method-index": 83,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Stop scanning",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.scan_stop",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 104,
+    "x-method-index": 84,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Connect and open the CoC channel",
+    "inputSchema": {
+      "properties": {
+        "addr": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        },
+        "addr_type": {
+          "type": "integer",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "u8"
+        },
+        "psm": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "u16"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.connect",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 104,
+    "x-errors": [
+      {
+        "description": "A PSM outside 0x0080..0x00ff.",
+        "name": "invalid_argument"
+      },
+      {
+        "description": "The stack is not started or not synchronized yet.",
+        "name": "timeout"
+      }
+    ],
+    "x-method-index": 85,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Create the CoC server only",
+    "inputSchema": {
+      "properties": {
+        "psm": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u16"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.listen",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 104,
+    "x-method-index": 87,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Forget every bond",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.bonds_clear",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`",
+    "x-component-index": 104,
+    "x-method-index": 88,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Wake/sleep mode and boot flag",
+    "inputSchema": {
+      "properties": {
+        "boot": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u8"
+        },
+        "mode": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u8"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.mode",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 104,
+    "x-method-index": 89,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "The scan cache",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.scan_results",
+    "outputSchema": {
+      "properties": {
+        "results": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "authenticated",
+    "x-component-index": 104,
+    "x-method-index": 90,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Prepare for a light sleep",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.suspend",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 104,
+    "x-method-index": 91,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Re-arm after a light sleep",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "ble.resume",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 104,
+    "x-method-index": 92,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  }
+]

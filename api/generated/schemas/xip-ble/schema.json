@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "const": "ble.start"
+        },
+        "paired": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 80
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "ble.stop"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 81
+    },
+    {
+      "properties": {
+        "duration_ms": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "ble.scan"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 82
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "ble.status"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 83
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "ble.scan_stop"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 84
+    },
+    {
+      "properties": {
+        "addr": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        },
+        "addr_type": {
+          "type": "integer",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "u8"
+        },
+        "method": {
+          "const": "ble.connect"
+        },
+        "psm": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "u16"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 85
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "ble.listen"
+        },
+        "psm": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u16"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 87
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "ble.bonds_clear"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 88
+    },
+    {
+      "properties": {
+        "boot": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u8"
+        },
+        "method": {
+          "const": "ble.mode"
+        },
+        "mode": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u8"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 89
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "ble.scan_results"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 90
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "ble.suspend"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 91
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "ble.resume"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 104,
+      "x-method-index": 92
+    }
+  ]
+}
