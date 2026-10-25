@@ -31,17 +31,35 @@ validation gaps](../../notes/ai/modules/README.md) before device experiments.
 
 ## Envelopes
 
-A PPP record on a module's port, a datagram on its UDP port and a `0x444d0002`
-QUIC datagram carry the CBOR envelope `{1: component, 2: method, 3: id,
-5: fields}`. The runtime parses it ([xip_envelope.h](include/xip_envelope.h)); a
-module never does. The module's handler receives an ordinary request with
-`XIP_CALL_ENVELOPE`: the envelope's component and method, the fields map as
-`data`, and the link and token to answer on. What it sends back with `reply` is
-wrapped as `{1, 2, 3, 6: result}`; a bare negative integer (an `XIP_ERR_*`) becomes
-`{1, 2, 3, 7: error}`, the one error shape. An answer may come later from another
-call. Sending with `XIP_SEND_MORE` or-ed into the method keeps the request open
-for more answers (a subscription's events); the last message omits it. A request
-for a component the module does not serve is refused by the runtime with
-`XIP_ERR_UNSUPPORTED` (the console module, component 20, takes every component and
-also answers frames that are not envelopes with `XIP_ERR_ARG`). Bytes that are not
-an envelope reach any other module as raw frames of the port (`XIP_CALL_LINK`).
+The CBOR envelope `{1: component, 2: method, 3: id, 5: fields}` is parsed by the runtime in one place: a **QUIC long packet of version `0x444d0002`**
+that the classifier takes from a QUIC link (PPP port `0xf7`, UDP 3339, `ble`, `espnow`). `dmesh-cli` sends every request that way. Module ports (PPP,
+UDP, any) deliver **raw frames**, the full datagram or record, as `XIP_CALL_LINK`; nothing on them is parsed. The packet goes to the module of the envelope's
+component if that module has a datagram port or hosts a component, otherwise to the module of component 20 (`mod_con`), which serves the native
+components (Wi-Fi 10, power 11, ip 12, ...) from its native method table. A module with neither is not a target. The handler receives an ordinary
+request with `XIP_CALL_ENVELOPE`: the envelope's component and method, the fields map as `data`, the link and token to answer on (`from`, `id`) and
+the envelope's own id (`request_id`, `request_has_id`, appended to `xip_call`). What it sends back with `reply` is wrapped as `{1, 2, 3, 6: result}` and
+sent to the peer as a `0x444d0002` packet with the CIDs swapped; a bare negative integer (an `XIP_ERR_*`) becomes `{1, 2, 3, 7: error}`, the one error
+shape. An answer may come later from another call. Sending with `XIP_SEND_MORE` or-ed into the method keeps the request open for more answers (a
+subscription's events, which keep the reply note of the datagram until it expires); the last message omits it. Fields that are not a map (the NOW bench's
+pattern) make the packet a raw frame instead.
+
+## Components hosted by a module
+
+A component is a table of functions whether the runtime or a module implements it. A module lists the components it hosts in its manifest (key 11,
+`mkmod.py --components ble`; at most three names). After the module started the runtime asks it for each table (`XIP_HOST_TABLE`, answered with
+`Hw::provide_table`: the table `{u32 version, u32 size, one function pointer per method}` and the context its functions take).
+`get_component(name)` falls through from the runtime's own tables to the running module that hosts the name and returns the runtime's **copy** of the
+table, whose functions are thunks. A thunk takes the global module lock (the one that also serializes every handler), calls the module's function
+with the module's context instead of the caller's, and returns `XIP_ERR_NOTFOUND` once no module hosts the name; a restarted module is served by the
+same copy again. The functions are `int f(void *ctx, ...)` with at most five more words of arguments (integers and pointers; a 64-bit argument
+takes two). The thunks run on the calling task, so any task may call, a module worker included: the call runs inline under the same recursive lock, so a hosted
+function may call tables again (its own too) without deadlock. A runtime component of the same name wins. A module that is installed but not running is **started by `get_component`** (the `component_start` hook; the
+loader starts the installed module that names the component, and its `HOST_START` and table exchange run inline before the answer); if it cannot start the
+answer is NULL. When a module stops (upgrade, replacement, `module_rescan`) its table is gone with it: thunks handed out earlier return `XIP_ERR_NOTFOUND`
+while it is stopped, and are bound again to the next instance of the name, which may be another image at other addresses (entries it lacks answer
+`XIP_ERR_UNSUPPORTED`). The lock covers the swap: `finish` (which releases the image) takes it, so no thunk is inside module code while the image goes. The generator `tools/gen_vtables.py` writes the table, the CBOR glue and the module-side
+wrappers from an `API.md` (`scripts/gen.sh`).
+
+Which methods of a hosted vtable an envelope can reach: those of the module's `API.md` (numbered, CBOR, in the catalog) are remote-callable, and only
+they are in the generated `dispatch`. Methods that only `get_component` callers use, with their own parameters (up to five words, like the psa vtable),
+are declared in `API.local.md` beside it; they are in the table after the remote ones and no envelope reaches them.

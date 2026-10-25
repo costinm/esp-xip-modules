@@ -107,6 +107,9 @@ struct xip_instance {
     xip_held held;             /* packets this module owns, and the one the current call lent it */
     struct { int16_t slot; uint16_t start, len; int32_t component, method; uint32_t from; uint64_t id; int32_t value; uint32_t lflags, time_us; } pkt_in[CONFIG_XIP_PKT_INBOX];
     uint8_t pkt_head, pkt_count;  /* the ring of packets waiting for this module (under the registry lock) */
+    struct { char name[16]; const void *table; void *ctx; } comps[XIP_COMPONENTS_MAX];  /* hosted components (manifest key 11); table/ctx once published */
+    bool start_done;               /* HOST_START was dispatched (by the worker, or inline by get_component) */
+    uint64_t req_id; uint32_t req_has_id;   /* the envelope id of the request being dispatched (xip_call.request_id) */
     xip_env_table env;            /* envelope requests handed to the module whose answer the runtime still wraps (registry lock) */
 };
 

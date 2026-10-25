@@ -47,6 +47,9 @@ typedef struct {
     int (*module_manifest)(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
     /* Look at the module partition again (include/xip.h, module_rescan): the number of modules, or negative. NULL: ERR_UNSUPPORTED. */
     int (*module_rescan)(void);
+    /* Start the installed module that hosts the component `name` (manifest key 11) if it is not running; 0 when it is (the instance exists, its HOST_START
+     * is run by get_component itself). get_component calls it for a name it cannot serve. NULL: no starting on demand. */
+    int (*component_start)(const char *name);
     /* A module sent a packet to ADDR_MAIN (include/xip.h, send): `from` is its component, `data` the message. The packet is
      * lent for the call and goes back to the pool when the hook returns: copy what must stay. */
     int (*packet)(void *ctx, const char *module, uint32_t from, int component, int method, uint64_t id, const uint8_t *data, size_t len);
@@ -99,6 +102,7 @@ typedef struct {
     int (*wifi_tuning_get)(xip_wifi_tuning *tuning);
     int (*wifi_monitor)(const xip_wifi_monitor *monitor);
     int (*module_rescan)(void);   /* appended: see xip_host_hooks_t */
+    int (*component_start)(const char *name);   /* appended: see xip_host_hooks_t */
 } xip_host_ext_t;
 esp_err_t xip_host_init_simple(const xip_host_ext_t *ext);
 
@@ -201,9 +205,9 @@ void xip_quic_rx_set(const xip_quic_rx_ops *ops);
  *    entry hands the packet to the `local` callback (ownership passes: it must release it with xip_quic_pkt_release or pass it on with
  *    xip_quic_pkt_send). A RELAY entry forwards the same pool packet to its link and peer address with the DCID replaced (forward or drop and count: no queue, no retransmission). Unknown DCID: dropped, counted;
  *  - LONG header, version XIP_QUIC_VERSION_CBOR (0x444d0002): after the SCID comes the CBOR envelope {1: component, 2: method, 3: id, 5: fields}. It
- *    goes to the module whose component is the envelope's and that has a datagram port bound (as an envelope that arrives on its port does: the
- *    runtime parses it, see xip_envelope.h, and the handler gets an ordinary request, XIP_CALL_ENVELOPE); otherwise to the console module
- *    (component 20), which answers console and native methods and returns an error for others. The module's answer to the link and token it came from is sent as a 0x444d0002 long packet (DCIDs
+ *    goes to the module whose component is the envelope's if it has a datagram port bound or hosts a component (manifest key 11); otherwise to the
+ *    console module (component 20), which serves console and native methods. This is the only place an envelope is parsed: the runtime parses it
+ *    (xip_envelope.h) and the handler gets an ordinary request, XIP_CALL_ENVELOPE; module ports deliver raw frames. The module's answer to the link and token it came from is sent as a 0x444d0002 long packet (DCIDs
  *    swapped), within XIP_QUIC_REPLY_MS;
  *  - LONG header, any other version (0x444d0001 of quic-lite, versions that are not ours): given to the same `local` callback, else dropped and counted. */
 typedef struct { int slot; uint16_t start, len; } xip_quic_pkt;           /* a pool packet that the callback owns */
@@ -266,6 +270,9 @@ typedef struct {
     int component;                 /* the address of the module for the ABI's call(): its tag; 0 = not addressable */
     uint32_t port;                 /* manifest key 9: the datagram port whose packets it receives and answers (XIP_PORT_CONSOLE: the serial line); 0 = none */
     uint32_t stream;               /* manifest key 10: the stream port: TCP port XIP_PORT_NET + stream, connections arrive as socket events; 0 = none */
+    char components[XIP_COMPONENTS_MAX][16];   /* manifest key 11: names of the components the module hosts (copied); "" = unused. get_component(name) falls
+                                    * through to the running module that hosts it: the caller gets a table of runtime thunks that take the global module
+                                    * lock, call the module's function with the module's context, and return XIP_ERR_NOTFOUND once the module is gone. */
 } xip_instance_config_t;
 
 /* `name` (copied, <= 15 bytes) is used in logs and as the settings namespace "em_<name>". The instance is idle until

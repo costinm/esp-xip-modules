@@ -85,6 +85,9 @@ int xip_loader_manifest(int slot, uint8_t *out, size_t capacity);
 int xip_loader_modules_info(uint8_t *out, size_t capacity);
 int xip_loader_start_named(const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len);
 int xip_loader_stop_named(const uint8_t *name, size_t name_len);
+/* Start the installed module that hosts the component `component` (manifest key 11), unless it runs: the `component_start` hook of the runtime's
+ * get_component. 0: running now; XIP_ERR_NOTFOUND: no installed module names it; otherwise the start's error. */
+int xip_loader_start_hosting(const char *component);
 int xip_loader_manifest_named(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
 
 /* Look at the partition again (after an install): the highest version of each name becomes the module, older ones shadowed. A running

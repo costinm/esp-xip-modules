@@ -384,6 +384,26 @@ const xip_slot_t *xip_loader_slot(int slot)
 }
 
 /* An integer of the manifest (key 9: the datagram port the module is bound to; key 10: its stream port, which listens on TCP). 0: none. */
+/* Manifest key 11: the names of the components the module hosts (an array of at most XIP_COMPONENTS_MAX texts of at most 15 bytes). Others are ignored. */
+static void manifest_components(int slot, const xip_dmod_header *h, char names[XIP_COMPONENTS_MAX][16])
+{
+    memset(names, 0, XIP_COMPONENTS_MAX * 16);
+    if (!h->manifest_size || h->manifest_size > 4096) return;
+    uint8_t *m = malloc(h->manifest_size);
+    if (!m) return;
+    xip_cbor_r v;
+    xip_cbor_item it;
+    if (esp_partition_read(em.part, em.slots_found[slot].offset + h->manifest_offset, m, h->manifest_size) == ESP_OK &&
+        xip_cbor_get(m, h->manifest_size, 11, &v) == 0 && xip_cbor_next(&v, &it) == 0 && it.type == XIP_CBOR_ARRAY) {
+        for (size_t i = 0, k = 0; i < it.n && k < XIP_COMPONENTS_MAX; i++) {
+            xip_cbor_item t;
+            if (xip_cbor_next(&v, &t) || t.type != XIP_CBOR_TEXT) break;
+            if (t.n && t.n < 16) { memcpy(names[k], t.data, t.n); k++; }
+        }
+    }
+    free(m);
+}
+
 static uint32_t manifest_port(int slot, const xip_dmod_header *h, uint64_t key)
 {
     if (!h->manifest_size || h->manifest_size > 4096) return 0;
@@ -457,7 +477,9 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
                                          .port = manifest_port(slot, &h, 9), .stream = manifest_port(slot, &h, 10)};
     ESP_LOGI(TAG, "%s: handler %p, image %u bytes, state %u", em.slots_found[slot].name, (void *)ic.handler,
              (unsigned)h.image_size, (unsigned)h.state_bytes);
-    xip_instance_t *inst = xip_instance_create(em.slots_found[slot].name, &ic);
+    xip_instance_config_t config = ic;
+    manifest_components(slot, &h, config.components);
+    xip_instance_t *inst = xip_instance_create(em.slots_found[slot].name, &config);
     if (!inst) {
         unmap_image(st);
         xSemaphoreTake(em.lock, portMAX_DELAY); st->starting = false; xSemaphoreGive(em.lock);
@@ -580,6 +602,34 @@ int xip_loader_autostart(void)
     }
     free(m);
     return started;
+}
+
+/* Start the module that hosts `component` (manifest key 11) if it is installed and not running: the runtime's get_component asks (the hook
+ * `component_start`). 0: started or already running; XIP_ERR_NOTFOUND: no installed module names it; otherwise the start's error. The highest
+ * version of the module's name runs, as for any start by name. */
+int xip_loader_start_hosting(const char *component)
+{
+    enum { MAX_MANIFEST = 1024 };
+    uint8_t *m = malloc(MAX_MANIFEST);
+    if (!m) return XIP_ERR_NOMEM;
+    int rc = XIP_ERR_NOTFOUND;
+    for (size_t i = 0; i < xip_loader_slot_count() && rc == XIP_ERR_NOTFOUND; i++) {
+        int n = xip_loader_manifest((int)i, m, MAX_MANIFEST);
+        xip_cbor_r v;
+        xip_cbor_item it;
+        if (n <= 0 || xip_cbor_get(m, (size_t)n, 11, &v) != 0 || xip_cbor_next(&v, &it) != 0 || it.type != XIP_CBOR_ARRAY) continue;
+        for (size_t k = 0; k < it.n; k++) {
+            xip_cbor_item t;
+            if (xip_cbor_next(&v, &t) || t.type != XIP_CBOR_TEXT) break;
+            if (t.n != strlen(component) || memcmp(t.data, component, t.n)) continue;
+            const char *name = em.slots_found[i].name;
+            rc = xip_loader_start_named((const uint8_t *)name, strlen(name), NULL, 0);
+            if (rc == XIP_LOADER_ERR_RUNNING) rc = 0;
+            break;
+        }
+    }
+    free(m);
+    return rc;
 }
 
 int xip_loader_manifest_named(const uint8_t *name, size_t n, uint8_t *out, size_t capacity)
