@@ -60,6 +60,13 @@
 // The intended Wi-Fi state or the tuning changed (`wifi` and `wifi-tuning` components); `value` is the new generation. Call `get` to read it again, `state` to see what is true now. Delivered to every running module.
 #define XIP_HOST_WIFI 5
 
+// The runtime asks for the table of a component the module hosts (manifest key 11 lists them). `data` is the component's name; the module answers the
+// request with `Hw::provide_table` (its table of functions and the context they take). Asked once, right after `HOST_START`.
+#define XIP_HOST_TABLE 6
+
+// Most components one module may host.
+#define XIP_COMPONENTS_MAX 3
+
 // Keep the instance.
 #define XIP_RET_CONTINUE 0
 
@@ -131,6 +138,12 @@
 // `link.open` can return an address like a result, positive, and an error stays negative. Module addresses (component numbers) are below it.
 #define XIP_ADDR_LINK 1073741824
 
+// `send` to this address hands the runtime a CBOR envelope `{1: component, 2: method, 3: id, 5: fields}` to dispatch, the way it dispatches a 0x444d0002 datagram: parsed
+// by the runtime, delivered to the module of the component (or to the console module for a native component) as an ordinary request (`CALL_ENVELOPE`), with `from` the
+// sender and `id` the `id` argument of the `send`. The answer comes back to the sender as a message from the module, wrapped as `{1, 2, 3, 6: result}` or `{.., 7: error}`,
+// with the request's component and method and the same `id`. `ERR_ARG` if it is not a valid request envelope, `ERR_NOTFOUND` if no module serves it.
+#define XIP_ADDR_ENVELOPE 1073741808
+
 // Readiness callback; the module calls nonblocking `socket_read` or `socket_write`.
 #define XIP_SOCKET_MODE_DIRECT 0
 
@@ -182,7 +195,7 @@
 #define XIP_DMOD_STATIC_ESP32S3_BASE 1070399488
 
 // Version of the [`Wifi`] table.
-#define XIP_WIFI_VERSION 1
+#define XIP_WIFI_VERSION 2
 
 // A switch of [`WifiTuning`]: the host's own default.
 #define XIP_TUNE_DEFAULT 0
@@ -204,6 +217,17 @@
 
 // `call.flags` bit set on the events of a link; the kind is in `call.flags >> 8`.
 #define XIP_CALL_LINK_EVENT 4
+
+// `call.flags` bit of a request that arrived as a CBOR envelope `{1: component, 2: method, 3: id, 5: fields}` on a module's port or as a 0x444d0002
+// datagram. The runtime parsed the envelope: `component` and `method` are the envelope's, `data` is the fields map (`{}` when absent), `from` and
+// `id` say where the answer goes, and bit 0 is set. What the module sends with `Hw::reply` is wrapped by the runtime as `{1, 2, 3, 6: result}`;
+// a bare negative integer (`Hw::reply_error`) becomes `{1, 2, 3, 7: error}`. A module does not parse or build envelopes.
+#define XIP_CALL_ENVELOPE 8
+
+// OR-ed into the `method` of a `send` to a link that answers an envelope request ([`CALL_ENVELOPE`]): the runtime wraps the message with the request's
+// id as usual but keeps the request open, so a later message with the same `(component, method, token)` is another answer to it (a subscription's
+// events). The last message is sent without it. Only the lower 30 bits are the method.
+#define XIP_SEND_MORE (1 << 30)
 
 // Event: a frame sent to the link is done (the packet comes back, `call.value` is the outcome).
 #define XIP_LINK_EVENT_TX_DONE 1
@@ -228,6 +252,15 @@
 // * Other ports are the first byte of a PPP-framed record on the serial line: `0x7e port bytes... 0x7e`, with `0x7d` escaping (the byte `^ 0x20`).
 //   DMesh's `0xf7` is the port of its QUIC packets.
 #define XIP_PORT_CONSOLE 1
+
+// Virtual NAN port: NAN management frames (A3 prefix 50:6f:9a) and
+// decoded NAN-over-NOW sync bodies (40:4e:53:59:31). Bound by the module
+// manifest, independent of the physical radio link. 0xf7 remains QUIC.
+#define XIP_PORT_NAN 246
+
+// PPP port of DMesh's QUIC packets (`0xf7`). The record's payload is one QUIC packet: the runtime hands it, in a pool packet with the serial
+// link in the metadata, to the common QUIC receive function (`xip_quic_rx_set`), like the frames of ESP-NOW and the BLE channel.
+#define XIP_PORT_QUIC 247
 
 #define XIP_PORT_NET 5225
 
@@ -255,8 +288,13 @@
 // [`Link::route`] flag: also deliver the frame to the subscribers (the default is to forward it only).
 #define XIP_ROUTE_COPY 1
 
+#define XIP_QUIC_VERSION 1
+
 // `Power::version`.
-#define XIP_POWER_VERSION 1
+#define XIP_POWER_VERSION 3
+
+// Emit compact CBOR sleep/wake records on PPP port 250 (0xfa).
+#define XIP_POWER_TRACE_UART 1
 
 // `PowerInfo::state`: nothing running.
 #define XIP_POWER_IDLE 0
@@ -269,6 +307,48 @@
 
 // Awake between the cycles of a request (`awake_ms`).
 #define XIP_POWER_AWAKE 3
+
+// `Ble::version`.
+#define XIP_BLE_VERSION 1
+
+// The default dynamic LE PSM of the DMesh CoC channel; a PSM argument of 0 means this.
+#define XIP_BLE_COC_PSM 128
+
+// Entries of the scan cache that [`Ble::scan_results`] can return at most (`CONFIG_XIP_BLE_SCAN_CACHE` entries are kept).
+#define XIP_BLE_SCAN_RESULT_MAX 16
+
+// Bytes of one scan result record: address (6), address type, RSSI (signed byte), flags (bit 0: the advertisement names the DMesh service).
+#define XIP_BLE_SCAN_RECORD 9
+
+// `BleMode::mode`: leave as is.
+#define XIP_BLE_MODE_KEEP 0
+
+// `BleMode::mode`: the service stays advertised while the device sleeps (a light sleep is vetoed while it is live). The default.
+#define XIP_BLE_MODE_ALWAYS 1
+
+// `BleMode::mode`: duty-cycled rendezvous: advertising and scanning stop before a sleep and are re-armed after it; only an established link vetoes the sleep.
+#define XIP_BLE_MODE_RENDEZVOUS 2
+
+// `BleMode::boot`: leave as is.
+#define XIP_BLE_BOOT_KEEP 0
+
+// `BleMode::boot`: BLE does not start by itself at boot.
+#define XIP_BLE_BOOT_OFF 1
+
+// `BleMode::boot`: BLE service starts after the radio is ready at boot.
+#define XIP_BLE_BOOT_ON 2
+
+// `Nimble::version`.
+#define XIP_NIMBLE_VERSION 1
+
+// Bytes of advertising data or scan response data (the legacy PDU limit).
+#define XIP_NIMBLE_ADV_MAX 31
+
+// Bytes of the GAP device name, including none for a terminator.
+#define XIP_NIMBLE_NAME_MAX 16
+
+// Scan filters of a [`NimbleScan`].
+#define XIP_NIMBLE_FILTERS 3
 
 // `Hardware::version`.
 #define XIP_HARDWARE_VERSION 1
@@ -294,6 +374,111 @@
 #define XIP_ERROR_INVALID_SIGNATURE -149
 
 #define XIP_ERROR_CORRUPTION_DETECTED -151
+
+#define XIP_IP_VERSION 1
+
+// Point-to-point IP interface. No Ethernet/ARP, default route, forwarding or
+// compression. Static IPv6 addresses use an on-link /64; all-zero disables a family.
+typedef struct {
+  uint32_t size;
+  // 0 selects1280; otherwise1280..1500. Tunnel endpoints budget outer headers.
+  uint16_t mtu;
+  uint16_t reserved;
+  uint8_t ipv4[4];
+  uint8_t netmask[4];
+  uint8_t gateway[4];
+  uint8_t ipv6[16];
+} xip_ip_config;
+
+typedef struct {
+  uint32_t version;
+  uint32_t size;
+  // Creates one lazy native link named `ip`, returning its address. The owner
+  // subscribes with Link.open and injects complete packets with normal send.
+  // Owned input is retained by lwIP until its native custom-pbuf callback
+  // releases it. No module pointer/vtable survives in the stack.
+  int (*open)(void *ctx, const xip_ip_config *config, uint32_t *link);
+  int (*set_up)(void *ctx, uint32_t link, uint32_t up);
+  // Removes the netif synchronously on the TCP/IP thread. Owner stop and
+  // network sleep teardown also close it; recreate after resume.
+  int (*close)(void *ctx, uint32_t link);
+} xip_ip;
+
+typedef struct {
+  // sizeof(QuicPoolInfo).
+  uint32_t size;
+  // Physical pool slot bytes, including prefix and tail.
+  uint32_t slot_bytes;
+  uint32_t headroom;
+  uint32_t max_packet;
+  // Current endpoint lease budget, bounded by module quota and pool capacity.
+  uint32_t capacity;
+  uint32_t available;
+} xip_quic_pool_info;
+
+typedef struct {
+  uint32_t size;
+  // Newly owned module handle for the exact completed physical slot.
+  uint32_t packet;
+  uint32_t ticket;
+  uint32_t start;
+  uint32_t len;
+  uint32_t link;
+  uint64_t peer;
+  int32_t outcome;
+  uint32_t elapsed_us;
+} xip_quic_tx_completion;
+
+// get_component("quic"), native component 13. Functions run on the module worker.
+typedef struct {
+  uint32_t version;
+  uint32_t size;
+  // Attach this instance as the one local/unhandled endpoint. RX is delivered
+  // as CALL_LINK(component=this module, method=rx_method), preserving origin.
+  int (*attach)(void *ctx, int rx_method);
+  // Stop admission, release completed packets, disown native physical sends.
+  // A late SDK completion releases its old epoch's lease without calling Rust.
+  int (*detach)(void *ctx);
+  int (*pool_info)(void *ctx, xip_quic_pool_info *out);
+  // Allocate one owned handle while leaving reserved physical pool slots free.
+  int (*acquire)(void *ctx, uint32_t reserved, uint32_t *out);
+  // Transfer a uniquely owned range only on success. ALL immediate negative
+  // returns retain the exact handle/range (unlike consuming Host.send).
+  // Success sets ticket; poll_tx returns the same backing slot after native TX.
+  int (*try_send)(void *ctx,
+                  uint32_t packet,
+                  uint32_t start,
+                  uint32_t len,
+                  uint32_t link,
+                  uint64_t peer,
+                  uint32_t *ticket);
+  // 1 completed lease, 0 none, negative error. A full held quota retains the
+  // native completion for another poll; completions are never lost to inbox pressure.
+  int (*poll_tx)(void *ctx, xip_quic_tx_completion *out);
+} xip_quic;
+
+// `get_component("identity")`: P-256 identity, compatible with the firmware's
+// existing `sec/id_p256` key. Calls are serialized by the module owner.
+typedef struct {
+  // 1.
+  uint32_t version;
+  // Size of this table.
+  uint32_t size;
+  // Write the uncompressed 65-byte SEC1 public key, creating and committing
+  // the identity on first use. No volatile identity is returned on failure.
+  int (*public_key)(void *ctx, uint8_t *out);
+  // SHA-256 and sign a message, returning a 64-byte raw r||s signature.
+  // Call when cached signed facts change, never for periodic publication.
+  int (*sign)(void *ctx, const uint8_t *data, size_t len, uint8_t *signature);
+  // Verify raw r||s ECDSA/SHA-256 using a compressed (33-byte) or
+  // uncompressed (65-byte) SEC1 key. No device identity is loaded.
+  int (*verify)(void *ctx,
+                const uint8_t *public,
+                size_t public_len,
+                const uint8_t *data,
+                size_t len,
+                const uint8_t *signature);
+} xip_identity;
 
 // Writable packet returned by the pool adapter. A successful begin transfers
 // one writer to C, which must call rx_finish exactly once (commit or abort).
@@ -581,7 +766,7 @@ typedef struct {
   //
   // # Returns
   //
-  // `void *` — NULL on exhaustion, when an allocation would leave less than 32 KiB of host heap free, or when the optional per-module quota is exceeded. `CONFIG_XIP_MEM_QUOTA=0` (default) uses the available heap; a nonzero value caps outstanding allocations per module. The free-heap margin is checked at allocation time; unrelated firmware allocations can consume it later.
+  // `void *` — A block aligned to16bytes; NULL on exhaustion, when an allocation would leave less than 32 KiB of host heap free, or when the optional per-module quota is exceeded. `CONFIG_XIP_MEM_QUOTA=0` (default) uses the available heap; a nonzero value caps outstanding allocations per module. The free-heap margin is checked at allocation time; unrelated firmware allocations can consume it later.
   //
   // # Arguments
   //
@@ -648,8 +833,9 @@ typedef struct {
   // when the application offers none.
   //
   // The settings of the *device*, kept in its NVS by the application and the loader, as text: `wifi.rx_static`, `wifi.rx_dynamic`,
-  // `wifi.tx_dynamic`, `wifi.rx_ba` (the Wi-Fi driver's buffer counts, which are RAM) from the loader, and whatever else the application
-  // lists (DMesh: `uart.mode`, `quic.pool`, ...). The host knows no names: it passes them on, and the application answers for its own. This is for a
+  // `wifi.tx_dynamic`, `wifi.rx_ba` (the Wi-Fi driver's buffer counts, which are RAM) from the loader, `flash.auth`
+  // (`strict` by default or `unsigned`, applied when the upload module starts), and whatever else the application
+  // lists (DMesh: `quic.pool`, ...). The runtime handles shared settings and delegates application names. This is for a
   // console or a tool; a module's own settings are `get_setting` / `set_setting`. With `value` NULL it reads; with a value it writes
   // (an empty value restores the default). Most settings apply at the next start of the thing they configure, or after a reboot.
   //
@@ -908,6 +1094,20 @@ typedef struct {
   //
   // * `name` (`const char *`): NUL-terminated component name; NULL returns NULL.
   const void *(*get_component)(void *user, const char *name);
+  // Monotonic microsecond clock, sharing the epoch of Call.time_us.
+  // Append-only capability; modules must check table size before use.
+  uint64_t (*now_us)(void *user);
+  // Look at the module partition again.
+  //
+  // After an install (`mod_flash`) the host rescans the module partition: per module name the image with the highest version
+  // (manifest key 8) becomes the module, lower versions are *shadowed* and listed in `modules_info` (`Slot` fields `page`,
+  // `shadowed`). A running module keeps running; the one that was replaced was stopped before its page was written. Slot order and
+  // indices may change. Append-only capability; modules must check table size before use.
+  //
+  // # Returns
+  //
+  // `int` — the number of modules, or a negative error (`ERR_UNSUPPORTED` when the host has no loader).
+  int (*module_rescan)(void *user);
 } xip_host;
 
 // what a handler is called with
@@ -920,7 +1120,7 @@ typedef struct {
   int32_t method;
   // IRQ: the pin level. Alarm: how late it fired, in ms (saturated). `HOST_NETWORK`: 1 or 0. Request: 0. A frame of a link: its signal (`link` component).
   int32_t value;
-  // Bit 0: the call is a request that expects an answer (`send` to `from` with the same `id`, `Hw::reply`). Bit 1 (`CALL_LINK`): a frame of a link, `from` is its address and `id` an address token, not a request. Bit 2 (`CALL_LINK_EVENT`): an event of a link, its kind in bits 8..15.
+  // Bit 0: the call is a request that expects an answer (`send` to `from` with the same `id`, `Hw::reply`). Bit 1 (`CALL_LINK`): a frame of a link, `from` is its address and `id` an address token, not a request. Bit 2 (`CALL_LINK_EVENT`): an event of a link, its kind in bits 8..15. Bit 3 (`CALL_ENVELOPE`): a request that arrived as a CBOR envelope, parsed by the runtime (`component`, `method`, `data` = the fields); its answer is wrapped by the runtime.
   uint32_t flags;
   // Payload, valid during the call only.
   const uint8_t *data;
@@ -935,6 +1135,11 @@ typedef struct {
   uint32_t time_us;
   // The sender's correlation number, returned in the answer.
   uint64_t id;
+  // `CALL_ENVELOPE`: the envelope's own id (field 3) when `request_has_id` is not 0. The envelope's component and method are `component` and `method`,
+  // its fields `data`. Appended: a host with a shorter `size` does not have it.
+  uint64_t request_id;
+  uint32_t request_has_id;
+  uint32_t request_reserved;
 } xip_call;
 
 // argument of `spi_open`
@@ -1062,6 +1267,16 @@ typedef struct {
   uint8_t ssid[32];
   // IPv4 address of the station interface, zero when none.
   uint8_t ip4[4];
+  // Actual local station and AP addresses (zero when unavailable).
+  uint8_t sta_mac[6];
+  uint8_t ap_mac[6];
+  // Driver is running; independent of STA association or IP readiness.
+  uint8_t radio;
+  // Actual promiscuous receive state, cleared by driver restart.
+  uint8_t monitoring;
+  // Native NOW receive/transmit is enabled for this radio epoch.
+  uint8_t now;
+  uint8_t reserved2;
 } xip_wifi_state;
 
 // One network of a scan, as [`Wifi::scan`] returns it.
@@ -1132,6 +1347,12 @@ typedef struct {
   // `state` shows the radio again. `ERR_ARG` for a size that is too small or a channel above 13; `ERR_IO` when the driver
   // refuses.
   int (*monitor)(void *ctx, const xip_wifi_monitor *monitor);
+  // Enable native automatic reconnect, or disable it for module-owned retry
+  // policy. Returns the previous boolean. Unsupported with an external owner.
+  int (*auto_reconnect)(void *ctx, bool enabled);
+  // Non-blocking bounded channel scan, same completion contract as scan.
+  // Bits 1..14 select channels; dwell_ms 10..120 per selected channel.
+  int (*scan_channels)(void *ctx, xip_wifi_ap *out, size_t max, uint16_t channels, uint16_t dwell_ms);
 } xip_wifi;
 
 // Advanced driver settings, for measurements and unusual links; the defaults of a host are the supported baseline.
@@ -1325,7 +1546,10 @@ typedef struct {
   // A UART/wake activity interval is still open. Informational: the module
   // owns sleep policy. Uses one formerly reserved byte, keeping ABI size.
   uint8_t active_window;
-  uint8_t reserved[2];
+  // Open runtime TCP sockets plus the default UDP listener. Zero throughout
+  // NAN/NOW-only sleepy windows; uses a formerly reserved byte.
+  uint8_t ip_sockets;
+  uint8_t reserved[1];
 } xip_power_info;
 
 // The `power` component table, from `get_component("power")`. The functions take no context argument other than `ctx` and never block.
@@ -1336,8 +1560,8 @@ typedef struct {
   uint32_t size;
   // Sleep for `duration_ms`, `cycles` times with `awake_ms` awake between, on the host worker; returns at once. Each wake delivers `HOST_WAKE` to the modules with
   // an `ALARM_WINDOW` alarm. `ERR_BUSY` while a request runs, `ERR_ARG` for a duration under 10 ms or a size that is too small. With the radio on it is stopped
-  // for each sleep and brought back after it with the same settings (the `espnow` link goes `DOWN` and `UP`); nothing else is touched. On USB-Serial/JTAG
-  // the port drops across a sleep.
+  // for each sleep and brought back after it with the same settings (the `espnow` link goes `DOWN` and `UP`); nothing else is touched. With a USB-Serial/JTAG host attached the runtime uses a soft wait;
+  // physical light sleep is tested through UART.
   int (*sleep)(void *ctx, const xip_power_sleep *request);
   // Read the power state and the FreeRTOS numbers (set `info.size` first). `ERR_SIZE` if `size` is too small.
   int (*info)(void *ctx, xip_power_info *info);
@@ -1345,6 +1569,20 @@ typedef struct {
   int (*dump_locks)(void *ctx);
   // Print the FreeRTOS tasks to the device log: name, priority, stack left.
   int (*dump_tasks)(void *ctx);
+  // One sleep ending at an absolute monotonic microsecond deadline. Radio
+  // shutdown time is included, so it cannot shift a scheduled receive DW.
+  // Requires no active UART window; `flags` may include POWER_TRACE_UART.
+  int (*sleep_until)(void *ctx, uint64_t wake_at_us, uint32_t flags);
+  // Cancel only this caller's pending sleep. Also cancelled at module unload.
+  int (*cancel)(void *ctx);
+  // Open the runtime activity window; zero explicitly clears the current
+  // window when a policy command arms sleep. Subsequent UART RX reopens it.
+  int (*activate)(void *ctx, uint32_t duration_ms);
+  // Extend one shared temporary awake deadline, at most 300,000 ms per call.
+  // Zero queries without extending; returns remaining ms, or ERR_ARG above
+  // the limit. Renewal never shortens another caller's hold. Unlike activate,
+  // this defers sleep without changing UART or module awake/sleepy policy.
+  int (*awake_for)(void *ctx, uint32_t duration_ms);
 } xip_power;
 
 // The `hw` component table.
@@ -1535,19 +1773,265 @@ typedef struct {
   int (*rgbled_write)(void *ctx, int pin, uint8_t red, uint8_t green, uint8_t blue);
 } xip_hardware;
 
+// Start the DMesh service: the CoC server and the advertisement, for [`Ble::start`].
+typedef struct {
+  // `sizeof(xip_ble_start)`, set by the caller.
+  uint32_t size;
+  // 1: the device holds a pairing secret, so the advertisement carries the operational UUID; 0: the button-gated pairing UUID.
+  uint8_t paired;
+  uint8_t reserved[3];
+} xip_ble_start;
+
+// Scan, for [`Ble::scan`].
+typedef struct {
+  uint32_t size;
+  // Milliseconds, clamped to 1000..30000; 0 is 10000.
+  uint32_t duration_ms;
+} xip_ble_scan;
+
+// What the component is doing, for [`Ble::status`]: the fields of the DMesh `ble.status` (tags 1 to 26) and the additions of this component.
+typedef struct {
+  uint32_t size;
+  // The stack is synchronized (the host task runs and the address is known).
+  uint8_t ready;
+  uint8_t advertising;
+  // A GAP connection exists.
+  uint8_t connected;
+  // The CoC channel is open.
+  uint8_t coc_connected;
+  uint8_t scanning;
+  uint8_t bonded;
+  uint8_t coc_tx_pending;
+  uint8_t last_scan_addr_type;
+  uint8_t local_addr_type;
+  // Link encrypted (the CoC channel's connection).
+  uint8_t encrypted;
+  // `BLE_MODE_*` in force.
+  uint8_t mode;
+  // BLE starts at boot (`BLE_BOOT_ON`).
+  uint8_t boot_enabled;
+  // The service is suspended around a sleep (rendezvous mode).
+  uint8_t suspended;
+  uint8_t reserved[3];
+  // Increments for every GAP connection.
+  uint32_t generation;
+  // GAP connection handle, 0xffff when none.
+  uint16_t handle;
+  uint8_t reserved2[2];
+  // SDUs given to the receive hook, and rejected before it (bad length, no hook).
+  uint32_t coc_rx;
+  uint32_t coc_rx_rejected;
+  // Advertisements seen while scanning, and those naming the DMesh service.
+  uint32_t scan_reports;
+  uint32_t scan_matches;
+  int32_t last_scan_rssi;
+  uint8_t last_scan_addr[6];
+  uint8_t local_addr[6];
+  // The consumer's side of the bearer: SDUs accepted for the hook, accepted and rejected by it, transmit attempts, accepted, failed, and refused because a send was pending.
+  uint32_t ingress_enqueued;
+  uint32_t ingress_accepted;
+  uint32_t ingress_rejected;
+  uint32_t egress_attempts;
+  uint32_t egress_sent;
+  uint32_t egress_send_errors;
+  uint32_t egress_blocked_disconnected;
+  uint32_t egress_blocked_pending;
+} xip_ble_status;
+
+// Central connect and open the CoC channel, for [`Ble::connect`].
+typedef struct {
+  uint32_t size;
+  // The peer, as the stack reports it (little-endian, the order scan results use).
+  uint8_t addr[6];
+  // 0 public, 1 random.
+  uint8_t addr_type;
+  uint8_t reserved;
+  // 0x0080..0x00ff; 0 is `BLE_COC_PSM`.
+  uint16_t psm;
+  uint8_t reserved2[2];
+} xip_ble_connect;
+
+// Listen on a PSM without advertising, for [`Ble::listen`].
+typedef struct {
+  uint32_t size;
+  // 0x0080..0x00ff; 0 is `BLE_COC_PSM`.
+  uint16_t psm;
+  uint8_t reserved[2];
+} xip_ble_listen;
+
+// Wake/sleep modes, for [`Ble::mode`]. A field left at 0 is not changed.
+typedef struct {
+  uint32_t size;
+  // `BLE_MODE_*`.
+  uint8_t mode;
+  // `BLE_BOOT_*`.
+  uint8_t boot;
+  uint8_t reserved[2];
+} xip_ble_mode;
+
+// The scan cache, for [`Ble::scan_results`].
+typedef struct {
+  uint32_t size;
+  // Bytes of `results` that are used: a multiple of `BLE_SCAN_RECORD`.
+  uint8_t results_len;
+  uint8_t reserved[3];
+  // Records of `BLE_SCAN_RECORD` bytes each: address, address type, RSSI, flags; the order is first seen.
+  uint8_t results[144];
+} xip_ble_scan_results;
+
+// The `ble` component table.
+typedef struct {
+  // Table version.
+  uint32_t version;
+  // `sizeof` this table: members past it do not exist.
+  uint32_t size;
+  // 80. Starts the BLE stack when needed, creates the CoC server on PSM 0x0080 and advertises the DMesh service (16-bit UUID 0x1820 and a 128-bit UUID: the pairing UUID until the device holds a secret, the operational UUID after).
+  int (*start)(void *ctx, const xip_ble_start *request);
+  // 81. Stops advertising and scanning and terminates the connection (reason 0x13).
+  int (*stop)(void *ctx);
+  // 82. Passive scan with duplicate filtering.
+  int (*scan)(void *ctx, const xip_ble_scan *request);
+  // 83. The state
+  int (*status)(void *ctx, xip_ble_status *response);
+  // 84. Stop scanning
+  int (*scan_stop)(void *ctx);
+  // 85. Cancels a scan in progress, connects as a central to `addr` (20 s timeout) and opens the CoC channel.
+  int (*connect)(void *ctx, const xip_ble_connect *request);
+  // 87. Like `start` without the advertisement: the server for a peer that already knows the address.
+  int (*listen)(void *ctx, const xip_ble_listen *request);
+  // 88. Deletes the stored peer keys: a bonded peer has to pair again and cannot reconnect with an old key.
+  int (*bonds_clear)(void *ctx);
+  // 89. `mode` 1 (`always`): the service stays up across a sleep; while it is live a light sleep requested through the `power` component is vetoed (advertising keeps the controller from sleeping on the current boards, so it is a power vote).
+  int (*mode)(void *ctx, const xip_ble_mode *request);
+  // 90. The distinct advertisements seen by scans since the cache was cleared (a new `scan` clears it), at most 16 and at most `CONFIG_XIP_BLE_SCAN_CACHE`.
+  int (*scan_results)(void *ctx, xip_ble_scan_results *response);
+  // 91. What the `power` component runs before each sleep when the component is present, callable by a caller that owns its own sleep.
+  int (*suspend)(void *ctx);
+  // 92. Re-arm after a light sleep
+  int (*resume)(void *ctx);
+} xip_ble;
+
+// Start the stack when needed, name the device, size the CoC pool, serve a CoC PSM and advertise: for [`Nimble::start`].
+typedef struct {
+  // `sizeof(xip_nimble_start)`, set by the caller.
+  uint32_t size;
+  // The LE PSM of the CoC server (0x0080..0x00ff); 0: no server.
+  uint16_t psm;
+  // SDU size of the CoC channel and the buffers of its pool, fixed by the first start (up to `CONFIG_XIP_BLE_COC_MTU`).
+  uint16_t coc_mtu;
+  // Buffers of the CoC pool (up to `CONFIG_XIP_BLE_COC_BUFS`).
+  uint8_t coc_buffers;
+  // Bytes of `adv` to advertise; 0: do not advertise (a server only).
+  uint8_t adv_len;
+  // Bytes of `scan_rsp`; 0: none.
+  uint8_t scan_rsp_len;
+  // Bytes of `name`; 0: leave the name as it is.
+  uint8_t name_len;
+  // Advertising interval in units of 0.625 ms; `adv_max` below `adv_min` is `adv_min`.
+  uint16_t adv_min;
+  uint16_t adv_max;
+  uint8_t adv[31];
+  uint8_t scan_rsp[31];
+  // The GAP device name.
+  uint8_t name[16];
+} xip_nimble_start;
+
+// One scan filter: an advertisement matches when it has an AD structure of type `ad_types[0]` or `ad_types[1]` (0: unused) whose payload,
+// read as elements of `len` bytes (2 for a 16-bit UUID list, 16 for a 128-bit one), has one equal to `data[..len]`. The match is the flag
+// bit 0 of the scan result and counts in `scan_matches`.
+typedef struct {
+  uint8_t ad_types[2];
+  // Bytes of `data` that are compared; 0 turns the filter off.
+  uint8_t len;
+  uint8_t reserved;
+  uint8_t data[16];
+} xip_nimble_filter;
+
+// Passive scan with duplicates filtered, for [`Nimble::scan`].
+typedef struct {
+  uint32_t size;
+  // Milliseconds, as given (the caller decides defaults and limits).
+  uint32_t duration_ms;
+  xip_nimble_filter filters[3];
+} xip_nimble_scan;
+
+// Central connect and open the CoC channel, for [`Nimble::connect`].
+typedef struct {
+  uint32_t size;
+  // The peer, as the stack reports it (little-endian, the order scan results use).
+  uint8_t addr[6];
+  // 0 public, 1 random.
+  uint8_t addr_type;
+  uint8_t reserved;
+  // The peer's LE PSM (0x0080..0x00ff).
+  uint16_t psm;
+  // SDU size for this channel, at most the pool's; 0: the pool's.
+  uint16_t coc_mtu;
+  uint8_t reserved2[2];
+} xip_nimble_connect;
+
+// The `nimble` component table, from `get_component("nimble")`; absent on a host without BLE. `ctx` first, never blocks, valid for the firmware
+// lifetime. The order of the members is part of the ABI.
+typedef struct {
+  // `NIMBLE_VERSION`.
+  uint32_t version;
+  // `sizeof(xip_nimble)`: members past it do not exist.
+  uint32_t size;
+  // Start the stack when needed, set the name, create the CoC pool and server and advertise (see [`NimbleStart`]). The advertisement is restarted after every GAP disconnect while it is wanted.
+  int (*start)(void *ctx, const xip_nimble_start *request);
+  // Stop advertising, scanning and the connection (disconnect 0x13).
+  int (*stop)(void *ctx);
+  // Scan for the duration; `-110` (timed out) before the stack is ready.
+  int (*scan)(void *ctx, const xip_nimble_scan *request);
+  // Read the state (set `status.size` first).
+  int (*status)(void *ctx, xip_ble_status *status);
+  // Stop a running scan.
+  int (*scan_stop)(void *ctx);
+  // Connect as a central to `addr` and open the CoC channel on `psm`; a scan in progress is cancelled first.
+  int (*connect)(void *ctx, const xip_nimble_connect *request);
+  // Forget every stored bond (a bonded peer must pair again).
+  int (*bonds_clear)(void *ctx);
+  // Set the wake/sleep mode and the boot flag.
+  int (*mode)(void *ctx, const xip_ble_mode *request);
+  // The scan cache (set `results.size` first); empty when the cache is built out.
+  int (*scan_results)(void *ctx, xip_ble_scan_results *results);
+  // Before a light sleep: in rendezvous mode stop advertising and scanning. `ERR_BUSY` when a link is up (or in always mode with the service live): the sleep is vetoed.
+  int (*suspend)(void *ctx);
+  // After a light sleep: re-arm what `suspend` stopped.
+  int (*resume)(void *ctx);
+} xip_nimble;
+
+_Static_assert(sizeof(xip_ip_config) == 36, "xip_ip_config layout");
 _Static_assert(sizeof(xip_spi_config) == 44, "xip_spi_config layout");
 _Static_assert(sizeof(xip_dmod_header) == 64, "xip_dmod_header layout");
 _Static_assert(sizeof(xip_wifi_intent) == 216, "xip_wifi_intent layout");
-_Static_assert(sizeof(xip_wifi_state) == 52, "xip_wifi_state layout");
+_Static_assert(sizeof(xip_wifi_state) == 68, "xip_wifi_state layout");
 _Static_assert(sizeof(xip_wifi_tuning) == 20, "xip_wifi_tuning layout");
 _Static_assert(sizeof(xip_link_info) == 60, "xip_link_info layout");
 _Static_assert(sizeof(xip_wifi_monitor) == 8, "xip_wifi_monitor layout");
 _Static_assert(sizeof(xip_wifi_ap) == 42, "xip_wifi_ap layout");
 _Static_assert(sizeof(xip_power_sleep) == 12, "xip_power_sleep layout");
 _Static_assert(sizeof(xip_power_info) == 76, "xip_power_info layout");
+_Static_assert(sizeof(xip_ble_start) == 8, "xip_ble_start layout");
+_Static_assert(sizeof(xip_ble_scan) == 8, "xip_ble_scan layout");
+_Static_assert(sizeof(xip_ble_connect) == 16, "xip_ble_connect layout");
+_Static_assert(sizeof(xip_ble_listen) == 8, "xip_ble_listen layout");
+_Static_assert(sizeof(xip_ble_mode) == 8, "xip_ble_mode layout");
+_Static_assert(sizeof(xip_ble_status) == 92, "xip_ble_status layout");
+_Static_assert(sizeof(xip_ble_scan_results) == 152, "xip_ble_scan_results layout");
+_Static_assert(sizeof(xip_nimble_filter) == 20, "xip_nimble_filter layout");
+_Static_assert(sizeof(xip_nimble_start) == 96, "xip_nimble_start layout");
+_Static_assert(sizeof(xip_nimble_scan) == 68, "xip_nimble_scan layout");
+_Static_assert(sizeof(xip_nimble_connect) == 20, "xip_nimble_connect layout");
 #if UINTPTR_MAX == 0xffffffffu
-_Static_assert(sizeof(xip_call) == 48, "xip_call layout");
-_Static_assert(sizeof(xip_host) == 148, "xip_host layout");
+_Static_assert(sizeof(xip_quic) == 32, "xip_quic layout");
+_Static_assert(sizeof(xip_quic_pool_info) == 24, "xip_quic_pool_info layout");
+_Static_assert(sizeof(xip_quic_tx_completion) == 40, "xip_quic_tx_completion layout");
+_Static_assert(sizeof(xip_ip) == 20, "xip_ip layout");
+_Static_assert(sizeof(xip_call) == 64, "xip_call layout");
+_Static_assert(sizeof(xip_identity) == 20, "xip_identity layout");
+_Static_assert(sizeof(xip_power) == 40, "xip_power layout");
+_Static_assert(sizeof(xip_host) == 156, "xip_host layout");
 #endif
 
 /* Non-zero when the host's table includes this call (older hosts are shorter). */
