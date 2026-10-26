@@ -25,6 +25,8 @@ _Static_assert(sizeof(xip_power_info) == 76, "xip_power_info layout");
 _Static_assert(sizeof(xip_ble_start) == 8, "xip_ble_start layout");
 _Static_assert(sizeof(xip_ble_scan) == 8, "xip_ble_scan layout");
 _Static_assert(sizeof(xip_ble_connect) == 16, "xip_ble_connect layout");
+_Static_assert(sizeof(xip_system_heap_info) == 24, "xip_system_heap_info layout");
+_Static_assert(sizeof(xip_system_heap_dump) == 4, "xip_system_heap_dump layout");
 _Static_assert(sizeof(xip_ble_listen) == 8, "xip_ble_listen layout");
 _Static_assert(sizeof(xip_ble_mode) == 8, "xip_ble_mode layout");
 _Static_assert(sizeof(xip_ble_status) == 92, "xip_ble_status layout");
@@ -34,13 +36,16 @@ _Static_assert(sizeof(xip_nimble_start) == 96, "xip_nimble_start layout");
 _Static_assert(sizeof(xip_nimble_scan) == 68, "xip_nimble_scan layout");
 _Static_assert(sizeof(xip_nimble_connect) == 20, "xip_nimble_connect layout");
 #if UINTPTR_MAX == 0xffffffffu
+_Static_assert(sizeof(xip_system) == 20, "xip_system layout");
+_Static_assert(sizeof(xip_stream) == 36, "xip_stream layout");
 _Static_assert(sizeof(xip_quic) == 32, "xip_quic layout");
+_Static_assert(sizeof(xip_stream_packet) == 12, "xip_stream_packet layout");
 _Static_assert(sizeof(xip_quic_pool_info) == 24, "xip_quic_pool_info layout");
 _Static_assert(sizeof(xip_quic_tx_completion) == 40, "xip_quic_tx_completion layout");
 _Static_assert(sizeof(xip_ip) == 20, "xip_ip layout");
 _Static_assert(sizeof(xip_call) == 64, "xip_call layout");
 _Static_assert(sizeof(xip_identity) == 20, "xip_identity layout");
-_Static_assert(sizeof(xip_power) == 40, "xip_power layout");
+_Static_assert(sizeof(xip_power) == 44, "xip_power layout");
 _Static_assert(sizeof(xip_host) == 156, "xip_host layout");
 #endif
 
@@ -58,12 +63,21 @@ int xip_handle(const xip_host *host, void *state, const xip_call *call);
 """
 
 [export]
-include = ["Ip", "IpConfig", "Quic", "QuicPoolInfo", "QuicTxCompletion", "Identity", "SerialRxBuffer", "SerialPacketTx", "SerialPacketClient", "Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware", "Ble", "BleStart", "BleScan", "BleConnect", "BleListen", "BleMode", "BleStatus", "BleScanResults", "Nimble", "NimbleFilter", "NimbleStart", "NimbleScan", "NimbleConnect"]
+include = ["System", "SystemHeapInfo", "SystemHeapDump", "Lora", "Nan", "NanTransport", "Serial", "Ip", "IpConfig", "Stream", "StreamPacket", "Quic", "QuicPoolInfo", "QuicTxCompletion", "Identity", "SerialRxBuffer", "SerialPacketTx", "SerialPacketClient", "Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware", "Ble", "BleStart", "BleScan", "BleConnect", "BleListen", "BleMode", "BleStatus", "BleScanResults", "Nimble", "NimbleFilter", "NimbleStart", "NimbleScan", "NimbleConnect"]
 prefix = "xip_"
 
 [export.rename]
+System = "system"
+SystemHeapInfo = "system_heap_info"
+SystemHeapDump = "system_heap_dump"
+Lora = "lora"
+Nan = "nan"
+NanTransport = "nan_transport"
+Serial = "serial"
 Ip = "ip"
 IpConfig = "ip_config"
+Stream = "stream"
+StreamPacket = "stream_packet"
 Quic = "quic"
 QuicPoolInfo = "quic_pool_info"
 QuicTxCompletion = "quic_tx_completion"

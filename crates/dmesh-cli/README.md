@@ -210,8 +210,16 @@ only for controlled radio diagnostics. Firmware updates are described in `docs/f
 
 ## Firmware updates
 
-There is no `dmesh-cli flash` and no `object.flash`: modules and firmware are installed over Wi-Fi by `mod_flash` (this repository), and
-the first image on a board with `esptool` or `scripts/flash-via-loader.sh`.
+Use `dmesh-cli flash TARGET PACKAGE` for module uploads over QUIC, with UART/USB,
+STA UDP, or a NOW relay. See [commands](../../notes/docs/quic_flash.md).
+Firmware/recovery updates use the existing TCP `mod_flash` protocol or the
+[serial flasher](../../scripts/flash-serial.sh).
+
+The C runtime's `mod_rtest` probe supports `dmesh-cli probe TARGET --bytes=65536
+--direction=both --verify=true`. Targets can be UART/USB, `udp://IP:3339` for
+QUIC, or `tcp://IP:5228`. Start `test` in `probe` mode first; start `quic` for
+QUIC targets. Device-initiated probes and parallel-stream tuning in the legacy
+examples above are not supported by this module.
 
 ## Companion BLE and lmesh radio requests
 
@@ -250,3 +258,16 @@ The direct tagged control record is reserved for bootstrap diagnostics.
 
 Heap and task diagnostics are available through the [console API](../../modules/mod_con/API.md).
 Detailed measurements are kept in [notes/](../../notes/ai/2026-10-23-serial-memory.md).
+
+## Native C Main control
+
+Use `dmesh-cli DEVICE nan.status` or another native `component.method` directly.
+The CLI resolves a named UART companion, sends a byte-triggered wake probe,
+waits for an awake ACK, then sends the actual command once through the same
+serial owner. `dmesh-cli DEVICE wake` performs just that handshake; `sleep`
+selects the saved cadence immediately, bypassing activity grace. `nv cadence=8`
+saves a setting and `nv cadence` reads it. `dmesh-cli lora1 wake lora2` wakes the
+UART companion first and submits a targeted NOW wake for the remote device.
+No `console`, port selection or duration parameter is needed. The old native
+`console` command remains a compatibility alias. See
+[the sleep/wake guide](../../notes/docs/sleep_wakeup.md) for policy and USB behavior.

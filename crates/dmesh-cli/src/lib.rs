@@ -41,3 +41,9 @@ pub async fn request_uart_record_with_linger(
 }
 
 mod console;
+
+mod flash;
+
+mod probe;
+
+mod nan_stream;

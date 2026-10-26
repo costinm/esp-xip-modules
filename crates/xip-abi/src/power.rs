@@ -13,7 +13,7 @@
 use core::{ffi::c_void, ffi::c_int};
 
 /// `Power::version`.
-pub const POWER_VERSION: u32 = 3;
+pub const POWER_VERSION: u32 = 4;
 /// Emit compact CBOR sleep/wake records on PPP port 250 (0xfa).
 pub const POWER_TRACE_UART: u32 = 1;
 
@@ -94,7 +94,7 @@ pub struct PowerInfo {
     /// restarted around a plain delay and the CPU does not sleep, as DMesh's `sleepy-soft` (`usb_jtag_debug_hold`). A device on USB is charged by the host, so
     /// the saving does not matter there; unplugged, or with a UART console, the sleep is physical. Details: `components/xip_runtime/src/xip_power.c`.
     pub soft_sleep: u8,
-    /// A UART/wake activity interval is still open. Informational: the module
+    /// A local-serial or validated directed-packet activity interval is still open. Informational: the module
     /// owns sleep policy. Uses one formerly reserved byte, keeping ABI size.
     pub active_window: u8,
     /// Open runtime TCP sockets plus the default UDP listener. Zero throughout
@@ -131,19 +131,25 @@ pub struct Power {
     pub dump_tasks: Option<unsafe extern "C" fn(ctx: *mut c_void) -> c_int>,
     /// One sleep ending at an absolute monotonic microsecond deadline. Radio
     /// shutdown time is included, so it cannot shift a scheduled receive DW.
-    /// Requires no active UART window; `flags` may include POWER_TRACE_UART.
+    /// Requires no active shared activity window; `flags` may include POWER_TRACE_UART.
     pub sleep_until: Option<unsafe extern "C" fn(ctx: *mut c_void, wake_at_us: u64, flags: u32) -> c_int>,
     /// Cancel only this caller's pending sleep. Also cancelled at module unload.
     pub cancel: Option<unsafe extern "C" fn(ctx: *mut c_void) -> c_int>,
-    /// Open the runtime activity window; zero explicitly clears the current
-    /// window when a policy command arms sleep. Subsequent UART RX reopens it.
+    /// Open the shared runtime activity window; zero explicitly clears it.
+    /// Local serial bytes and decoded directed network records reopen it.
     pub activate: Option<unsafe extern "C" fn(ctx: *mut c_void, duration_ms: u32) -> c_int>,
     /// Extend one shared temporary awake deadline, at most 300,000 ms per call.
     /// Zero queries without extending; returns remaining ms, or ERR_ARG above
     /// the limit. Renewal never shortens another caller's hold. Unlike activate,
     /// this defers sleep without changing UART or module awake/sleepy policy.
     pub awake_for: Option<unsafe extern "C" fn(ctx: *mut c_void, duration_ms: u32) -> c_int>,
+    /// Link adapters call after selecting a local directed record. The runtime
+    /// fully decodes its CBOR envelope before extending shared activity by 5 s.
+    /// Broadcast, malformed or nonlocal records never vote. Returns 1 if voted,
+    /// 0 if ignored; the packet is borrowed only for this call.
+    pub received: Option<unsafe extern "C" fn(ctx: *mut c_void, record: *const u8, len: usize, directed: u32) -> c_int>,
+
 }
 
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<Power>() == 40);
+const _: () = assert!(core::mem::size_of::<Power>() == 44);

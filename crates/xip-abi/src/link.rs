@@ -48,6 +48,9 @@ use core::ffi::{c_char, c_int, c_void};
 
 /// Version of the [`Link`] table.
 pub const LINK_VERSION: u32 = 1;
+/// `Link::open` method: hold an egress reference without receiving frames/events.
+/// Close it when the cached address is no longer used.
+pub const LINK_EGRESS: i32 = -1;
 
 /// `call.flags` bit set on the frames of a link (both directions): `id` is an address token and the call is not a request.
 pub const CALL_LINK: u32 = 2;
@@ -99,9 +102,14 @@ pub const PORT_CONSOLE: u32 = 1;
 /// decoded NAN-over-NOW sync bodies (40:4e:53:59:31). Bound by the module
 /// manifest, independent of the physical radio link. 0xf7 remains QUIC.
 pub const PORT_NAN: u32 = 0xf6;
+/// Best-effort NAN DW0 summaries and live service observations on UART.
+pub const PORT_NAN_REPORT: u32 = 0xfb;
 /// PPP port of DMesh's QUIC packets (`0xf7`). The record's payload is one QUIC packet: the runtime hands it, in a pool packet with the serial
 /// link in the metadata, to the common QUIC receive function (`xip_quic_rx_set`), like the frames of ESP-NOW and the BLE channel.
 pub const PORT_QUIC: u32 = 0xf7;
+/// Multicast port: bound by a module's manifest (key 9), the runtime's `xip_mc` UDP listener delivers datagrams of the DMesh discovery group
+/// (IPv6 `ff02::5227`, IPv4 later) here; the module answers by sending back to the source token it arrived with.
+pub const PORT_MC: u32 = 0xfa;
 pub const PORT_NET: u32 = 5225;
 
 /// Who provides a link ([`LinkInfo::provider`]).
@@ -189,10 +197,13 @@ pub struct Link {
     /// `sizeof(xip_link)`: members past it do not exist.
     pub size: u32,
     /// Subscribe to the link `name` (created if nobody has named it yet, so the order of start does not matter): its frames
-    /// and events arrive as calls `(component, method)` to the calling module. Returns the link's address (>= `ADDR_LINK`, positive) to
+    /// Use method [`LINK_EGRESS`] to hold only an egress reference, without frames or events.
+    /// Keep that reference open while caching the address, including across provider down/up.
+    /// Otherwise frames and events arrive as calls `(component, method)` to the calling module. Returns the link's address (>= `ADDR_LINK`, positive) to
     /// `send` to, or `ERR_ARG` / `ERR_NOMEM` (no room for another link or subscriber). Subscribing again with the same pair changes nothing.
     pub open: Option<unsafe extern "C" fn(ctx: *mut c_void, name: *const c_char, component: c_int, method: c_int) -> c_int>,
-    /// Stop receiving the link at `addr`. Subscriptions also end with the module.
+    /// Release this module's subscriptions/egress references at `addr`. They also end with the module.
+    /// An address without a provider or references may be reclaimed; resolve/open it again before reuse.
     pub close: Option<unsafe extern "C" fn(ctx: *mut c_void, addr: u32) -> c_int>,
     /// Be the provider of the link `name`: frames sent to its address arrive as calls `(component, method)` to the calling
     /// module. `mtu` is the largest frame (0: unknown). The link is `LINK_DOWN` until [`Link::set_state`]. Returns the address,

@@ -48,7 +48,7 @@ pub(crate) fn is_fatal_diagnostic(line: &str) -> bool {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: dmesh-cli SERIAL|DEVICE --reset\n       dmesh-cli SERIAL|DEVICE --wake [--baud PHYSICAL_UART_BAUD]\n       dmesh-cli SERIAL|DEVICE --watch [--reset] [--interactive] [--baud PHYSICAL_UART_BAUD] [--timeout-secs N]\n       dmesh-cli DEVICE METHOD [--field=value ...] [--bearer udp[,uart]]\n       dmesh-cli SERIAL METHOD [--baud PHYSICAL_UART_BAUD] [--timeout-secs N] [--linger-secs N] [--repeat-secs N] [--field=value ...]\n       dmesh-cli devices check|sync [--dry-run]\n       dmesh-cli discover\n       dmesh-cli console SERIAL [METHOD] [--field=value ...] [--port N] [--seconds N]\n       dmesh-cli lmesh METHOD [--field=value ...]\n       dmesh-cli NODE check\n       dmesh-cli udp://HOST:PORT --socket PATH\n       dmesh-cli http://HOST:PORT SERVICE.METHOD [--field=value ...]"
+        "usage: dmesh-cli SERIAL|DEVICE --reset\n       dmesh-cli SERIAL|DEVICE --wake [--baud PHYSICAL_UART_BAUD]\n       dmesh-cli SERIAL|DEVICE --watch [--reset] [--interactive] [--baud PHYSICAL_UART_BAUD] [--timeout-secs N]\n       dmesh-cli DEVICE METHOD [--field=value ...] [--bearer udp[,uart]]\n       dmesh-cli SERIAL METHOD [--baud PHYSICAL_UART_BAUD] [--timeout-secs N] [--linger-secs N] [--repeat-secs N] [--field=value ...]\n       dmesh-cli devices check|sync [--dry-run]\n       dmesh-cli discover\n       dmesh-cli DEVICE wake|sleep|nv KEY[=VALUE]\n       dmesh-cli DEVICE nan.METHOD|power.METHOD [--field=value ...]\n       dmesh-cli lmesh METHOD [--field=value ...]\n       dmesh-cli NODE check\n       dmesh-cli udp://HOST:PORT --socket PATH\n       dmesh-cli http://HOST:PORT SERVICE.METHOD [--field=value ...]"
     );
     std::process::exit(2)
 }
@@ -64,6 +64,11 @@ pub(crate) fn mac_encode(value: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+fn native_control_command(arguments: &[String]) -> bool {
+    arguments.first().is_some_and(|target|(!target.contains("://") || target.starts_with("udp://")) && lmesh_socket_target(target).is_none())
+        && arguments.get(1).is_some_and(|method|crate::console::is_native(method))
 }
 
 /// Run the standalone DMesh client using process arguments.
@@ -88,6 +93,13 @@ pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), 
     {
         return crate::console::run(&arguments);
     }
+    if arguments.first().is_some_and(|a|a=="nan-stream") {return crate::nan_stream::run(&arguments);}
+    if arguments.first().is_some_and(|a|a=="probe") || arguments.get(1).is_some_and(|a|a=="probe.start") {
+        return crate::probe::run(&arguments);
+    }
+    if native_control_command(&arguments) {
+        return crate::console::run_native(&arguments);
+    }
     if arguments.as_slice() == ["devices", "check"] {
         return run_devices_check();
     }
@@ -106,9 +118,7 @@ pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), 
         .first()
         .is_some_and(|argument| argument == "flash")
     {
-        return Err("`dmesh-cli flash` was retired: sign the image with the esp-wifi-loader tools (tools/sign.py), \
-send it with tools/upload.py, or use scripts/flash-serial.sh over USB (notes/docs/flashing.md)"
-            .into());
+        return crate::flash::run(&arguments);
     }
     if arguments.get(1).is_some_and(|argument| argument == "check") {
         return run_check_command(&arguments);
@@ -164,10 +174,13 @@ send it with tools/upload.py, or use scripts/flash-serial.sh over USB (notes/doc
                 return Err("--wake accepts only --baud PHYSICAL_UART_BAUD".into());
             }
         }
-        let mut session = DeviceSession::open(&arguments[0], baud)?;
-        session.send_wake()?;
-        println!("dmesh_uart_wake_sent target={} bytes=1", arguments[0]);
+        let mut session=crate::xip_wire::XipPort::open_baud(arguments[0].clone(),baud).map_err(|e|e.to_string())?;
+        session.wake()?;
+        println!("{}",serde_json::json!({"awake":true}));
         return Ok(());
+    }
+    if matches!(arguments.as_slice(),[_,method] if method=="--watch") {
+        return crate::console::run_native(&[arguments[0].clone(),"watch".into()]);
     }
     // Watch is explicitly a physical UART operation. A device profile with
     // both serial and static-UDP paths must not silently choose UDP here.
@@ -1950,5 +1963,16 @@ mod tests {
                 ..target
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod native_uart_routing_tests {
+    #[test]
+    fn native_controls_use_udp_and_uart_while_preserving_other_backends() {
+        for (target,expected) in [("lora1",true),("/dev/ttyUSB0",true),("lmesh",false),
+            ("udp://[::1]:3339",true),("tcp://host:5226",false),("http://host:18480",false)] {
+            assert_eq!(super::native_control_command(&[target.into(),"wifi.status".into()]),expected,"{target}");
+        }
     }
 }

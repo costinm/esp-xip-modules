@@ -15,7 +15,7 @@ fn enc(f: impl FnOnce(&mut Writer)) -> Vec<u8> {
 }
 
 /// The console module (component 20) has no port: every request is a 0x444d0002 datagram that the runtime parses (the native components Wi-Fi 10,
-/// power 11, ip 12 go to it because no module hosts them), and the answer comes back as one.
+/// ip 12 go to it while unclaimed; power 11 belongs to NAN), and the answer comes back as one.
 struct Console { rt: Runtime, q: Requests, c: Instance }
 impl Console {
     fn new() -> Self {
@@ -59,7 +59,7 @@ impl Console {
 }
 
 #[test]
-fn native_monitor_and_sleep_use_binary_fields() {
+fn native_monitor_uses_binary_fields_and_power_is_not_console_owned() {
     let k = Console::new();
     let monitor = enc(|w| { w.map(2).uint(1).boolean(true).uint(2).uint(6); });
     k.binary_error(10, 7, &monitor, ERR_UNSUPPORTED);
@@ -69,15 +69,8 @@ fn native_monitor_and_sleep_use_binary_fields() {
     assert_eq!(k.rt.wifi_monitor().map(|m| (m.enable, m.channel)), Some((1, 6)));
     k.binary_error(10, 7, &enc(|w| { w.map(1).uint(2).uint(14); }), ERR_ARG);
     k.binary_ok(10, 7, &enc(|w| { w.map(1).uint(1).boolean(false); }));
-    let sleep = enc(|w| { w.map(3).uint(1).uint(500).uint(2).uint(3).uint(3).uint(100); });
-    assert_eq!(k.binary_ok(11, 1, &sleep), [0xa0]);
-    let r = k.rt.power_requests();
-    assert_eq!((r.len(), r[0].duration_ms, r[0].cycles, r[0].awake_ms), (1, 500, 3, 100));
-    k.binary_error(11, 1, &enc(|w| { w.map(1).uint(1).uint(5); }), ERR_ARG);
-    let info = k.binary_ok(11, 2, &[0xa0]);
-    assert_eq!(cbor::get_int(&info, 12).unwrap(), Some(3));
-    assert_eq!(cbor::get_int(&info, 13).unwrap(), Some(3));
-    assert_eq!(k.binary_ok(11, 4, &[0xa0]), [0xa0]);
+    for method in 1..=4 { k.binary_error(11, method, &[0xa0], ERR_UNSUPPORTED); }
+    assert!(k.rt.power_requests().is_empty());
 }
 
 #[test]
@@ -151,9 +144,7 @@ fn binary_console_operations_preserve_envelopes_and_return_structured_fields() {
     let k = Console::new();
     let status = k.binary_ok(20, 5, &[0xa0]);
     assert!(matches!(cbor::get(&status, 1).unwrap().unwrap().next(), Some(cbor::Item::Map(_))));
-    let heap = k.binary_ok(20, 9, &[0xa0]);
-    assert_eq!(cbor::get_int(&heap, 1).unwrap(), Some(41000));
-    assert_eq!(cbor::get_int(&heap, 2).unwrap(), Some(30000));
+    k.binary_error(20,9,&[0xa0],ERR_UNSUPPORTED);
     let start = enc(|w| { w.map(2).uint(1).text("test").uint(2).bytes(b"serve it"); });
     assert_eq!(k.binary_ok(20, 6, &start), [0xa0]);
     assert_eq!(k.rt.state().started, "test");
@@ -178,23 +169,6 @@ fn binary_console_operations_preserve_envelopes_and_return_structured_fields() {
     assert!(k.rt.state().reset_called);
 }
 
-#[test]
-fn direct_heap_query_works_without_managed_allocation() {
-    let rt = Runtime::new(xip_runtime_host::Config { mem_quota: 1, ..Default::default() });
-    let console = rt.add_module(module("mod_con"), 32).unwrap();
-    console.set_component(20);
-    console.start(b"");
-    rt.run(0);
-    let heap = console.request(20, 9, &[0xa0]).unwrap();
-    assert_eq!(cbor::get_int(&heap, 1).unwrap(), Some(41000));
-    assert_eq!(cbor::get_int(&heap, 4).unwrap(), Some(230000));
-    for kind in 0..=5 {
-        let reply = console.request(20, 9, &[0xa1, 1, kind]).unwrap();
-        assert_eq!(reply, &[0xa0]);
-    }
-    console.stop(); rt.run(0);
-    assert_eq!(console.mem_leaked(), 0);
-}
 
 #[test]
 fn retired_text_methods_and_lines_return_numeric_errors() {

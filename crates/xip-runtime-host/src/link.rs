@@ -1,7 +1,7 @@
 //! The `link` component of the host-runtime. The same rules as the device runtimes (`xip_runtime.c`): named links with a provider
 //! (a native one the test plays, or a module) and subscribers; frames delivered as packets with `CALL_LINK`, or forwarded by a
 //! route before anyone sees them; `send` to a link address, with the packet coming back as a `TX_DONE` event when the sender asked;
-//! `READY` and `STATE` events. Up to 6 links, 6 subscribers and 16 routes each, and 16 sends waiting for completion.
+//! `READY` and `STATE` events. Up to 12 links, 6 subscribers and 16 routes each, and 16 sends waiting for completion.
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::rc::Rc;
 use xip_abi::*;
@@ -11,7 +11,7 @@ use crate::quic::{self, QuicClass, QuicInfo, QuicKind, QuicPacket};
 use crate::pool::HELD_OWNED;
 use crate::runtime::{deliver, route, Inst, QItem, Runtime, Shared};
 
-const LINKS_MAX: usize = 6;
+const LINKS_MAX: usize = 12;
 const SUBS_MAX: usize = 6;
 const ROUTES_MAX: usize = 16;
 const PENDING_MAX: usize = 16;
@@ -99,9 +99,11 @@ impl Links {
         if let Some(at) = self.find(name) {
             return Some(at);
         }
-        if self.list.len() >= LINKS_MAX {
-            return None;
+        if let Some(at) = self.list.iter().position(|e| e.name.is_empty()) {
+            self.list[at] = Entry { name: name.to_owned(), ..Default::default() };
+            return Some(at);
         }
+        if self.list.len() >= LINKS_MAX { return None; }
         self.list.push(Entry { name: name.to_owned(), ..Default::default() });
         Some(self.list.len() - 1)
     }
@@ -109,7 +111,7 @@ impl Links {
         if addr < ADDR_LINK {
             return None;
         }
-        self.list.get_mut((addr - ADDR_LINK) as usize)
+        self.list.get_mut((addr - ADDR_LINK) as usize).filter(|e| !e.name.is_empty())
     }
 }
 
@@ -170,6 +172,7 @@ unsafe extern "C" fn close(user: *mut c_void, addr: u32) -> c_int {
     let mut links = sh.links.borrow_mut();
     let Some(entry) = links.at(addr) else { return ERR_NOTFOUND };
     entry.subs.retain(|s| s.0 != owner);
+    if entry.provider == LINK_NONE && entry.subs.is_empty() { *entry = Entry::default(); }
     0
 }
 
@@ -199,6 +202,7 @@ fn event(sh: &Shared, addr: u32, kind: u32, value: i32, id: u64) {
         None => return,
     };
     for (owner, component, method) in subs {
+        if method == LINK_EGRESS { continue; }
         if let Some(t) = route(sh, owner) {
             t.st.borrow_mut().queue.push_back(QItem {
                 component,
@@ -320,12 +324,16 @@ fn link_tx(sh: &Shared, dst: u32, slot: i32, start: u16, len: u16, token: u64, s
     rc
 }
 
-/// The module an envelope for `component` goes to: the module of the component if it has a datagram port (manifest key 9) or hosts a component, else the
-/// console module (component 20).
+/// Additional manifest component ownership takes priority, then the component
+/// module with a datagram port/hosted table, then the debug console fallback.
 pub(crate) fn envelope_target(sh: &Shared, component: i32) -> Option<Rc<Inst>> {
-    route(sh, component)
+    let owner = sh.insts.borrow().iter().find(|i| {
+        let st = i.st.borrow();
+        !st.ended && st.envelope_components.contains(&component)
+    }).cloned();
+    owner.or_else(|| route(sh, component)
         .filter(|t| xip_abi::cbor::get_int(&t.manifest, 9).ok().flatten().is_some_and(|p| p != 0) || !t.st.borrow().hosted.is_empty())
-        .or_else(|| route(sh, QUIC_CONSOLE_COMPONENT))
+    ).or_else(|| route(sh, QUIC_CONSOLE_COMPONENT))
 }
 
 /// `send(dst = link address)`. `ERR_BUSY` is the one failure that leaves the packet with the sender.
@@ -648,7 +656,7 @@ fn fanout(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, source: u64, 
     if link_route(sh, addr, slot, start, len) {
         return;
     }
-    let subs = sh.links.borrow_mut().at(addr).map(|l| l.subs.clone()).unwrap_or_default();
+    let subs: Vec<_> = sh.links.borrow_mut().at(addr).map(|l| l.subs.iter().copied().filter(|s| s.2 != LINK_EGRESS).collect()).unwrap_or_default();
     if subs.is_empty() {
         sh.pool.release(slot);
         return;
@@ -706,7 +714,7 @@ impl Entry {
         i.mtu = self.mtu;
         i.rate_kbps = self.rate_kbps;
         i.flags = self.flags;
-        i.subscribers = self.subs.len() as u32;
+        i.subscribers = self.subs.iter().filter(|s| s.2 != LINK_EGRESS).count() as u32;
         i.received = self.received;
         i.sent = self.sent;
         i.forwarded = self.forwarded;
@@ -789,6 +797,9 @@ pub(crate) fn release(sh: &Shared, component: i32) {
             complete(sh, slot, ERR_IO);
         }
         event(sh, addr, LINK_EVENT_STATE, LINK_DOWN as i32, 0);
+    }
+    for l in &mut sh.links.borrow_mut().list {
+        if l.provider == LINK_NONE && l.subs.is_empty() { *l = Entry::default(); }
     }
 }
 
@@ -963,7 +974,7 @@ impl Runtime {
         if data.len() > PKT_MAX as usize {
             return ERR_SIZE;
         }
-        if !quic_active(&sh.links.borrow()) && sh.links.borrow_mut().at(addr).is_some_and(|l| l.subs.is_empty() && l.routes.is_empty()) {
+        if !quic_active(&sh.links.borrow()) && sh.links.borrow_mut().at(addr).is_some_and(|l| l.subs.iter().all(|s| s.2 == LINK_EGRESS) && l.routes.is_empty()) {
             return 0;
         }
         let Some(slot) = sh.pool.acquire(0) else {
@@ -998,13 +1009,16 @@ impl Runtime {
 // Datagram endpoints own native links; reuse only retired datagram entries.
 pub(crate) fn add_datagram_link(sh: &Shared) -> Result<u32, i32> {
     let mut links = sh.links.borrow_mut();
-    let at = if let Some(i) = links.list.iter().position(|l| l.provider == LINK_NONE && l.name.starts_with("udp:")) { i }
+    let at = if let Some(i) = links.list.iter().position(|l| l.name.is_empty() || (l.provider == LINK_NONE && l.subs.is_empty() && l.name.starts_with("udp:"))) { i }
         else { if links.list.len() >= LINKS_MAX { return Err(ERR_NOMEM); } let i = links.list.len(); links.list.push(Entry::default()); i };
     links.list[at] = Entry { name: format!("udp:{at}"), provider: LINK_NATIVE, mtu: PKT_MAX, state: LINK_UP, mode: NativeTx::Done, ..Default::default() };
     Ok(addr_of(at))
 }
 pub(crate) fn remove_datagram_link(sh: &Shared, addr: u32) {
     let mut links = sh.links.borrow_mut();
-    if let Some(l) = links.at(addr) { l.provider = LINK_NONE; l.state = LINK_DOWN; l.subs.clear(); l.routes.clear(); }
+    if let Some(l) = links.at(addr) {
+        l.provider = LINK_NONE; l.state = LINK_DOWN; l.routes.clear();
+        if l.subs.is_empty() { *l = Entry::default(); }
+    }
     for l in &mut links.list { l.routes.retain(|r| r.egress != addr); }
 }

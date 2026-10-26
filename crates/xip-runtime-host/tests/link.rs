@@ -403,3 +403,28 @@ fn the_quic_rx_function_takes_a_frame_and_the_subscribers_do_not_see_it() {
     assert_eq!(events(&a, 1).len(), 2);
     assert_eq!(rt.packets_in_use(), 0);
 }
+
+
+unsafe extern "C" fn egress_only(host:*const Host,state:*mut u8,call:*const Call)->i32 {
+    let (h,c)=(&*host,&*call);
+    if c.component==HOST_COMPONENT as i32 && c.method==HOST_START as i32 {
+        let addr=link(h).open.unwrap()(h.user,c"egress-test".as_ptr(),C,LINK_EGRESS);
+        assert!(addr>=ADDR_LINK as i32);*(state as *mut u32)=addr as u32;
+    } else if c.flags & CALL_LINK != 0 {
+        panic!("egress reference received an unsolicited frame or event");
+    }
+    0
+}
+#[test]
+fn egress_reference_has_no_frame_or_state_subscription() {
+    let rt=Runtime::default();
+    let a=rt.add_handler("egress-owner",egress_only,4);
+    a.set_component(C);a.start(&[]);rt.run(0);
+    rt.add_native_link("egress-test",1500,NativeTx::Done);
+    assert_eq!(rt.link_info("egress-test").unwrap().subscribers,0);
+    assert_eq!(rt.inject_frame("egress-test",0,0,b"ordinary frame"),0);
+    rt.native_ready("egress-test");
+    rt.run(0);
+    assert_eq!(rt.packets_in_use(),0);
+    a.stop();rt.run(0);
+}

@@ -14,6 +14,10 @@ use std::os::unix::fs::OpenOptionsExt;
 pub const PORT_CONSOLE: u32 = 1;
 /// The QUIC port (`xip.h` `XIP_PORT_QUIC`, 0xf7): the PPP record of a QUIC link. Every request to a device goes here, as a 0x444d0002 long packet.
 pub const PORT_QUIC: u32 = 247;
+/// Local byte-triggered wake acknowledgement; payload 01 means the worker is awake.
+pub const PORT_WAKE: u32 = 248;
+/// Live NAN reports; kept separate from module ports, wake and diagnostic trace.
+pub const PORT_NAN_REPORT: u32 = 251;
 /// The version of the CBOR datagram: after the SCID comes the envelope `{1: component, 2: method, 3: id, 5: fields}`.
 pub const VERSION_CBOR: u32 = 0x444d_0002;
 
@@ -160,7 +164,9 @@ pub struct XipPort {
 }
 
 impl XipPort {
-    pub fn open(path: impl Into<String>) -> std::io::Result<Self> {
+    pub fn open(path: impl Into<String>) -> std::io::Result<Self> { Self::open_baud(path,None) }
+
+    pub fn open_baud(path: impl Into<String>, baud: Option<u32>) -> std::io::Result<Self> {
         let path = path.into();
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -174,7 +180,7 @@ impl XipPort {
         if unsafe { libc::ioctl(fd, libc::TIOCEXCL) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        Self::set_raw(fd);
+        Self::set_raw(fd,baud.unwrap_or(115200))?;
         Ok(XipPort { path, file })
     }
 
@@ -182,17 +188,21 @@ impl XipPort {
         &self.path
     }
 
-    fn set_raw(fd: i32) {
+    fn set_raw(fd: i32, baud: u32) -> std::io::Result<()> {
         let mut tio: libc::termios = unsafe { std::mem::zeroed() };
         if unsafe { libc::tcgetattr(fd, &mut tio) } != 0 {
-            return; // a port without termios keeps its line discipline
+            return Err(std::io::Error::last_os_error());
         }
         unsafe { libc::cfmakeraw(&mut tio) };
         tio.c_cflag |= libc::CREAD | libc::CLOCAL;
-        // the runtime's fixed rate; irrelevant on USB-Serial/JTAG
-        unsafe { libc::cfsetispeed(&mut tio, libc::B115200) };
-        unsafe { libc::cfsetospeed(&mut tio, libc::B115200) };
-        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &tio) };
+        // Closing the CLI must not drop modem lines and reset a CP210x board.
+        tio.c_cflag &= !libc::HUPCL;
+        let speed=match baud {9600=>libc::B9600,19200=>libc::B19200,38400=>libc::B38400,
+            57600=>libc::B57600,115200=>libc::B115200,230400=>libc::B230400,
+            460800=>libc::B460800,921600=>libc::B921600,_=>return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,"unsupported UART baud"))};
+        unsafe {libc::cfsetispeed(&mut tio,speed);libc::cfsetospeed(&mut tio,speed);}
+        if unsafe {libc::tcsetattr(fd,libc::TCSANOW,&tio)}<0 {return Err(std::io::Error::last_os_error());}
+        Ok(())
     }
 
     /// Read everything currently available.
@@ -211,6 +221,32 @@ impl XipPort {
 
     pub fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
         self.file.write_all(data)
+    }
+
+    /// Request wake immediately, then retry only the idempotent wake record.
+    /// Any surviving byte is enough for the device to ACK after restoring active
+    /// roles. Keep this same exclusive owner for the subsequent real command.
+    pub fn wake(&mut self) -> Result<(),String> {
+        self.flush_input().map_err(|e|e.to_string())?;
+        let mut reader=Reader::default();
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(12);
+        let mut next=std::time::Instant::now();
+        while std::time::Instant::now()<deadline {
+            if std::time::Instant::now()>=next {
+                self.write_all(&encode_record(PORT_WAKE,&[])).map_err(|e|e.to_string())?;
+                next=std::time::Instant::now()+std::time::Duration::from_millis(100);
+            }
+            let bytes=self.read().map_err(|e|e.to_string())?;
+            for event in reader.feed(&bytes) {
+                if event==Event::Record(PORT_WAKE,vec![1]) {return Ok(());}
+            }
+            let text=reader.take_text();
+            if crate::client::is_fatal_diagnostic(&String::from_utf8_lossy(&text)) {
+                return Err("device reported a fatal diagnostic while waking".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Err(format!("no awake acknowledgement from {}; check firmware and serial selection",self.path))
     }
 
     /// Drop what accumulated before the first operation (a boot still streaming).
@@ -232,6 +268,40 @@ mod tests {
         let mut r = Reader::default();
         let events = r.feed(bytes);
         (events, r.take_text())
+    }
+
+    #[test]
+    fn byte_wake_waits_for_fragmented_ack_before_real_command() {
+        use std::{fs::File,io::{Read,Write},os::fd::{AsRawFd,FromRawFd}};
+        let (mut master,mut slave)=(0,0);
+        assert_eq!(unsafe {libc::openpty(&mut master,&mut slave,core::ptr::null_mut(),core::ptr::null(),core::ptr::null())},0);
+        let mut master=unsafe {File::from_raw_fd(master)};
+        let slave=unsafe {File::from_raw_fd(slave)};
+        let path=std::fs::read_link(format!("/proc/self/fd/{}",slave.as_raw_fd())).unwrap();
+        let peer=std::thread::spawn(move || {
+            let mut r=Reader::default();let mut wakes=0;let mut buf=[0;256];
+            loop {
+                let n=master.read(&mut buf).unwrap();assert!(n>0);
+                for event in r.feed(&buf[..n]) {
+                    match event {
+                        Event::Record(PORT_WAKE,data)=>{
+                            assert!(data.is_empty());wakes+=1;
+                            if wakes==1 {continue;} // cold wake consumed the first trigger frame
+                            let ack=encode_record(PORT_WAKE,&[1]);
+                            master.write_all(&ack[..2]).unwrap();
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            master.write_all(&ack[2..]).unwrap();
+                        },
+                        Event::Record(PORT_QUIC,data)=>{assert!(wakes>=2);assert_eq!(data,b"command");return;},
+                        _=>{},
+                    }
+                }
+            }
+        });
+        let mut owner=XipPort::open(path.to_str().unwrap()).unwrap();
+        owner.wake().unwrap();
+        owner.write_all(&encode_record(PORT_QUIC,b"command")).unwrap();
+        peer.join().unwrap();
     }
 
     #[test]

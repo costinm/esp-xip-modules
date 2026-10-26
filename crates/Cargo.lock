@@ -592,7 +592,7 @@ dependencies = [
 [[package]]
 name = "dmesh-rawnan"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=0b3e629444b072d65799baab73a8868c476498b0#0b3e629444b072d65799baab73a8868c476498b0"
+source = "git+https://github.com/costinm/dmesh?rev=ab109bf1836bbe1be117b859f60ac90ec3cb9010#ab109bf1836bbe1be117b859f60ac90ec3cb9010"
 dependencies = [
  "anyhow",
 ]
@@ -600,7 +600,7 @@ dependencies = [
 [[package]]
 name = "dmesh-server"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=0b3e629444b072d65799baab73a8868c476498b0#0b3e629444b072d65799baab73a8868c476498b0"
+source = "git+https://github.com/costinm/dmesh?rev=ab109bf1836bbe1be117b859f60ac90ec3cb9010#ab109bf1836bbe1be117b859f60ac90ec3cb9010"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1389,7 +1389,7 @@ dependencies = [
 [[package]]
 name = "quic-lite"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=0b3e629444b072d65799baab73a8868c476498b0#0b3e629444b072d65799baab73a8868c476498b0"
+source = "git+https://github.com/costinm/dmesh?rev=ab109bf1836bbe1be117b859f60ac90ec3cb9010#ab109bf1836bbe1be117b859f60ac90ec3cb9010"
 dependencies = [
  "libc",
  "smallvec",
@@ -2083,7 +2083,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "uart-codec"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=0b3e629444b072d65799baab73a8868c476498b0#0b3e629444b072d65799baab73a8868c476498b0"
+source = "git+https://github.com/costinm/dmesh?rev=ab109bf1836bbe1be117b859f60ac90ec3cb9010#ab109bf1836bbe1be117b859f60ac90ec3cb9010"
 dependencies = [
  "libc",
  "mesh-api",

@@ -166,6 +166,8 @@ pub(crate) struct InstState {
     pub env: crate::envelope::Table,
     /// Components the module hosts (manifest key 11).
     pub hosted: Vec<crate::hosted::Hosted>,
+    /// Additional request component IDs declared by manifest key 12.
+    pub envelope_components: Vec<i32>,
     pub ended: bool,
     pub result: i32,
     pub calls: u32,
@@ -278,6 +280,21 @@ impl Runtime {
         let name = xip_abi::cbor::get_text(&metadata.manifest, 1).ok().flatten().map(|s| String::from_utf8_lossy(s).into_owned()).unwrap_or_default();
         let instance = self.add_loaded(&name, loaded, state_bytes);
         instance.set_component(component);
+        if let Ok(Some(mut ids)) = xip_abi::cbor::get(&instance.me.manifest, 12) {
+            let parsed = (|| {
+                let Some(xip_abi::cbor::Item::Array(n)) = ids.next() else { return Err(ERR_ARG); };
+                if n > COMPONENTS_MAX { return Err(ERR_SIZE); }
+                for _ in 0..n {
+                    let Some(xip_abi::cbor::Item::Uint(id)) = ids.next() else { return Err(ERR_ARG); };
+                    instance.serve_envelope_component(i32::try_from(id).map_err(|_| ERR_ARG)?)?;
+                }
+                Ok(())
+            })();
+            if let Err(rc) = parsed {
+                self.sh.insts.borrow_mut().retain(|other| !Rc::ptr_eq(other, &instance.me));
+                return Err(if rc == ERR_BUSY { "envelope component already owned".into() } else { "invalid envelope components".into() });
+            }
+        }
         instance.me.registered.set(true);
         if let Ok(Some(mut names)) = xip_abi::cbor::get(&instance.me.manifest, 11) {
             if let Some(xip_abi::cbor::Item::Array(n)) = names.next() {
@@ -332,6 +349,7 @@ impl Runtime {
                 component: None,
                 env: Default::default(),
                 hosted: Vec::new(),
+                envelope_components: Vec::new(),
                 ended: false,
                 result: 0,
                 calls: 0,
@@ -880,6 +898,23 @@ impl Instance {
     /// The address of this module for `send(dst = component)`.
     pub fn set_component(&self, component: i32) {
         self.me.st.borrow_mut().component = Some(component);
+    }
+
+    /// Assign an additional envelope ID before start, as manifest key 12 does on the device.
+    pub fn serve_envelope_component(&self, component: i32) -> Result<(), i32> {
+        if component <= 0 { return Err(ERR_ARG); }
+        {
+            let own = self.me.st.borrow();
+            if own.component == Some(component) || own.envelope_components.contains(&component) { return Err(ERR_ARG); }
+            if own.envelope_components.len() >= COMPONENTS_MAX { return Err(ERR_SIZE); }
+        }
+        if self.rt.sh.insts.borrow().iter().any(|other| {
+            if Rc::ptr_eq(other, &self.me) { return false; }
+            let st = other.st.borrow();
+            !st.ended && (st.component == Some(component) || st.envelope_components.contains(&component))
+        }) { return Err(ERR_BUSY); }
+        self.me.st.borrow_mut().envelope_components.push(component);
+        Ok(())
     }
 
     /// What the manifest's port (key 9) does at start: the runtime binds the module to the link (`PORT_CONSOLE`: the link `"serial"`, which the C runtime serves by port and this host-runtime by subscription, provided by

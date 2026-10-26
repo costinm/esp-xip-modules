@@ -66,6 +66,7 @@ static COMPONENT: Power = Power {
     cancel: Some(cancel),
     activate: Some(activate),
     awake_for: Some(awake_for),
+    received: None,
 };
 
 pub(crate) fn component() -> *const Power { &COMPONENT }

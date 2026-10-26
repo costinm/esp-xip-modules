@@ -70,6 +70,8 @@ mod link;
 pub use link::*;
 mod serial;
 pub use serial::*;
+mod stream;
+pub use stream::*;
 mod quic;
 pub use quic::*;
 mod power;
@@ -343,6 +345,13 @@ impl Hw {
         let t = unsafe { &*p };
         (t.version == WIFI_VERSION && t.size as usize >= core::mem::size_of::<Wifi>()).then_some(t)
     }
+    /// Native transport-neutral module streams, when supplied by the host.
+    pub fn stream(&self) -> Option<&'static Stream> {
+        let p=self.get_component(c"stream").cast::<Stream>();
+        if p.is_null(){return None;}
+        let t=unsafe{&*p};
+        (t.version==STREAM_VERSION && t.size as usize>=core::mem::size_of::<Stream>()).then_some(t)
+    }
     /// The `link` component (frames between the runtime, modules and transports), or None when this host has none.
     pub fn link(&self) -> Option<&'static Link> {
         let p = self.get_component(c"link") as *const Link;
@@ -587,3 +596,15 @@ macro_rules! export_module {
         }
     };
 }
+
+mod nan;
+pub use nan::{NanTransport, Serial};
+mod nan_vtable;
+pub use nan_vtable::Nan;
+mod lora_vtable;
+pub use lora_vtable::Lora;
+
+mod system;
+pub use system::{SystemHeapInfo, SystemHeapDump};
+mod system_vtable;
+pub use system_vtable::System;
