@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "const": "system.heap"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 49,
+      "x-method-index": 1
+    },
+    {
+      "properties": {
+        "kind": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "i32"
+        },
+        "method": {
+          "const": "system.heap_dump"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 49,
+      "x-method-index": 2
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "system.dump_tasks"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 49,
+      "x-method-index": 3
+    }
+  ]
+}

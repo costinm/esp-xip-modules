@@ -1,0 +1,112 @@
+{
+  "components": [
+    {
+      "doc": "Independent transport settings owned by NAN. Requests route directly to the NAN\nmodule; the debug console does not participate. Omitted settings retain their\ncurrent values. Peer activation is a separate nan.wake command; the old aggregate\nmode and wake_target fields are not part of this API.",
+      "index": 1,
+      "name": "transport"
+    }
+  ],
+  "format": "mesh-api/1",
+  "methods": [
+    {
+      "component": "transport",
+      "index": 4,
+      "method": "set",
+      "name": "transport.set",
+      "request": {
+        "fields": [
+          {
+            "description": "0 off, 1 on; omitted retains STA. Enabling requires an existing station profile.",
+            "name": "sta",
+            "tag": 1,
+            "type": "uint"
+          },
+          {
+            "description": "0 default (8), 1, 8 or 16 discovery windows; omitted retains the interval.",
+            "name": "nan_dw_interval",
+            "tag": 14,
+            "type": "uint"
+          },
+          {
+            "description": "0 default, 1 on, 2 off. Disabling the sync control plane is unsupported.",
+            "name": "now",
+            "tag": 15,
+            "type": "uint"
+          },
+          {
+            "description": "0 off, 1 on.",
+            "name": "ap",
+            "tag": 16,
+            "type": "uint"
+          },
+          {
+            "description": "0/1 selects 115200, 6 selects 230400, 7 selects 460800, 8 off, 9 selects 921600. Serial on also restores a detached USB PHY; USB ignores baud.",
+            "name": "uart",
+            "tag": 18,
+            "type": "uint"
+          },
+          {
+            "description": "0 default, 1 start, 2 stop. Sleep policy uses rendezvous while sleeping.",
+            "name": "ble",
+            "tag": 26,
+            "type": "uint"
+          },
+          {
+            "description": "0 default or 2 PPP. Other framing is unsupported.",
+            "name": "uart_mode",
+            "tag": 28,
+            "type": "uint"
+          },
+          {
+            "description": "Explicit supported physical baud; overrides selector 18. USB ignores it.",
+            "name": "uart_baud",
+            "tag": 29,
+            "type": "uint"
+          },
+          {
+            "description": "0 off, 1 LoRa, 2 FSK.",
+            "name": "radio_mode",
+            "tag": 31,
+            "type": "uint"
+          },
+          {
+            "description": "Radio frequency in Hz for this activation.",
+            "name": "radio_frequency",
+            "tag": 32,
+            "type": "uint"
+          },
+          {
+            "description": "Radio bandwidth in Hz.",
+            "name": "radio_bandwidth",
+            "tag": 33,
+            "type": "uint"
+          },
+          {
+            "description": "Radio transmit power in dBm; negative values currently unsupported.",
+            "name": "radio_tx_power",
+            "tag": 35,
+            "type": "int"
+          },
+          {
+            "description": "LoRa spreading factor, 5..12; zero uses the default.",
+            "name": "radio_spreading_factor",
+            "tag": 36,
+            "type": "uint"
+          },
+          {
+            "description": "LoRa coding rate, 5..8; zero uses the default.",
+            "name": "radio_coding_rate",
+            "tag": 37,
+            "type": "uint"
+          }
+        ]
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "select coordinated transport policy",
+      "visibility": "public"
+    }
+  ],
+  "types": []
+}

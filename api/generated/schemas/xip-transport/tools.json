@@ -1,0 +1,100 @@
+[
+  {
+    "description": "select coordinated transport policy",
+    "inputSchema": {
+      "properties": {
+        "ap": {
+          "type": "string",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "uint"
+        },
+        "ble": {
+          "type": "string",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "uint"
+        },
+        "nan_dw_interval": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "uint"
+        },
+        "now": {
+          "type": "string",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "uint"
+        },
+        "radio_bandwidth": {
+          "type": "string",
+          "x-protobuf-index": 33,
+          "x-protobuf-type": "uint"
+        },
+        "radio_coding_rate": {
+          "type": "string",
+          "x-protobuf-index": 37,
+          "x-protobuf-type": "uint"
+        },
+        "radio_frequency": {
+          "type": "string",
+          "x-protobuf-index": 32,
+          "x-protobuf-type": "uint"
+        },
+        "radio_mode": {
+          "type": "string",
+          "x-protobuf-index": 31,
+          "x-protobuf-type": "uint"
+        },
+        "radio_spreading_factor": {
+          "type": "string",
+          "x-protobuf-index": 36,
+          "x-protobuf-type": "uint"
+        },
+        "radio_tx_power": {
+          "type": "string",
+          "x-protobuf-index": 35,
+          "x-protobuf-type": "int"
+        },
+        "sta": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "uart": {
+          "type": "string",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "uint"
+        },
+        "uart_baud": {
+          "type": "string",
+          "x-protobuf-index": 29,
+          "x-protobuf-type": "uint"
+        },
+        "uart_mode": {
+          "type": "string",
+          "x-protobuf-index": 28,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "transport.set",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 1,
+    "x-method-index": 4,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  }
+]

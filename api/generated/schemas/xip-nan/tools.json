@@ -397,6 +397,11 @@
           "x-protobuf-index": 1,
           "x-protobuf-type": "bool"
         },
+        "immediate": {
+          "type": "boolean",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bool"
+        },
         "trace": {
           "type": "boolean",
           "x-protobuf-index": 2,
@@ -599,6 +604,336 @@
     },
     "x-component-index": 46,
     "x-method-index": 11,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "current compact radio timing snapshot",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.report",
+    "outputSchema": {
+      "properties": {
+        "cluster": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        },
+        "first_rx_ms": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "instance": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "uint"
+        },
+        "kind": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "now_cluster": {
+          "type": "boolean",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "bool"
+        },
+        "peer": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "bytes"
+        },
+        "record": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "bytes"
+        },
+        "rssi": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "int"
+        },
+        "service": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "bytes"
+        },
+        "sync_ms": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "via_now": {
+          "type": "boolean",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 12,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "The power state and the FreeRTOS numbers",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.powerinfo",
+    "outputSchema": {
+      "properties": {
+        "active_window": {
+          "type": "integer",
+          "x-protobuf-index": 26,
+          "x-protobuf-type": "u8"
+        },
+        "auto_light_sleep": {
+          "type": "integer",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "u8"
+        },
+        "cpu_mhz": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u16"
+        },
+        "cycles_left": {
+          "type": "integer",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "u16"
+        },
+        "filter_dropped": {
+          "type": "integer",
+          "x-protobuf-index": 23,
+          "x-protobuf-type": "u32"
+        },
+        "heap_free": {
+          "type": "integer",
+          "x-protobuf-index": 20,
+          "x-protobuf-type": "u32"
+        },
+        "heap_largest": {
+          "type": "integer",
+          "x-protobuf-index": 22,
+          "x-protobuf-type": "u32"
+        },
+        "heap_min": {
+          "type": "integer",
+          "x-protobuf-index": 21,
+          "x-protobuf-type": "u32"
+        },
+        "ip_sockets": {
+          "type": "integer",
+          "x-protobuf-index": 27,
+          "x-protobuf-type": "u8"
+        },
+        "last_duration_us": {
+          "type": "integer",
+          "x-protobuf-index": 16,
+          "x-protobuf-type": "u32"
+        },
+        "last_requested_us": {
+          "type": "integer",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "u32"
+        },
+        "last_resume_us": {
+          "type": "integer",
+          "x-protobuf-index": 17,
+          "x-protobuf-type": "u32"
+        },
+        "max_mhz": {
+          "type": "integer",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "u16"
+        },
+        "min_mhz": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u16"
+        },
+        "pm_configured": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u8"
+        },
+        "promisc_frames": {
+          "type": "integer",
+          "x-protobuf-index": 24,
+          "x-protobuf-type": "u32"
+        },
+        "promiscuous": {
+          "type": "integer",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "u8"
+        },
+        "sleep_attempts": {
+          "type": "integer",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "u32"
+        },
+        "sleep_entries": {
+          "type": "integer",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "u32"
+        },
+        "sleep_skipped": {
+          "type": "integer",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "u32"
+        },
+        "soft_sleep": {
+          "type": "integer",
+          "x-protobuf-index": 25,
+          "x-protobuf-type": "u8"
+        },
+        "state": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u8"
+        },
+        "tasks": {
+          "type": "integer",
+          "x-protobuf-index": 18,
+          "x-protobuf-type": "u32"
+        },
+        "tick_hz": {
+          "type": "integer",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "u16"
+        },
+        "tickless_idle": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "u8"
+        },
+        "ticks": {
+          "type": "integer",
+          "x-protobuf-index": 19,
+          "x-protobuf-type": "u32"
+        },
+        "wake_cause": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u8"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "authenticated",
+    "x-component-index": 46,
+    "x-method-index": 13,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Timer light sleep, a number of cycles",
+    "inputSchema": {
+      "properties": {
+        "awake_ms": {
+          "type": "integer",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "u16"
+        },
+        "cycles": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u16"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.powersleep",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 46,
+    "x-errors": [
+      {
+        "description": "A duration under 10 ms.",
+        "name": "invalid_argument"
+      },
+      {
+        "description": "A request is already running.",
+        "name": "unavailable"
+      }
+    ],
+    "x-execution": "non-blocking",
+    "x-method-index": 14,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "Print the power-management locks to the device log",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.dump_locks",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-access": "any of `system`, `mesh.owner`, `mesh.admin`",
+    "x-component-index": 46,
+    "x-method-index": 15,
     "x-standard-errors": [
       "unauthenticated",
       "permission_denied",

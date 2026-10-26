@@ -70,24 +70,6 @@
     },
     {
       "properties": {
-        "kind": {
-          "type": "string",
-          "x-protobuf-index": 1,
-          "x-protobuf-type": "int"
-        },
-        "method": {
-          "const": "console.heap"
-        }
-      },
-      "required": [
-        "method"
-      ],
-      "type": "object",
-      "x-component-index": 20,
-      "x-method-index": 9
-    },
-    {
-      "properties": {
         "key": {
           "type": "string",
           "x-protobuf-index": 1,

@@ -98,6 +98,11 @@
           "x-protobuf-index": 1,
           "x-protobuf-type": "bool"
         },
+        "immediate": {
+          "type": "boolean",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bool"
+        },
         "method": {
           "const": "nan.sleepy"
         },
@@ -223,6 +228,73 @@
       "type": "object",
       "x-component-index": 46,
       "x-method-index": 11
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "nan.report"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 12
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "nan.powerinfo"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 13
+    },
+    {
+      "properties": {
+        "awake_ms": {
+          "type": "integer",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "u16"
+        },
+        "cycles": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u16"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "nan.powersleep"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 14
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "nan.dump_locks"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 15
     }
   ]
 }
