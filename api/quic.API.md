@@ -9,6 +9,10 @@ routes retain priority; unhandled local frames reach the attached endpoint.
 `attach(rx_method)` enables endpoint delivery to the module worker, preserving
 link, peer token, timestamp and signal. `detach()` stops delivery immediately.
 No module function pointer is held by a native driver. Stop automatically detaches.
+Attachment temporarily sets the endpoint's owned-packet quota to seven (one held
+entry remains available for borrowed RX). Detach restores its previous quota;
+it does not preallocate those buffers. Four physical TX completion records are
+reserved while attached. The endpoint shares the ordinary native packet pool.
 
 `pool_info(out)` reports physical geometry and the calling module's quota.
 `acquire(reserved, out_packet)` atomically obtains one owned packet only when the

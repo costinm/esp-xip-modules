@@ -26,29 +26,6 @@
       "type": "object",
       "x-component-index": 48,
       "x-method-index": 2
-    },
-    {
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "x-protobuf-index": 1,
-          "x-protobuf-type": "bool"
-        },
-        "method": {
-          "const": "quic.relay"
-        },
-        "peer": {
-          "type": "string",
-          "x-protobuf-index": 2,
-          "x-protobuf-type": "bytes"
-        }
-      },
-      "required": [
-        "method"
-      ],
-      "type": "object",
-      "x-component-index": 48,
-      "x-method-index": 3
     }
   ]
 }

@@ -88,43 +88,5 @@
       "unavailable",
       "internal"
     ]
-  },
-  {
-    "description": "allow one NOW next hop",
-    "inputSchema": {
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "x-protobuf-index": 1,
-          "x-protobuf-type": "bool"
-        },
-        "peer": {
-          "type": "string",
-          "x-protobuf-index": 2,
-          "x-protobuf-type": "bytes"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "quic.relay",
-    "outputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "x-component-index": 48,
-    "x-method-index": 3,
-    "x-standard-errors": [
-      "unauthenticated",
-      "permission_denied",
-      "timeout",
-      "remote_exception",
-      "invalid_argument",
-      "not_found",
-      "conflict",
-      "unavailable",
-      "internal"
-    ]
   }
 ]

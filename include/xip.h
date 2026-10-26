@@ -212,6 +212,10 @@
 // Version of the [`Link`] table.
 #define XIP_LINK_VERSION 1
 
+// `Link::open` method: hold an egress reference without receiving frames/events.
+// Close it when the cached address is no longer used.
+#define XIP_LINK_EGRESS -1
+
 // `call.flags` bit set on the frames of a link (both directions): `id` is an address token and the call is not a request.
 #define XIP_CALL_LINK 2
 
@@ -258,9 +262,16 @@
 // manifest, independent of the physical radio link. 0xf7 remains QUIC.
 #define XIP_PORT_NAN 246
 
+// Best-effort NAN DW0 summaries and live service observations on UART.
+#define XIP_PORT_NAN_REPORT 251
+
 // PPP port of DMesh's QUIC packets (`0xf7`). The record's payload is one QUIC packet: the runtime hands it, in a pool packet with the serial
 // link in the metadata, to the common QUIC receive function (`xip_quic_rx_set`), like the frames of ESP-NOW and the BLE channel.
 #define XIP_PORT_QUIC 247
+
+// Multicast port: bound by a module's manifest (key 9), the runtime's `xip_mc` UDP listener delivers datagrams of the DMesh discovery group
+// (IPv6 `ff02::5227`, IPv4 later) here; the module answers by sending back to the source token it arrived with.
+#define XIP_PORT_MC 250
 
 #define XIP_PORT_NET 5225
 
@@ -288,10 +299,22 @@
 // [`Link::route`] flag: also deliver the frame to the subscribers (the default is to forward it only).
 #define XIP_ROUTE_COPY 1
 
+#define XIP_STREAM_VERSION 1
+
+#define XIP_CALL_STREAM 16
+
+#define XIP_STREAM_OPEN 1
+
+#define XIP_STREAM_DATA 2
+
+#define XIP_STREAM_FIN 3
+
+#define XIP_STREAM_CLOSED 4
+
 #define XIP_QUIC_VERSION 1
 
 // `Power::version`.
-#define XIP_POWER_VERSION 3
+#define XIP_POWER_VERSION 4
 
 // Emit compact CBOR sleep/wake records on PPP port 250 (0xfa).
 #define XIP_POWER_TRACE_UART 1
@@ -377,6 +400,113 @@
 
 #define XIP_IP_VERSION 1
 
+typedef struct {
+  uint32_t free;
+  uint32_t largest;
+  uint32_t min_free;
+  uint32_t total;
+  uint32_t internal_free;
+  uint32_t internal_largest;
+} xip_system_heap_info;
+
+typedef struct {
+  int32_t kind;
+} xip_system_heap_dump;
+
+// The `system` component table.
+typedef struct {
+  // Table version.
+  uint32_t version;
+  // `sizeof` this table: members past it do not exist.
+  uint32_t size;
+  // 1. Free, minimum-free and largest-block values, in bytes.
+  int (*heap)(void *ctx, xip_system_heap_info *response);
+  // 2. Kinds: 0 memory regions, 1 block snapshot, 3 trace start, 4 trace dump, 5 trace stop, 6 CBOR block records over native PPP.
+  int (*heap_dump)(void *ctx, const xip_system_heap_dump *request);
+  // 3. Clients debugging scheduling or memory usage request task names, priorities and remaining stack bytes.
+  int (*dump_tasks)(void *ctx);
+} xip_system;
+
+// The `lora` component table.
+typedef struct {
+  // Table version.
+  uint32_t version;
+  // `sizeof` this table: members past it do not exist.
+  uint32_t size;
+  // Local only (no CBOR form, no envelope reaches it): NAN calls this to replace or restore its LoRa/FSK receive role without racing a queued module stop. The borrowed start-format request is validated before stopping existing work; only rx, fsk without payload, and idle are accepted. Success admits asynchronous board initialization, not reception.
+  int (*configure)(void *ctx, const uint8_t *record, size_t len);
+  // Local only (no CBOR form, no envelope reaches it): NAN calls this before coordinated sleep or explicit radio off to synchronously cancel radio work and release SPI, IRQ and power. The mapped module remains callable until explicitly stopped.
+  int (*suspend)(void *ctx);
+} xip_lora;
+
+// Native selection shared by transport.set and the NAN wake handler.
+typedef struct {
+  // Station role: 0 off, 1 on, 255 retain.
+  uint8_t sta;
+  // Shared BLE policy: 0 default, 1 on, 2 off; 255 retain.
+  uint8_t ble;
+  // Shared UART framing: 0 default or 2 PPP; 255 retain.
+  uint8_t uart_mode;
+  // 0 off, 1 LoRa, 2 FSK; 255 retain.
+  uint8_t radio_mode;
+  // 0 default, 1/8/16 discovery windows, or 255 retain.
+  uint8_t cadence;
+  // 0 default, 1 on, 2 off; 255 retain.
+  uint8_t now;
+  // 0 off, 1 on; 255 retain.
+  uint8_t ap;
+  // Shared UART selector: 0 default, 1..7 baud selectors, 8 off, 9 921600; 255 retain.
+  uint8_t uart;
+  // Reserved for future per-transport settings; must be zero.
+  uint8_t reserved[8];
+  // Zero retains the baud. Only rates supported by the physical driver are admitted.
+  uint32_t uart_baud;
+  // Zero uses the module default for this activation.
+  uint32_t radio_frequency;
+  // Zero uses the module default for this activation.
+  uint32_t radio_bandwidth;
+  // Zero uses the module default spreading factor.
+  uint32_t radio_sf;
+  // Zero uses the module default coding rate (5..8).
+  uint32_t radio_cr;
+  // 127 uses the module default power; negative power is currently unsupported.
+  int32_t radio_power;
+} xip_nan_transport;
+
+// The `nan` component table.
+typedef struct {
+  // Table version.
+  uint32_t version;
+  // `sizeof` this table: members past it do not exist.
+  uint32_t size;
+  // Local only (no CBOR form, no envelope reaches it): The runtime worker calls this after USB SOF connection state changes, to keep active roles while a host is attached by default, or follow the explicit USB detach policy.
+  int (*usb)(void *ctx, uint32_t connected);
+  // Local only (no CBOR form, no envelope reaches it): The runtime worker calls this with the native wake cause so NAN restores receive capture and active transport policy after local serial or decoded directed-packet activity.
+  int (*wake)(void *ctx, int32_t cause);
+  // Local only (no CBOR form, no envelope reaches it): Local policy callers and the remote sleepy handler use this to select paired discovery windows; USB attachment vetoes enabling.
+  int (*sleepy)(void *ctx, uint32_t enabled, uint32_t cadence, uint32_t trace, uint32_t immediate);
+  // Local only (no CBOR form, no envelope reaches it): A publication supplier calls this to replace the cache without restarting synchronization or waiting for a message round trip.
+  int (*set_announce)(void *ctx, const uint8_t *record, size_t len);
+  // Local only (no CBOR form, no envelope reaches it): Local control callers use this to apply validated independent Wi-Fi, UART, BLE and LoRa/FSK settings; direct transport.set requests use the same NAN policy.
+  int (*transport_set)(void *ctx, const xip_nan_transport *request);
+} xip_nan;
+
+// Native serial mechanisms used by the coordinated transport owner.
+typedef struct {
+  // Version 1.
+  uint32_t version;
+  // Size of this table.
+  uint32_t size;
+  // Query USB SOF attachment independently of the selected console driver.
+  int (*usb_connected)(void *ctx);
+  // Set UART application receive policy: 0 off, 1 on. Recovery wake remains armed.
+  int (*mode)(void *ctx, uint32_t mode);
+  // Queue the driver's negotiated baud change; zero is not a valid rate.
+  int (*baud)(void *ctx, uint32_t baud);
+  // Query the experimental NV usb.sleep opt-in (default false).
+  int (*usb_sleep_allowed)(void *ctx);
+} xip_serial;
+
 // Point-to-point IP interface. No Ethernet/ARP, default route, forwarding or
 // compression. Static IPv6 addresses use an on-link /64; all-zero disables a family.
 typedef struct {
@@ -403,6 +533,41 @@ typedef struct {
   // network sleep teardown also close it; recreate after resume.
   int (*close)(void *ctx, uint32_t link);
 } xip_ip;
+
+typedef struct {
+  uint32_t packet;
+  uint32_t len;
+  uint32_t fin;
+} xip_stream_packet;
+
+// Native `get_component("stream")`. Handles bind provider and consumer instance
+// generations; stopping either invalidates them. No body queue lives here.
+typedef struct {
+  uint32_t version;
+  uint32_t size;
+  // Consumer binds an envelope component/method for this instance. Released
+  // on stop. Primary components with a stream manifest need no explicit bind.
+  int (*listen)(void *ctx, int component, int method);
+  // Provider opens an opaque byte stream with (NULL, 0); the runtime assembles
+  // its opening CBOR envelope in feed and selects the consumer. A complete
+  // envelope may also be supplied here. Opening storage is bounded to 512 bytes.
+  // Returns a generation-bound handle; the provider does no envelope parsing.
+  int (*open)(void *ctx, const uint8_t *envelope, size_t len);
+  // Provider delivers borrowed bytes, including an unbound stream's opening
+  // envelope. The consumed count includes header bytes. fin requires len=0 and follows all
+  // consumed body bytes. Partial/zero consumption retains bytes at provider.
+  int (*feed)(void *ctx, uint32_t handle, const uint8_t *data, size_t len, uint32_t fin);
+  // Either endpoint closes; peer receives CLOSED. Idempotent only for a live handle.
+  int (*close)(void *ctx, uint32_t handle);
+  // Consumer transfers one pool packet on OK; EVERY error retains it.
+  // One outstanding output per stream. fin half-closes after these bytes.
+  int (*write_pkt)(void *ctx, uint32_t handle, uint32_t packet, uint32_t len, uint32_t fin);
+  // Provider takes the exact pending physical slot, or gets 0 if none.
+  // A full held quota leaves it pending for the next poll.
+  int (*take)(void *ctx, uint32_t handle, xip_stream_packet *out);
+  // Provider accepted the outstanding packet into reliable history.
+  int (*written)(void *ctx, uint32_t handle);
+} xip_stream;
 
 typedef struct {
   // sizeof(QuicPoolInfo).
@@ -1439,10 +1604,13 @@ typedef struct {
   // `sizeof(xip_link)`: members past it do not exist.
   uint32_t size;
   // Subscribe to the link `name` (created if nobody has named it yet, so the order of start does not matter): its frames
-  // and events arrive as calls `(component, method)` to the calling module. Returns the link's address (>= `ADDR_LINK`, positive) to
+  // Use method [`LINK_EGRESS`] to hold only an egress reference, without frames or events.
+  // Keep that reference open while caching the address, including across provider down/up.
+  // Otherwise frames and events arrive as calls `(component, method)` to the calling module. Returns the link's address (>= `ADDR_LINK`, positive) to
   // `send` to, or `ERR_ARG` / `ERR_NOMEM` (no room for another link or subscriber). Subscribing again with the same pair changes nothing.
   int (*open)(void *ctx, const char *name, int component, int method);
-  // Stop receiving the link at `addr`. Subscriptions also end with the module.
+  // Release this module's subscriptions/egress references at `addr`. They also end with the module.
+  // An address without a provider or references may be reclaimed; resolve/open it again before reuse.
   int (*close)(void *ctx, uint32_t addr);
   // Be the provider of the link `name`: frames sent to its address arrive as calls `(component, method)` to the calling
   // module. `mtu` is the largest frame (0: unknown). The link is `LINK_DOWN` until [`Link::set_state`]. Returns the address,
@@ -1543,7 +1711,7 @@ typedef struct {
   // restarted around a plain delay and the CPU does not sleep, as DMesh's `sleepy-soft` (`usb_jtag_debug_hold`). A device on USB is charged by the host, so
   // the saving does not matter there; unplugged, or with a UART console, the sleep is physical. Details: `components/xip_runtime/src/xip_power.c`.
   uint8_t soft_sleep;
-  // A UART/wake activity interval is still open. Informational: the module
+  // A local-serial or validated directed-packet activity interval is still open. Informational: the module
   // owns sleep policy. Uses one formerly reserved byte, keeping ABI size.
   uint8_t active_window;
   // Open runtime TCP sockets plus the default UDP listener. Zero throughout
@@ -1571,18 +1739,23 @@ typedef struct {
   int (*dump_tasks)(void *ctx);
   // One sleep ending at an absolute monotonic microsecond deadline. Radio
   // shutdown time is included, so it cannot shift a scheduled receive DW.
-  // Requires no active UART window; `flags` may include POWER_TRACE_UART.
+  // Requires no active shared activity window; `flags` may include POWER_TRACE_UART.
   int (*sleep_until)(void *ctx, uint64_t wake_at_us, uint32_t flags);
   // Cancel only this caller's pending sleep. Also cancelled at module unload.
   int (*cancel)(void *ctx);
-  // Open the runtime activity window; zero explicitly clears the current
-  // window when a policy command arms sleep. Subsequent UART RX reopens it.
+  // Open the shared runtime activity window; zero explicitly clears it.
+  // Local serial bytes and decoded directed network records reopen it.
   int (*activate)(void *ctx, uint32_t duration_ms);
   // Extend one shared temporary awake deadline, at most 300,000 ms per call.
   // Zero queries without extending; returns remaining ms, or ERR_ARG above
   // the limit. Renewal never shortens another caller's hold. Unlike activate,
   // this defers sleep without changing UART or module awake/sleepy policy.
   int (*awake_for)(void *ctx, uint32_t duration_ms);
+  // Link adapters call after selecting a local directed record. The runtime
+  // fully decodes its CBOR envelope before extending shared activity by 5 s.
+  // Broadcast, malformed or nonlocal records never vote. Returns 1 if voted,
+  // 0 if ignored; the packet is borrowed only for this call.
+  int (*received)(void *ctx, const uint8_t *record, size_t len, uint32_t directed);
 } xip_power;
 
 // The `hw` component table.
@@ -2015,6 +2188,8 @@ _Static_assert(sizeof(xip_power_info) == 76, "xip_power_info layout");
 _Static_assert(sizeof(xip_ble_start) == 8, "xip_ble_start layout");
 _Static_assert(sizeof(xip_ble_scan) == 8, "xip_ble_scan layout");
 _Static_assert(sizeof(xip_ble_connect) == 16, "xip_ble_connect layout");
+_Static_assert(sizeof(xip_system_heap_info) == 24, "xip_system_heap_info layout");
+_Static_assert(sizeof(xip_system_heap_dump) == 4, "xip_system_heap_dump layout");
 _Static_assert(sizeof(xip_ble_listen) == 8, "xip_ble_listen layout");
 _Static_assert(sizeof(xip_ble_mode) == 8, "xip_ble_mode layout");
 _Static_assert(sizeof(xip_ble_status) == 92, "xip_ble_status layout");
@@ -2024,13 +2199,16 @@ _Static_assert(sizeof(xip_nimble_start) == 96, "xip_nimble_start layout");
 _Static_assert(sizeof(xip_nimble_scan) == 68, "xip_nimble_scan layout");
 _Static_assert(sizeof(xip_nimble_connect) == 20, "xip_nimble_connect layout");
 #if UINTPTR_MAX == 0xffffffffu
+_Static_assert(sizeof(xip_system) == 20, "xip_system layout");
+_Static_assert(sizeof(xip_stream) == 36, "xip_stream layout");
 _Static_assert(sizeof(xip_quic) == 32, "xip_quic layout");
+_Static_assert(sizeof(xip_stream_packet) == 12, "xip_stream_packet layout");
 _Static_assert(sizeof(xip_quic_pool_info) == 24, "xip_quic_pool_info layout");
 _Static_assert(sizeof(xip_quic_tx_completion) == 40, "xip_quic_tx_completion layout");
 _Static_assert(sizeof(xip_ip) == 20, "xip_ip layout");
 _Static_assert(sizeof(xip_call) == 64, "xip_call layout");
 _Static_assert(sizeof(xip_identity) == 20, "xip_identity layout");
-_Static_assert(sizeof(xip_power) == 40, "xip_power layout");
+_Static_assert(sizeof(xip_power) == 44, "xip_power layout");
 _Static_assert(sizeof(xip_host) == 156, "xip_host layout");
 #endif
 
