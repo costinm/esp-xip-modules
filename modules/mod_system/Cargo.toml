@@ -1,0 +1,37 @@
+[package]
+name = "esp-mod-system"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Memory and task diagnostics"
+publish = false
+
+# Standalone: built by tools/mkmod.py --cargo (scripts/build.sh), not as part of a cargo workspace.
+[workspace]
+
+[dependencies]
+xip-abi = { path = "../../crates/xip-abi", features = ["global-alloc"] }
+
+[package.metadata]
+# Options for tools/mkmod.py (scripts/build.sh).
+mkmod = "--name system --tag 49 --stack 4096 --state 64 --autostart --components system"
+
+[features]
+flat-image = []
+# the panic handler of a no_std library built as a shared object for crates/xip-runtime-host (scripts/build-host-modules.sh)
+sim = []
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "mod_system"
+required-features = ["flat-image"]
+
+[profile.release]
+codegen-units = 1
+debug = false
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = "symbols"

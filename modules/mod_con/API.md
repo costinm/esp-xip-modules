@@ -1,11 +1,11 @@
 # `console` API (20)
 
-CBOR device control, and the home of the native components that no module hosts (Wi-Fi 10, power 11, ip 12, ...). The module has no port. Methods are reached
-as a numeric envelope in a 0x444d0002 datagram (the runtime parses it and sends the answer back the same way), or as direct calls from the application. The native components without a hosting module (`wifi.*`, `power.*`, `ip.*`) are served from the native method table. Method IDs 1–4 are retired (4 was `dispatch`: an envelope as an argument; a module that holds an envelope sends it to `ADDR_ENVELOPE` and the runtime dispatches it).
+CBOR device control, and the home of the native components that no module hosts (Wi-Fi 10, ip 12, ...). The module has no port. Methods are reached
+as a numeric envelope in a 0x444d0002 datagram (the runtime parses it and sends the answer back the same way), or as direct calls from the application. The native components without a hosting module (`wifi.*`, `ip.*`) are served from the native method table. Method IDs 1–4 are retired (4 was `dispatch`: an envelope as an argument; a module that holds an envelope sends it to `ADDR_ENVELOPE` and the runtime dispatches it).
 Text lines, parsing, rendering and TCP console connections are not supported.
 Method IDs 1–4 are retired and must not be reused.
 
-Native Wi-Fi, power and BLE methods use the generated component tables and keep their
+Native Wi-Fi and IP methods use the generated component tables and keep their
 existing schemas. Fields omitted from a native request are zero, so `wifi.set`
 replaces the whole intent.
 
@@ -68,26 +68,7 @@ replaces the whole intent.
 
 An empty request. Success means the reset request was accepted; obtain fresh application health after reboot to prove completion.
 
-## 9. `heap` — heap snapshot or diagnostic request
-
-### Request
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `kind` | `int` | Optional: 0 regions, 1 blocks, 2 tasks, 3 trace start, 4 trace dump, 5 trace stop, 6 CBOR block records over native module PPP. Absent returns the snapshot; present requests a diagnostic in the device log and returns an empty map. |
-
-Kind 1 captures at most 1024 block descriptors into a temporary allocation, then prints after releasing allocator locks. The header identifies the snapshot buffer itself and whether the capture was truncated; truncation returns a size error after printing the captured blocks. The buffer is freed after output. Kind 6 sends the same snapshot as CBOR PPP records on port 1, followed by the ordinary correlated response. Each record has tag `0`: header `0` is `{0:0,1:count,2:seen,3:buffer_address,4:buffer_bytes,5:truncated,6:entry_total,7:entry_free}`; block `1` is `{0:1,1:heap_start,2:address,3:size,4:used}`; end `2` is `{0:2,1:count}`. The header includes the application-entry heap total/free, cached before application setup. Addresses and sizes are unsigned integers; `used` and `truncated` are booleans. This diagnostic stream requires native module PPP, such as generic C/Rust Main; ordinary FW control uses UART QUIC and does not carry this diagnostic stream.
-
-### Response
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `free` | `uint` | Free heap bytes. |
-| 2 | `largest` | `uint` | Largest free block. |
-| 3 | `min_free` | `uint` | Minimum observed free heap. |
-| 4 | `total` | `uint` | Total heap. |
-| 5 | `internal_free` | `uint` | Free internal heap. |
-| 6 | `internal_largest` | `uint` | Largest internal free block. |
+Method 9 (heap) is retired; use system.heap, system.heap_dump or system.dump_tasks.
 
 ## 10. `nv` — read or write a setting
 
@@ -141,7 +122,7 @@ it once it accepted. Errors are the link's: `ERR_BUSY` (-5, the link is still se
 | 2 | `data` | `bytes` | The packet payload, 1 to 1500 bytes (the text `hex:...` is also accepted; it doubles the size). |
 | 3 | `token` | `uint` | The destination token on the link; absent: 0 (broadcast or the only peer). |
 
-Direct methods 5–11 return their result map on success or a signed negative ABI error scalar on failure (the existing module-call convention). An envelope request gets them in field 7. Start/stop/reset return an empty successful map. Native Wi-Fi methods retain their own existing schemas and are reached by envelope; text `wifi` remains available during migration. Existing DMesh status/settings methods keep their IDs and shapes and coexist with these console methods.
+Direct methods 5–8 and 10–11 return their result map on success or a signed negative ABI error scalar on failure (the existing module-call convention). An envelope request gets them in field 7. Start/stop/reset return an empty successful map. Native Wi-Fi methods retain their own existing schemas and are reached by envelope. Existing DMesh status/settings methods keep their IDs and shapes and coexist with these console methods.
 
 
 The console has no PPP port. A request for component 20 (and for a native component that no module hosts) is an envelope in a 0x444d0002 long packet

@@ -1,5 +1,5 @@
 //! CBOR device control and native-component dispatch. A request is a call (component, method, fields): the console's own methods (component 20), or, for
-//! the runtime's native components without a hosting module (wifi 10, power 11, ip 12, ...), the native method table (`nat_find` / `native_binary`).
+//! the runtime's native components without a hosting module (wifi 10, ip 12, ...), the native method table (`nat_find` / `native_binary`).
 //! Requests reach it as 0x444d0002 datagrams parsed by the runtime (`call.is_envelope()`); this module has no port and parses no envelope of a port.
 #![no_std]
 extern crate alloc;
@@ -20,7 +20,6 @@ const M_STATUS: i32 = 5;
 const M_START: i32 = 6;
 const M_STOP: i32 = 7;
 const M_RESET: i32 = 8;
-const M_HEAP: i32 = 9;
 const M_NV: i32 = 10;
 const M_LINK_SEND: i32 = 11;
 const RESP_MAX: usize = 1000;
@@ -280,14 +279,6 @@ fn native_binary(hw: &Hw, nm: &NatMethod, fields: &[u8]) -> Result<Vec<u8>, i32>
     Ok(res.to_vec())
 }
 
-/// A single complete CBOR item borrowed from a numeric field.
-fn field_item(data: &[u8], key: u64) -> Result<Option<&[u8]>, i32> {
-    let Some(mut reader) = cbor::get(data, key).map_err(|_| xip_abi::ERR_ARG)? else { return Ok(None) };
-    let rest = reader.rest();
-    if !reader.skip() { return Err(xip_abi::ERR_ARG); }
-    Ok(Some(&rest[..rest.len() - reader.rest().len()]))
-}
-
 fn binary_result(rc: i32) -> Result<Vec<u8>, i32> {
     if rc < 0 { Err(rc) } else { Ok(vec![0xa0]) }
 }
@@ -323,18 +314,6 @@ fn binary_method(hw: &Hw, method: i32, data: &[u8]) -> Result<Vec<u8>, i32> {
             binary_result(hw.module_start(name, request))
         }
         M_RESET => binary_result(hw.reset()),
-        M_HEAP => {
-            if let Some(kind) = cbor::get_int(data, 1).map_err(|_| xip_abi::ERR_ARG)? {
-                let kind = i32::try_from(kind).map_err(|_| xip_abi::ERR_ARG)?;
-                if !(0..=6).contains(&kind) { return Err(xip_abi::ERR_ARG); }
-                return binary_result(hw.heap_dump(kind));
-            }
-            let mut out = vec![0; RESP_MAX];
-            let n = hw.heap_info(&mut out);
-            if n < 0 { return Err(n); }
-            out.truncate(n as usize);
-            Ok(out)
-        }
         M_NV => {
             let key = cbor::get_text(data, 1).map_err(|_| xip_abi::ERR_ARG)?.filter(|k| !k.is_empty()).ok_or(xip_abi::ERR_ARG)?;
             let value = match cbor::get(data, 2).map_err(|_| xip_abi::ERR_ARG)? {
@@ -487,31 +466,6 @@ impl Module for State {
             return CONTINUE;
         }
         if c.component != C_CONSOLE || !c.wants_response() { return CONTINUE; }
-        // Heap diagnostics must work when managed allocation is refused by
-        // the host reserve. Six integer fields fit in 64 bytes, even as u64.
-        if c.method == M_HEAP {
-            let mut out = [0u8; 64];
-            let n = match cbor::get_int(c.data, 1) {
-                Ok(None) => hw.heap_info(&mut out),
-                kind => {
-                    let rc = match kind {
-                        Ok(Some(kind @ 0..=6)) => hw.heap_dump(kind as i32),
-                        _ => xip_abi::ERR_ARG,
-                    };
-                    let mut w = Writer::new(&mut out);
-                    if rc < 0 { w.int(rc as i64); } else { w.map(0); }
-                    w.finish().map_or(xip_abi::ERR_SIZE, |r| r.len() as i32)
-                }
-            };
-            if n >= 0 {
-                hw.reply(c, &out[..n as usize]);
-            } else {
-                let mut w = Writer::new(&mut out);
-                w.int(n as i64);
-                if let Some(error) = w.finish() { hw.reply(c, error); }
-            }
-            return CONTINUE;
-        }
         let out = match binary_method(hw, c.method, c.data) {
             Ok(result) => result,
             Err(rc) => {
