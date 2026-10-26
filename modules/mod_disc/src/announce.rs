@@ -4,6 +4,7 @@ use dmesh_server::announce as a;
 use xip_abi::{psa::*, *};
 pub const INFO_MAX: usize = 255;
 
+// TODO: move to crates/xip-abi - in a 'high level rust' module
 pub struct NativeCrypto {
     table: &'static PsaTable,
 }
@@ -34,6 +35,7 @@ impl NativeCrypto {
     }
 }
 
+// Create a signed announce with our current hardware addresses and identity.
 pub fn make_announce(
     hw: &Hw,
     channel: u8,

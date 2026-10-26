@@ -13,6 +13,7 @@ const NAN: i32 = 46;
 const SET_ANNOUNCE: i32 = 11;
 const TIMEOUT: i32 = 100;
 pub const STATE_BYTES: usize = 8;
+
 #[derive(Default)]
 pub struct State {
     context: usize,
@@ -165,7 +166,40 @@ impl State {
         }
         hw.mem_free(ptr.cast());
     }
+    /// The runtime's multicast link delivered a tagged discovery request
+    /// `{1:6, 2:2, 3:id, 5:{}}`. Reply with the cached signed announce,
+    /// correlated to the request's id, to the source token it arrived with.
+    /// The signed bytes are reused; only the correlation id and the (cheap)
+    /// outer record change, so a sweep costs no re-signing.
+    fn discovery_reply(hw: &Hw, cx: &Context, call: &CallView) {
+        use dmesh_server::announce as a;
+        let record = match dmesh_server::tagged::decode(call.data) {
+            Some(r)
+                if r.component == Some(dmesh_server::tagged::Name::Tag(6))
+                    && r.method == Some(dmesh_server::tagged::Name::Tag(2)) =>
+            {
+                r
+            }
+            _ => return,
+        };
+        let id = match record.id {
+            Some(id) => id,
+            None => return,
+        };
+        let own = match a::decode_announce(&cx.record[..cx.len]) {
+            Some(a) => a,
+            None => return,
+        };
+        let mut out = [0u8; 384];
+        let n = match a::encode_discovery_response(own, id, &mut out) {
+            Some(n) => n,
+            None => return,
+        };
+        hw.message(call.from, 6, 2, call.id, &out[..n]);
+    }
 }
+
+// TODO: switch to vtable
 impl Module for State {
     fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
         if call.is_host(HOST_START) {
@@ -181,6 +215,13 @@ impl Module for State {
             return RET_CONTINUE as i32;
         }
         let cx = unsafe { &mut *(self.context as *mut Context) };
+        // A raw datagram on the discovery port: the runtime's multicast link
+        // delivered a tagged discovery request. Reply with the cached signed
+        // record, correlated to the request's id, to the source it came from.
+        if call.flags & CALL_LINK != 0 {
+            Self::discovery_reply(hw, cx, call);
+            return RET_CONTINUE as i32;
+        }
         if call.from == NAN as u32 && call.component == NAN && call.method == SET_ANNOUNCE {
             if cx.pending.as_ref().is_some_and(|p| p.token == call.id) {
                 let mut r = Reader::new(call.data);
@@ -536,6 +577,42 @@ mod tests {
             Some(ERR_IO as i64)
         );
         assert!(unsafe { &*(s.context as *const Context) }.pending.is_none());
+        s.stop(&hw);
+        assert!(f.packets.is_empty());
+    }
+    #[test]
+    fn discovery_request_replies_with_the_cached_announce_correlated_to_the_id() {
+        let mut f = Fake::default();
+        let h = host(&mut f);
+        let hw = unsafe { Hw::new(&h) }.unwrap();
+        // A structurally valid cached announce (the signature is a dummy: the reply
+        // reuses the signed bytes; it does not re-sign or re-verify here).
+        let mut own = dmesh_server::announce::Announce::discovery([7u8; 16], 8, 0);
+        assert!(own.set_public_key(&[2u8; 33]));
+        assert!(own.set_signature(&[9u8; 64]));
+        let mut record = [0u8; announce::INFO_MAX];
+        let n = dmesh_server::announce::encode(own, &mut record).unwrap();
+        let mut s = state();
+        {
+            let cx = unsafe { &mut *(s.context as *mut Context) };
+            cx.record[..n].copy_from_slice(&record[..n]);
+            cx.len = n;
+        }
+        // A discovery request {1:6, 2:2, 3:id, 5:{}} as a raw frame from the mc link.
+        let mut req = [0u8; 96];
+        let req_len = dmesh_server::announce::encode_discovery_request(42, &mut req).unwrap();
+        let mut request = call(0, &req[..req_len]);
+        request.flags = CALL_LINK;
+        request.from = 77; // the runtime's multicast link
+        request.id = 1234; // the source token it arrived with
+        s.handle(&hw, &request);
+        assert_eq!(f.sent.len(), 1, "one reply to the multicast link and its source token");
+        let sent = &f.sent[0];
+        assert_eq!((sent.dst, sent.id), (77, 1234));
+        let decoded = dmesh_server::tagged::decode(&sent.data).unwrap();
+        assert_eq!(decoded.id, Some(42), "correlated to the request's id");
+        assert_eq!(decoded.component, Some(dmesh_server::tagged::Name::Tag(6)));
+        assert_eq!(decoded.method, Some(dmesh_server::tagged::Name::Tag(2)));
         s.stop(&hw);
         assert!(f.packets.is_empty());
     }
