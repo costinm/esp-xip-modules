@@ -13,6 +13,7 @@
 #![feature(allocator_api)]
 
 extern crate alloc;
+mod probe;
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -91,6 +92,7 @@ pub const STATE_BYTES: usize = 512;
 
 #[derive(Default)]
 pub struct State {
+    probe:usize,
     mode: u8,
     done_oneshot: u8,
     irq_seen: u8,
@@ -957,6 +959,19 @@ impl State {
 
 impl Module for State {
     fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
+        if self.probe!=0 {
+            let p=self.probe as *mut probe::Driver;
+            if call.is_host(HOST_STOP){unsafe{(*p).stop(*hw);p.drop_in_place();}hw.mem_free(p.cast());self.probe=0;return 0;}
+            return unsafe{(*p).handle(*hw,call)};
+        }
+        if call.is_host(HOST_START) && call.data==b"probe" {
+            let p=hw.mem_alloc(core::mem::size_of::<probe::Driver>()).cast::<probe::Driver>();
+            if p.is_null(){return ERR_NOMEM;}
+            unsafe{p.write(probe::Driver::default());}
+            let rc=unsafe{(*p).start(*hw)};
+            if rc<0{unsafe{p.drop_in_place();}hw.mem_free(p.cast());return rc;}
+            self.probe=p as usize;return 0;
+        }
         self.calls += 1;
         if self.mode == MODE_ASYNC {
             return self.task.handle(hw, call);

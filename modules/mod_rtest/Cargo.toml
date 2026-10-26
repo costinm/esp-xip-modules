@@ -10,16 +10,18 @@ publish = false
 [workspace]
 
 [dependencies]
-xip-abi = { path = "../../crates/xip-abi", features = ["global-alloc", "allocator-api"] }
+xip-abi = { path = "../../crates/xip-abi", features = ["allocator-api"] }
+dmesh-server = { git = "https://github.com/costinm/dmesh", rev = "ab109bf1836bbe1be117b859f60ac90ec3cb9010", default-features = false }
+quic-lite = { git = "https://github.com/costinm/dmesh", rev = "ab109bf1836bbe1be117b859f60ac90ec3cb9010", default-features = false }
 
 [package.metadata]
 # Options for tools/mkmod.py (scripts/build.sh). 
 mkmod = "--stack 4096 --state 512 --port 3 --stream 3"
 
 [features]
-flat-image = []
+flat-image = ["xip-abi/global-alloc"]
 # the panic handler of a no_std library built as a shared object for crates/xip-runtime-host (scripts/build-host-modules.sh)
-sim = []
+sim = ["xip-abi/global-alloc"]
 
 [lib]
 crate-type = ["rlib"]
