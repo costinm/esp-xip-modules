@@ -156,7 +156,7 @@ def with_version(base, version):
     return bytes([0xa0 + kept + 2]) + base[1:name_end] + cbor(8) + cbor(version) + rest
 
 
-def manifest_with(base, autostart=None, name=None, tag=None, port=0, stream=0, version=0, components=()):
+def manifest_with(base, autostart=None, name=None, tag=None, port=0, stream=0, version=0, components=(), envelopes=()):
     """The manifest of a module (include/xip.h, module_manifest): the catalog of its API.md in compact CBOR, which the
     console needs instead of IDs compiled into it, as `mesh-api-gen --out-manifest` writes it (`scripts/gen.sh`), plus
     what only this build knows:
@@ -166,6 +166,7 @@ def manifest_with(base, autostart=None, name=None, tag=None, port=0, stream=0, v
       10: stream port      (an integer: TCP port PORT_NET + n; connections arrive as socket events the module reads and writes)
       11: components       (an array of texts: the components the module hosts, at most 3 of at most 15 bytes. The runtime asks the module for the
                             table of each after it started and serves it to `get_component(name)` callers through thunks.)
+      12: envelopes        (up to 3 additional positive component IDs whose envelopes this module serves)
       8: version           (an integer: higher is newer, no other meaning; absent is 0 and not written. The loader runs the highest
                             version of a name. Written right behind the name.)
 
@@ -194,17 +195,22 @@ def manifest_with(base, autostart=None, name=None, tag=None, port=0, stream=0, v
             sys.exit("--components: at most 3 names of 1 to 15 bytes")
         extra += cbor(11) + cbor(list(components))
         count += 1
+    if envelopes:
+        if len(envelopes) > 3 or len(set(envelopes)) != len(envelopes) or any(not isinstance(c, int) or isinstance(c, bool) or c <= 0 or c > 0x7fffffff for c in envelopes):
+            sys.exit("--envelopes: at most 3 distinct positive component IDs")
+        extra += cbor(12) + cbor(list(envelopes))
+        count += 1
     manifest = bytes([0xa0 + count]) + base[1:] + extra
     return with_version(manifest, version) if version else manifest
 
 
-def manifest_beside(api_path, autostart=None, port=0, stream=0, version=0, components=()):
+def manifest_beside(api_path, autostart=None, port=0, stream=0, version=0, components=(), envelopes=()):
     """The manifest of the module whose API.md is `api_path`: the checked-in file beside it, `API.manifest`."""
     path = os.path.splitext(api_path)[0] + ".manifest"
     if not os.path.exists(path):
         sys.exit(f"{path} is missing: run scripts/gen.sh (it needs mesh-api-gen from ssh-mesh)")
     with open(path, "rb") as f:
-        return manifest_with(f.read(), autostart, port=port, stream=stream, version=version, components=components)
+        return manifest_with(f.read(), autostart, port=port, stream=stream, version=version, components=components, envelopes=envelopes)
 
 
 def api_beside(sources, cargo):
@@ -275,24 +281,24 @@ def cargo_link(cfg, cargo, window, link_script, tmp, static_addr):
 MAX_IMAGE = WINDOW_SLOT   # default capacity; modules/SLOTS may reserve a larger consecutive span.
 
 
-def module_manifest(cargo, name=None, tag=None, autostart=None, port=0, stream=0, version=0, components=()):
+def module_manifest(cargo, name=None, tag=None, autostart=None, port=0, stream=0, version=0, components=(), envelopes=()):
     """The canonical image/native-artifact manifest and identity."""
     api = api_beside(None, cargo)
     if api:
-        manifest = manifest_beside(api, autostart, port, stream, version, components)
+        manifest = manifest_beside(api, autostart, port, stream, version, components, envelopes)
         api_name, api_tag = manifest_identity(open(os.path.splitext(api)[0] + ".manifest", "rb").read())
         name, tag = name or api_name, tag or api_tag
         if tag != api_tag:
             sys.exit(f"--tag {tag} is not the component number {api_tag} of its API.md")
     else:
-        manifest = manifest_with(b"", autostart, name, tag, port, stream, version, components)
+        manifest = manifest_with(b"", autostart, name, tag, port, stream, version, components, envelopes)
     if not tag or not name:
         sys.exit("a module needs a name and a component number (its API.md, or --name and --tag)")
     return manifest, name, tag
 
 
 def build(chip, out, name=None, tag=None, slot=0, stack=8192, state=0, keep_elf=None, cargo=None,
-          autostart=None, port=0, stream=0, version=0, components=()):
+          autostart=None, port=0, stream=0, version=0, components=(), envelopes=()):
     """`slot` selects the module's RAM cell on every chip. Xtensa also links code for code_base + slot * 64 KiB; the image can then be
     installed on any flash page, the loader maps that page at the module's window slot. PIC code needs no window."""
     cfg = CHIPS[chip]
@@ -341,7 +347,7 @@ def build(chip, out, name=None, tag=None, slot=0, stack=8192, state=0, keep_elf=
             if "Entry point address" in line:
                 entry = int(line.split()[-1], 16)
         code = open(raw, "rb").read()
-        manifest, name, tag = module_manifest(cargo, name, tag, autostart, port, stream, version, components)
+        manifest, name, tag = module_manifest(cargo, name, tag, autostart, port, stream, version, components, envelopes)
         image = dmod.pack(code, entry - window, tag, code_vma=window, data_vma=data_window, stack_bytes=stack,
                           fixed_vma=cfg["fixed"], state_bytes=state, manifest=manifest, static_addr=static_addr)
     if len(image) > capacity:
@@ -372,6 +378,8 @@ def main():
     ap.add_argument("--stream", type=int, default=0, help="the stream port: TCP port PORT_NET + N, connections arrive as socket events (manifest key 10)")
     ap.add_argument("--components", default="", metavar="NAME[,NAME]",
                     help="the components the module hosts (manifest key 11): the runtime asks for their tables and serves them to get_component")
+    ap.add_argument("--envelopes", default="", metavar="ID[,ID]",
+                    help="additional envelope component IDs served by this module (manifest key 12)")
     ap.add_argument("--elf", help="also keep the linked ELF here (objdump -d)")
     ap.add_argument("--cargo", required=True, metavar="MANIFEST:BIN[:FEATURES]",
                     help="the Rust module to build: the bin BIN of the crate at MANIFEST (e.g. modules/mod_lora/Cargo.toml:mod_lora:flat-image)")
@@ -381,7 +389,7 @@ def main():
         ap.error("--cargo wants MANIFEST:BIN[:FEATURES]")
     cargo = (os.path.abspath(parts[0]), parts[1], parts[2] if len(parts) > 2 else "")
     if a.host_metadata:
-        manifest, _, _ = module_manifest(cargo, a.name, a.tag, a.autostart, a.port, a.stream, a.version, [c for c in a.components.split(',') if c])
+        manifest, _, _ = module_manifest(cargo, a.name, a.tag, a.autostart, a.port, a.stream, a.version, [c for c in a.components.split(',') if c], [int(c) for c in a.envelopes.split(',') if c])
         os.makedirs(os.path.dirname(os.path.abspath(a.host_metadata)), exist_ok=True)
         with open(a.host_metadata, "w") as f:
             json.dump({"state_bytes": a.state, "manifest": list(manifest)}, f)
@@ -398,7 +406,7 @@ def main():
             ap.error("no slot: pass --slot or list the module in modules/SLOTS")
     build(a.chip, a.out, a.name, a.tag, slot, a.stack, a.state, keep_elf=a.elf,
           cargo=cargo, autostart=a.autostart, port=a.port, stream=a.stream, version=a.version,
-          components=[c for c in a.components.split(',') if c])
+          components=[c for c in a.components.split(',') if c], envelopes=[int(c) for c in a.envelopes.split(',') if c])
 
 
 if __name__ == "__main__":

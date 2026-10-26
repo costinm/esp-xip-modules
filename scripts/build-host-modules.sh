@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 out=target/host-modules
 mkdir -p $out
 # the `sim` feature adds the panic handler of a no_std library; cdylib makes the shared object
-for m in rtest con ble; do
+for m in rtest con ble system; do
     RUSTC_BOOTSTRAP=1 cargo rustc --quiet --release --lib --crate-type cdylib --features sim \
         --manifest-path modules/mod_$m/Cargo.toml --target-dir target/host-modules-build/$m
     cp target/host-modules-build/$m/release/libesp_mod_$m.so $out/mod_$m.so

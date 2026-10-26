@@ -22,7 +22,7 @@ if [[ $what == generated || $what == abi || $what == all ]]; then
     # regenerate and compare: a stale generated file is reported (and left regenerated). gen.sh needs cbindgen and mesh-api-gen
     # (on PATH, both come from the flake); without them the check is skipped, the generated files are committed.
     if command -v cbindgen >/dev/null && command -v mesh-api-gen >/dev/null; then
-        sums() { find api/generated -type f | LC_ALL=C sort | xargs sha256sum; sha256sum include/xip.h modules/*/API.manifest modules/mod_con/src/tables.rs crates/xip-abi/src/ble_vtable.rs modules/mod_ble/src/api_gen.rs; }
+        sums() { find api/generated -type f | LC_ALL=C sort | xargs sha256sum; sha256sum include/xip.h modules/*/API.manifest modules/mod_con/src/tables.rs crates/xip-abi/src/ble_vtable.rs modules/mod_ble/src/api_gen.rs crates/xip-abi/src/nan_vtable.rs modules/mod_nan/src/api_gen.rs modules/mod_nan/src/power_gen.rs crates/xip-abi/src/system_vtable.rs modules/mod_system/src/api_gen.rs crates/xip-abi/src/lora_vtable.rs modules/mod_lora/src/api_gen.rs; }
         before=$(sums); scripts/gen.sh
         [[ "$before" == "$(sums)" ]] || { echo "scripts/gen.sh changed generated files: commit them (a new runtime) or revert" >&2; exit 1; }
     elif [[ $what == generated ]]; then
@@ -39,6 +39,12 @@ if [[ $what == c || $what == all ]]; then
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include \
         -o target/test_envelope tests/host/test_envelope.c components/xip_runtime/src/xip_envelope.c
     target/test_envelope
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include \
+        -o target/test_activity tests/host/test_activity.c components/xip_runtime/src/xip_envelope.c
+    target/test_activity
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include \
+        -I tests/host/fake_idf -o target/test_serial_wake tests/host/test_serial_wake.c components/xip_runtime/src/xip_serial_wake.c
+    target/test_serial_wake
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include \
         -o target/test_flash_hal tests/host/test_flash_hal.c components/xip_runtime/src/xip_pool.c
     target/test_flash_hal
@@ -73,10 +79,11 @@ if [[ $what == ci-runtime || $what == all ]]; then
 fi
 if [[ $what == rust || $what == runtime || $what == ci-runtime || $what == all ]]; then
     # the crates and the Rust modules: logic on a PC (the images are built by scripts/build.sh with the esp toolchain)
-    module_crates=(modules/mod_lora modules/mod_hw modules/mod_nan modules/mod_disc modules/mod_quic)
+    module_crates=(modules/mod_system modules/mod_lora modules/mod_hw modules/mod_nan modules/mod_disc modules/mod_quic)
     # Legacy mod_flash compatibility tests read local root tests/data fixtures.
     # Keep them in local runtime/rust/all runs until rewritten as self-contained Rust tests.
     [[ $what == ci-runtime ]] || module_crates+=(modules/mod_flash)
+    RUSTC_BOOTSTRAP=1 cargo test --quiet --manifest-path modules/mod_rtest/Cargo.toml
     for crate in "${module_crates[@]}"; do
         cargo test --quiet --manifest-path "$crate/Cargo.toml"
     done
@@ -85,7 +92,8 @@ if [[ $what == rust || $what == runtime || $what == ci-runtime || $what == all ]
         for test in activation_auth_uses_nv_and_explicit_requests_override_it \
                     multi_page_images_protect_tails_and_require_contiguous_space \
                     the_package_and_its_image_say_the_same_name_and_version \
-                    expanded_module_partition_admits_and_protects_high_pages; do
+                    expanded_module_partition_admits_and_protects_high_pages \
+                    stream_upload_matches_tcp_commit_and_rejects_corruption_without_socket_reads; do
             cargo test --quiet --manifest-path modules/mod_flash/Cargo.toml --lib \
                 "tests::$test" -- --exact
         done

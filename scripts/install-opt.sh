@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the service catalogs of this repository's components (xip-wifi, xip-power, xip-con, ...) from the nix build of the DMesh tools
+# Install the service catalogs of this repository's components (xip-wifi, xip-nan, xip-con, ...) from the nix build of the DMesh tools
 # into $HOME/opt/<service>/etc/schemas, where `mesh` and `dmesh-cli` look for them without MESH_SCHEMA_DIR. They are symlinks into the
 # nix store: rerun after `scripts/esp-deps.sh dmesh` to update them (when things are relatively stable; fine during development too).
 #   scripts/install-opt.sh            xip-* services

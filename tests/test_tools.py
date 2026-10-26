@@ -44,7 +44,7 @@ class Dmod(unittest.TestCase):
                 dmod.pack(b"\0" * 100, entry, 1, static_addr=dmod.STATIC_BASES["esp32c6"])
 
     def test_static_ram_cell_is_explicit_and_serialized(self):
-        address = mkmod.static_address("esp32c6", 4 * 65536)
+        address = mkmod.static_address("esp32c6", 4)
         image = dmod.pack(b"\0" * 32, 0x44, 2, static_addr=address)
         header = dmod.unpack(image)
         self.assertEqual(header["static_addr"], address)
@@ -61,10 +61,45 @@ class Dmod(unittest.TestCase):
     def test_platform_cell_derivation_and_slot_limit(self):
         for chip, base in dmod.STATIC_BASES.items():
             self.assertEqual(mkmod.static_address(chip, 0), base)
-            self.assertEqual(mkmod.static_address(chip, 15 * 65536), base + 15 * 16)
-            for bad_offset in (-65536, 1, 65535, 16 * 65536):
+            self.assertEqual(mkmod.static_address(chip, 15), base + 15 * 16)
+            for bad_slot in (-1, 16, 0x10000):
                 with self.assertRaises(ValueError):
-                    mkmod.static_address(chip, bad_offset)
+                    mkmod.static_address(chip, bad_slot)
+
+    def test_the_slot_registry_is_unique_and_covers_every_module(self):
+        slots = mkmod.read_slots()
+        self.assertEqual(len(set(slots.values())), len(slots))
+        import glob
+        for directory in glob.glob(os.path.join(ROOT, "modules", "mod_*")):
+            self.assertIn(os.path.basename(directory), slots)
+        with tempfile.TemporaryDirectory() as d:
+            for text in ("a 1\nb 1\n", "a 1\na 2\n", "a 16\n", "a\n"):
+                path = os.path.join(d, "SLOTS")
+                open(path, "w").write(text)
+                with self.assertRaises(ValueError):
+                    mkmod.read_slots(path)
+
+    def test_the_manifest_version_sits_behind_the_name(self):
+        base = bytes.fromhex(Manifest.DEMO)
+        self.assertEqual(mkmod.manifest_with(base, version=0), mkmod.manifest_with(base))      # absent is 0: nothing is written
+        m, _ = cbor_decode(mkmod.manifest_with(base, autostart="x", port=3, version=300))
+        self.assertEqual((m[1], m[2], m[8], m[6], m[9]), (cbor_decode(base)[0][1], cbor_decode(base)[0][2], 300, "x", 3))
+        raw = mkmod.manifest_with(base, version=7)
+        name = cbor_decode(base)[0][1].encode()
+        at = raw.index(name) + len(name)
+        self.assertEqual(raw[at:at + 2], bytes([8, 7]))     # `8: 7` right behind `1: name`
+        again = mkmod.with_version(raw, 9)                  # replaced, not duplicated
+        self.assertEqual(cbor_decode(again)[0][8], 9)
+        self.assertEqual(len(again), len(raw))
+
+    def test_the_hosted_components_are_manifest_key_11(self):
+        base = bytes.fromhex(Manifest.DEMO)
+        self.assertEqual(mkmod.manifest_with(base, components=()), mkmod.manifest_with(base))
+        m, _ = cbor_decode(mkmod.manifest_with(base, port=4, version=2, components=["ble", "other"]))
+        self.assertEqual((m[11], m[9], m[8]), (["ble", "other"], 4, 2))
+        for bad in (["a", "b", "c", "d"], [""], ["x" * 16]):
+            with self.assertRaises(SystemExit):
+                mkmod.manifest_with(base, components=bad)
 
 
 class Slots(unittest.TestCase):
@@ -73,6 +108,15 @@ class Slots(unittest.TestCase):
         self.assertEqual((m[1], m[2]), ("nan", 46))
         with self.assertRaises(SystemExit):
             mkmod.manifest_with(b"")        # nothing to name it by
+
+    def test_additional_envelope_components_are_manifest_key_12(self):
+        base = bytes.fromhex(Manifest.DEMO)
+        self.assertEqual(mkmod.manifest_with(base, envelopes=()), base)
+        m, _ = cbor_decode(mkmod.manifest_with(base, envelopes=[1, 77]))
+        self.assertEqual(m[12], [1, 77])
+        for bad in ([0], [-1], [1, 1], [1, 2, 3, 4], [0x80000000], [True]):
+            with self.assertRaises(SystemExit):
+                mkmod.manifest_with(base, envelopes=bad)
 
     def test_the_identity_of_a_generated_manifest(self):
         name, tag = mkmod.manifest_identity(bytes.fromhex(Manifest.DEMO))
@@ -87,6 +131,23 @@ class Slots(unittest.TestCase):
             code = int(re.search(r"XIP_CODE_BASE (0x[0-9a-fA-F]+)u", block).group(1), 16)
             data = int(re.search(r"XIP_DATA_BASE (0x[0-9a-fA-F]+)u", block).group(1), 16)
             self.assertEqual((code, data), (mkmod.CHIPS[chip]["code_base"], mkmod.CHIPS[chip]["data_base"]), chip)
+
+    def test_slot_spans_reserve_consecutive_windows(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "SLOTS")
+            with open(path, "w") as f:
+                f.write("nan 7 2\nother 9\n")
+            self.assertEqual(mkmod.read_slot_layout(path), {"nan": (7, 2), "other": (9, 1)})
+            for bad in ("nan 7 2\nother 8\n", "nan 15 2\n", "nan 7 0\n"):
+                with open(path, "w") as f:
+                    f.write(bad)
+                with self.assertRaises(ValueError):
+                    mkmod.read_slots(path)
+
+    def test_the_window_slot_matches_the_loader_check(self):
+        check = read("components", "xip_loader", "include", "xip_check.h")
+        self.assertEqual(int(re.search(r"XIP_DMOD_WINDOW_SLOT_BYTES (0x[0-9a-fA-F]+)u", check).group(1), 16), mkmod.WINDOW_SLOT)
+        self.assertEqual(mkmod.MAX_IMAGE, mkmod.WINDOW_SLOT)
 
 
 class Packages(unittest.TestCase):
@@ -203,6 +264,68 @@ class Manifest(unittest.TestCase):
             image = source.read()
         self.assertEqual(bytes(metadata["manifest"]), dmod.manifest_of(image))
         self.assertEqual(metadata["state_bytes"], dmod.unpack(image)["state_bytes"])
+
+
+class GenVtables(unittest.TestCase):
+    """tools/gen_vtables.py: the table and the glue of a hosted component, from its API.md and the C types."""
+
+    def run_tool(self, api, types, directory):
+        abi, mod = os.path.join(directory, "abi.rs"), os.path.join(directory, "mod.rs")
+        subprocess.run([sys.executable, os.path.join(ROOT, "tools/gen_vtables.py"), "--api", api, "--types", types,
+                        "--abi-out", abi, "--module-out", mod], check=True, capture_output=True, cwd=ROOT)
+        return open(abi).read(), open(mod).read()
+
+    def test_the_checked_in_files_are_what_the_tool_writes(self):
+        with tempfile.TemporaryDirectory() as d:
+            abi, mod = self.run_tool("modules/mod_ble/API.md", "crates/xip-abi/src/ble.rs", d)
+        self.assertEqual(abi, read("crates", "xip-abi", "src", "ble_vtable.rs"))
+        self.assertEqual(mod, read("modules", "mod_ble", "src", "api_gen.rs"))
+
+    def test_power_dispatch_preserves_native_abi_and_excludes_trace_tables(self):
+        with tempfile.TemporaryDirectory() as d:
+            mod = os.path.join(d, "power.rs")
+            subprocess.run([sys.executable, os.path.join(ROOT, "tools/gen_vtables.py"),
+                            "--api", "modules/mod_nan/API.md", "--types", "crates/xip-abi/src/power.rs",
+                            "--dispatch-only", "--methods", "powerinfo,powersleep,dump_locks", "--module-out", mod], check=True, capture_output=True, cwd=ROOT)
+            glue = open(mod).read()
+        self.assertEqual(glue, read("modules", "mod_nan", "src", "power_gen.rs"))
+        self.assertIn("w.map(27)", glue)
+        self.assertNotIn("r.phase", glue)
+        self.assertNotIn("pub struct Hosted", glue)
+        self.assertNotIn("pub struct Power {", glue)
+        self.assertIn("M_DUMP_LOCKS", glue)
+        self.assertNotIn("M_DUMP_TASKS", glue)
+
+    def test_one_function_per_method_in_catalog_order(self):
+        abi = read("crates", "xip-abi", "src", "ble_vtable.rs")
+        names = re.findall(r"^    pub (\w+): Option<", abi, re.M)
+        self.assertEqual(names, ["start", "stop", "scan", "status", "scan_stop", "connect", "listen", "bonds_clear", "mode", "scan_results", "suspend", "resume"])
+        api = read("modules", "mod_ble", "API.md")
+        self.assertEqual([int(n) for n in re.findall(r"^## (\d+)\. `", api, re.M)], [80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92])
+        glue = read("modules", "mod_ble", "src", "api_gen.rs")
+        for number, name in zip([80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92], names):
+            self.assertIn(f"pub const M_{name.upper()}: i32 = {number};", glue)
+
+    def test_local_only_methods_are_in_the_table_but_not_reachable_by_envelope(self):
+        with tempfile.TemporaryDirectory() as d:
+            api = os.path.join(d, "API.md")
+            shutil.copy(os.path.join(ROOT, "modules/mod_ble/API.md"), api)
+            open(os.path.join(d, "API.local.md"), "w").write("## `peek` \u2014 Read a word\n\nLocal use only.\n\n**C function:** `(addr: u32, out: *mut u8)`\n")
+            abi, mod = self.run_tool(api, os.path.join(ROOT, "crates/xip-abi/src/ble.rs"), d)
+        self.assertIn("pub peek: Option<unsafe extern \"C\" fn(ctx: *mut c_void, addr: u32, out: *mut u8) -> c_int>,", abi)
+        self.assertLess(abi.index("pub resume:"), abi.index("pub peek:"), "local methods follow the remote ones")
+        self.assertIn("fn peek(&mut self, hw: &Hw, addr: u32, out: *mut u8) -> Result<(), i32>;", mod)
+        self.assertNotIn("M_PEEK", mod)
+        self.assertIn("M_RESUME", mod)
+
+    def test_a_field_without_a_matching_struct_field_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            types = os.path.join(d, "ble.rs")
+            open(types, "w").write(read("crates", "xip-abi", "src", "ble.rs").replace("pub paired: u8,", "pub renamed: u8,"))
+            r = subprocess.run([sys.executable, os.path.join(ROOT, "tools/gen_vtables.py"), "--api", os.path.join(ROOT, "modules/mod_ble/API.md"),
+                                "--types", types, "--abi-out", os.path.join(d, "a.rs"), "--module-out", os.path.join(d, "m.rs")], capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("paired", r.stderr)
 
 
 if __name__ == "__main__":

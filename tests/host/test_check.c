@@ -61,8 +61,39 @@ static void test_dmod(void)
     h = good(); CHECK(xip_dmod_check(&h, &fixed) == EMD_BAD_PLACEMENT);   /* PIC image on a fixed-address chip */
     h.flags = XIP_DMOD_FLAG_FIXED_VMA | XIP_DMOD_FLAG_STATIC_RAM; h.static_addr = fixed.static_base + 16; h.code_vma = 0x40310000; h.data_vma = 0x3f710000;
     CHECK(xip_dmod_check(&h, &fixed) == EMD_OK);
-    h.code_vma = 0x40300000; CHECK(xip_dmod_check(&h, &fixed) == EMD_BAD_PLACEMENT);   /* another slot's window */
+    h.code_vma = 0x40300000; CHECK(xip_dmod_check(&h, &fixed) == EMD_BAD_PLACEMENT);   /* another module's window slot */
     h.code_vma = 0x40310000; h.data_vma = 0; CHECK(xip_dmod_check(&h, &fixed) == EMD_BAD_PLACEMENT);
+    h.data_vma = 0x3f720000; CHECK(xip_dmod_check(&h, &fixed) == EMD_BAD_PLACEMENT);
+    /* the link address is the module's, the flash page is not: any page, same result */
+    h.data_vma = 0x3f710000;
+    for (uint32_t page = 0; page < 8; page++) {
+        fixed.slot_offset = page * 0x10000; fixed.slot_size = 0x10000;
+        CHECK(xip_dmod_check(&h, &fixed) == EMD_OK);
+    }
+    h.code_vma = 0x40310001; CHECK(xip_dmod_check(&h, &fixed) == EMD_BAD_PLACEMENT);   /* not page aligned */
+    h.code_vma = 0x40310000;
+    /* Multi-page modules are bounded by physical room and the entire virtual span. */
+    h.image_size=0x10004; fixed.slot_size=0x20000;
+    CHECK(xip_dmod_check(&h,&fixed)==EMD_OK);
+    fixed.slot_size=0x10000; CHECK(xip_dmod_check(&h,&fixed)==EMD_BAD_SIZE);
+    fixed.slot_size=0x20000;
+    h.static_addr=fixed.static_base+14*XIP_DMOD_STATIC_SLOT_BYTES;
+    h.code_vma=fixed.code_base+14*XIP_DMOD_WINDOW_SLOT_BYTES;
+    h.data_vma=fixed.data_base+14*XIP_DMOD_WINDOW_SLOT_BYTES;
+    CHECK(xip_dmod_check(&h,&fixed)==EMD_OK);
+    h.static_addr+=XIP_DMOD_STATIC_SLOT_BYTES;h.code_vma+=XIP_DMOD_WINDOW_SLOT_BYTES;h.data_vma+=XIP_DMOD_WINDOW_SLOT_BYTES;
+    CHECK(xip_dmod_check(&h,&fixed)==EMD_BAD_SIZE); /* tail crosses window */
+    h.image_size=0x200;fixed.slot_size=0x10000;
+    /* the slot the header declares is its cell: cell 15 is the last one, vma outside the window is refused */
+    h.static_addr = fixed.static_base + 15 * XIP_DMOD_STATIC_SLOT_BYTES; h.code_vma = 0x40300000 + 15 * 0x10000; h.data_vma = 0x3f700000 + 15 * 0x10000;
+    CHECK(xip_dmod_check(&h, &fixed) == EMD_OK);
+    fixed.window_bytes = 0x100000; CHECK(xip_dmod_check(&h, &fixed) == EMD_OK);
+    fixed.window_bytes = 0x80000; CHECK(xip_dmod_check(&h, &fixed) == EMD_BAD_PLACEMENT);   /* a smaller window does not hold slot 15 */
+    fixed.window_bytes = 0;
+    h.code_vma += 0x10000; h.data_vma += 0x10000; CHECK(xip_dmod_check(&h, &fixed) == EMD_BAD_PLACEMENT);
+    h.code_vma -= 0x10000; h.data_vma -= 0x10000;
+    h.image_size = 0x10000; CHECK(xip_dmod_check(&h, &fixed) == EMD_OK);
+    fixed.slot_size = 0x20000; h.image_size = 0x10004; CHECK(xip_dmod_check(&h, &fixed) == EMD_BAD_SIZE);   /* longer than its window slot */
 }
 
 int main(void)

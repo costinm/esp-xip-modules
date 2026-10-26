@@ -24,6 +24,19 @@ gen=$(command -v mesh-api-gen || true)
 python3 tools/gen_vtables.py --api modules/mod_ble/API.md --types crates/xip-abi/src/ble.rs \
     --abi-out crates/xip-abi/src/ble_vtable.rs --module-out modules/mod_ble/src/api_gen.rs
 
+python3 tools/gen_vtables.py --api modules/mod_nan/API.md --types crates/xip-abi/src/nan.rs --local-only \
+    --abi-out crates/xip-abi/src/nan_vtable.rs --module-out modules/mod_nan/src/api_gen.rs
+
+python3 tools/gen_vtables.py --api modules/mod_lora/API.md --types crates/xip-abi/src/lib.rs --local-only \
+    --abi-out crates/xip-abi/src/lora_vtable.rs --module-out modules/mod_lora/src/api_gen.rs
+
+python3 tools/gen_vtables.py --api modules/mod_system/API.md --types crates/xip-abi/src/system.rs \
+    --abi-out crates/xip-abi/src/system_vtable.rs --module-out modules/mod_system/src/api_gen.rs
+
+# Power keeps its native runtime table; NAN owns its selected generated wire methods.
+python3 tools/gen_vtables.py --api modules/mod_nan/API.md --types crates/xip-abi/src/power.rs \
+    --dispatch-only --methods powerinfo,powersleep,dump_locks --module-out modules/mod_nan/src/power_gen.rs
+
 # the C header
 (cd crates/xip-abi && cbindgen --config cbindgen.toml --crate xip-abi 2>/dev/null) | sed 's/\bxip_\([A-Z]\)/XIP_\1/g' > include/xip.h
 
@@ -38,7 +51,7 @@ for src in api/*.API.md; do
 done
 
 # The binary console needs native component layouts, not a text/name catalog.
-"$gen" --api api/wifi.API.md --api api/power.API.md --api api/ip.API.md --rustdoc "$layout" --pointer-width 4 --out-console-native "$tmp/native.h"
+"$gen" --api api/wifi.API.md --api api/ip.API.md --rustdoc "$layout" --pointer-width 4 --out-console-native "$tmp/native.h"
 python3 tools/catalog_rs.py "$tmp/native.h" > modules/mod_con/src/tables.rs
 
 for api in modules/*/API.md; do
