@@ -13,6 +13,7 @@
 extern crate std;
 
 pub mod command;
+mod api_gen;
 pub mod config;
 pub mod xip;
 pub mod frames;

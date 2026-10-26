@@ -97,6 +97,10 @@ impl Hal for EspmodHal<'_> {
         self.hw.irq_enable(pin, on)
     }
 
+    fn irq_detach(&mut self, pin: i32) {
+        let _ = self.hw.irq_unregister(pin);
+    }
+
     fn alarm(&mut self, ms: u32) -> i32 {
         self.hw.alarm_set(ms, 0, 0, xip_abi::ALARM_EXACT, COMPONENT, M_TIMER)
     }
@@ -128,13 +132,37 @@ impl Hal for EspmodHal<'_> {
 pub struct Lora {
     radio: Radio,
     spi: i32,
+    hosted: crate::api_gen::Hosted,
 }
 
 /// Bytes of state the image asks for (`mkmod: --state` in Cargo.toml).
 pub const STATE_BYTES: usize = 768;
 
+const _: () = assert!(core::mem::size_of::<Lora>() <= STATE_BYTES);
+
+impl crate::api_gen::Api for Lora {
+    fn configure(&mut self, hw: &Hw, record: *const u8, len: usize) -> Result<(), i32> {
+        if record.is_null() || len == 0 || len > 1024 { return Err(xip_abi::ERR_ARG); }
+        let record = unsafe { core::slice::from_raw_parts(record, len) };
+        let mut hal = EspmodHal::new(*hw, &mut self.spi);
+        let rc = self.radio.configure(&mut hal, record);
+        if rc < 0 { Err(rc) } else { Ok(()) }
+    }
+    fn suspend(&mut self, hw: &Hw) -> Result<(), i32> {
+        let mut hal = EspmodHal::new(*hw, &mut self.spi);
+        self.radio.handle(&mut hal, 0, 2, &[]);
+        Ok(())
+    }
+}
+
 impl Module for Lora {
     fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
+        if call.is_host(xip_abi::HOST_TABLE) {
+            if call.data == b"lora" {
+                crate::api_gen::provide::<Self>(hw, call, core::ptr::addr_of_mut!(self.hosted), self as *mut Self);
+            }
+            return 0;
+        }
         let mut hal = EspmodHal::new(*hw, &mut self.spi);
         let (ret, answer) = self.radio.handle(&mut hal, call.component, call.method, call.data);
         if call.wants_response() {

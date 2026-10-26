@@ -125,6 +125,21 @@ impl Radio {
 
     // ---- entry point ----
 
+    /// NAN replaces its receive role synchronously; initialization continues on radio alarms.
+    pub fn configure<H: Hal>(&mut self, h: &mut H, request: &[u8]) -> i32 {
+        self.ensure_cfg();
+        let mut cfg = self.cfg;
+        let mut payload = [0u8; MAX_PAYLOAD];
+        let (op, len) = match parse_start(request, &mut cfg, &mut payload) {
+            Ok(value) => value,
+            Err(rc) => return rc,
+        };
+        if !matches!(op, OP_RX | OP_FSK | OP_IDLE) || len != 0 { return -2; }
+        self.shutdown(h);
+        self.cfg = cfg;
+        self.submit(h, op, &[])
+    }
+
     /// One call of the host. Returns the handler result (0 keep running, negative: the module ends) and the answer
     /// of a request.
     pub fn handle<H: Hal>(&mut self, h: &mut H, component: i32, method: i32, data: &[u8]) -> (i32, Answer) {
@@ -182,7 +197,27 @@ impl Radio {
     fn shutdown<H: Hal>(&mut self, h: &mut H) {
         self.disarm(h);
         self.irq(h, false);
+        if self.irq_attached {
+            h.irq_detach(self.cfg.irq_pin as i32);
+            self.irq_attached=false;
+        }
+        if self.phase >= READY {
+            // Keep BUSY usable until SPI is closed. SX126x standby avoids the
+            // BUSY-high sleep command's post-transfer wait in the native HAL.
+            if self.is_126() { let _=sx126x_command(h,SX126X_CMD_SET_STANDBY,&[0]); }
+            else if let Ok(mode)=sx127x_read(h,SX127X_REG_OP_MODE) {
+                let _=sx127x_write(h,SX127X_REG_OP_MODE,(mode & !7) | SX127X_MODE_SLEEP);
+            }
+            h.spi_close();
+        }
         self.power_down(h);
+        self.phase=IDLE;
+        self.mode=MODE_NONE;
+        self.resume=MODE_NONE;
+        self.pend_op=0;
+        self.pend_len=0;
+        self.cur_len=0;
+        self.tx_stage=0;
     }
 
     fn power_down<H: Hal>(&mut self, h: &mut H) {

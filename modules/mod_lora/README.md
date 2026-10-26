@@ -4,6 +4,14 @@ The LoRa/FSK radio module: SX127x and SX126x drivers, packet reception and trans
 board bring-up (power rail, reset, SPI with the SX126x BUSY line). **All LoRa code is here**; the host
 (`esp-xip-modules`) and the applications that run it (DMesh) know nothing about it.
 
+NAN controls its configured receive role through the generated native `lora`
+table ([local API](API.local.md)). Suspend cancels work, masks/releases IRQs,
+closes SPI and turns off an optional board power rail before returning. SX127x
+enters sleep; SX126x enters RC standby before SPI closes. The latter avoids its
+sleep command holding BUSY high across the native transfer's completion check.
+The module stays mapped while suspended; configure restarts initialization
+without a queued module-stop/start race. Explicit radio off also unloads it.
+
 It is an [esp-xip-modules](https://github.com/costinm/esp-xip-modules) module: one entry function that talks to the board only
 through the esp-xip-modules host table (GPIO, interrupts, SPI, time, events). The same code runs
 

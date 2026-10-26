@@ -388,6 +388,32 @@ fn the_host_stop_releases_the_radio() {
     assert!(s.fake.alarms.is_empty());
 }
 
+#[test]
+fn native_policy_replaces_running_role_and_suspends_before_returning() {
+    let mut s=receiving();
+    assert_eq!(s.radio.configure(&mut s.fake,b"fsk freq=915000000"),0);
+    assert_eq!(s.fake.spi_closed,1);
+    s.settle();
+    assert_eq!(s.fake.spi_opened,2);
+    s.radio.handle(&mut s.fake,0,2,&[]);
+    assert!(s.fake.alarms.is_empty());
+    assert_eq!(s.fake.spi_closed,2);
+    assert_eq!(s.fake.irq_enabled.last(),Some(&false));
+    assert_eq!(s.radio.configure(&mut s.fake,b"rx"),0);
+    s.settle();
+    assert_eq!(s.fake.spi_opened,3);
+}
+
+#[test]
+fn invalid_native_policy_preserves_running_radio() {
+    let mut s=receiving();
+    for request in [&b"tx text=hello"[..],b"rx sf=-1",b"fsk text=hello"] {
+        assert!(s.radio.configure(&mut s.fake,request)<0);
+        assert_eq!(s.fake.spi_closed,0);
+        assert_eq!(s.fake.op_mode() & 7,SX127X_MODE_RX_CONTINUOUS);
+    }
+}
+
 // ---- CAD ----
 
 #[test]

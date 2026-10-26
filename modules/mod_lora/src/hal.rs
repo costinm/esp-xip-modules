@@ -37,6 +37,8 @@ pub trait Hal {
     /// Report rising edges of `pin` as calls of the module (`M_IRQ`); registered once, masked with `irq_enable`.
     fn irq_attach(&mut self, pin: i32) -> i32;
     fn irq_enable(&mut self, pin: i32, on: bool) -> i32;
+    /// Release a masked radio interrupt when suspending or replacing its wiring.
+    fn irq_detach(&mut self, _pin: i32) {}
 
     /// Call the module back (`M_TIMER`) after `ms`. The module keeps at most one such alarm; returns its id (>= 0).
     fn alarm(&mut self, ms: u32) -> i32;
