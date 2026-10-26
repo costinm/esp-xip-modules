@@ -40,6 +40,9 @@ void xip_periph_reserve(uint64_t mask);
 void xip_quic_udp_ensure(void);
 void xip_quic_udp_stop(void);
 unsigned xip_quic_udp_sockets(void);
+void xip_mc_ensure(void);
+void xip_mc_stop(void);
+unsigned xip_mc_sockets(void);
 /* xip_events.c: the CBOR of the Wi-Fi state, heap_info and heap_dump (the events ring went: events are messages, routed later) */
 int xip_wifi_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap);
 int xip_heap_dump(int kind);
@@ -79,6 +82,7 @@ struct xip_instance {
     char name[16];
     uint32_t id;
     int component;                /* call() address */
+    int32_t envelope_components[XIP_COMPONENTS_MAX]; /* additional envelope owners, manifest key 12 */
     uint32_t port;                /* the datagram port the manifest binds it to (XIP_PORT_*), 0: none */
     uint32_t stream;              /* its stream port (TCP XIP_PORT_NET + stream), 0: none */
     int slot;                     /* index in the registry */
@@ -144,3 +148,9 @@ int xip_heap_dump(int kind);
 
 /* Shared temporary awake deadline; zero queries remaining milliseconds. */
 int xip_power_awake_for(uint32_t duration_ms);
+
+const xip_serial *xip_serial_component(void);
+
+bool xip_serial_usb_sleep_allowed(void);
+bool xip_serial_usb_sleep_blocked(void);
+void xip_serial_sleep_suspend(void);

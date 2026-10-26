@@ -38,6 +38,10 @@ xip_envelope_kind xip_envelope_parse(const uint8_t *cbor, size_t len, xip_envelo
 
 /* The head of an answer: `a4 01 <component> 02 <method> 03 <id> 06` (the result map follows) when `error` is 0, else the whole answer
  * `a4 01 .. 02 .. 03 .. 07 <error>` (`error` negative). Returns the length, or 0 when it does not fit `cap`. */
+/* A complete directed CBOR envelope may vote for activity; broadcasts and
+ * malformed/trailing data never do. Local target checks belong to the caller. */
+bool xip_envelope_activity(const uint8_t *data, size_t len, bool directed);
+
 size_t xip_envelope_head(uint8_t *out, size_t cap, int32_t component, int32_t method, uint64_t id, int32_t error);
 
 /* Is `p[0..len)` exactly one negative integer (an error code in place of a result map)? */

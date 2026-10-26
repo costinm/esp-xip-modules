@@ -23,6 +23,10 @@ struct ip_state {
     bool active, closing, added;
     SemaphoreHandle_t drained;
 };
+/* IDF's global netif callbacks interpret non-NULL netif.state as esp_netif_t.
+ * This raw interface is not an esp-netif: leave state NULL and recover our
+ * owner from its first embedded member, including during netif_add callbacks. */
+_Static_assert(offsetof(struct ip_state, netif)==0,"netif is the IP owner prefix");
 static struct ip_state *state;
 static uint32_t generation;
 static portMUX_TYPE lock=portMUX_INITIALIZER_UNLOCKED;
@@ -103,7 +107,7 @@ static int inject(void *ctx,uint64_t token,const xip_link_packet *pkt)
 }
 static err_t output(struct netif *n,struct pbuf *p)
 {
-    struct ip_state *s=n->state;
+    struct ip_state *s=(struct ip_state *)n;
     portENTER_CRITICAL(&lock);bool active=!s->closing && s->active;portEXIT_CRITICAL(&lock);
     if(!active || p->tot_len>n->mtu)return ERR_IF;
     xip_link_rx_buf buf;
@@ -117,14 +121,14 @@ static err_t output4(struct netif *n,struct pbuf *p,const ip4_addr_t *a){(void)a
 static err_t output6(struct netif *n,struct pbuf *p,const ip6_addr_t *a){(void)a;return output(n,p);}
 static err_t init(struct netif *n)
 {
-    struct ip_state *s=n->state;n->name[0]='x';n->name[1]='i';n->mtu=s->config.mtu;
+    struct ip_state *s=(struct ip_state *)n;n->name[0]='x';n->name[1]='i';n->mtu=s->config.mtu;
     n->output=output4;n->output_ip6=output6;
     /* Raw point-to-point IP: no Ethernet, ARP, ND framing or default route. */
     n->flags=0;return ERR_OK;
 }
 static void up(struct netif *n)
 {
-    struct ip_state *s=n->state;
+    struct ip_state *s=(struct ip_state *)n;
     ip6_addr_t addr;memset(&addr,0,sizeof(addr));memcpy(addr.addr,s->config.ipv6,16);
     if(!ip6_addr_isany(&addr)){netif_ip6_addr_set(n,0,&addr);netif_ip6_addr_set_state(n,0,IP6_ADDR_PREFERRED);}
     netif_set_ip6_autoconfig_enabled(n,0);
@@ -153,7 +157,7 @@ int xip_ip_open(uint32_t owner,const xip_ip_config *c,uint32_t *link)
     if(s->link<0){int rc=s->link;portENTER_CRITICAL(&lock);state=NULL;portEXIT_CRITICAL(&lock);vSemaphoreDelete(s->drained);free(s);return rc;}
     ip4_addr_t address,mask,gateway;
     memcpy(&address.addr,c->ipv4,4);memcpy(&mask.addr,c->netmask,4);memcpy(&gateway.addr,c->gateway,4);
-    err_t err=netifapi_netif_add(&s->netif,&address,&mask,&gateway,s,init,tcpip_input);
+    err_t err=netifapi_netif_add(&s->netif,&address,&mask,&gateway,NULL,init,tcpip_input);
     if(err!=ERR_OK){xip_ip_close(owner,(uint32_t)s->link);return XIP_ERR_IO;}
     s->added=true;
     portENTER_CRITICAL(&lock);s->active=true;portEXIT_CRITICAL(&lock);

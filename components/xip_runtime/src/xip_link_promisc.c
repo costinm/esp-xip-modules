@@ -10,6 +10,8 @@
 #include "esp_attr.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "xip_wifi.h"
 
 #define LINK_MTU XIP_PKT_MAX                          /* a pool packet; a longer frame is dropped */
@@ -18,6 +20,7 @@
 
 static int link_addr = -1;
 static atomic_bool on;
+static atomic_uint readers;
 /* Driver-only diagnostics share the existing radio debug switch. Production
  * has no resident counters; protocol diagnostics belong to the module. */
 #if CONFIG_XIP_ESPNOW_DIAGNOSTICS
@@ -41,7 +44,7 @@ static int no_tx(void *ctx, uint64_t dest, const xip_link_packet *pkt)
 }
 
 /* the driver's receive task: copy and return, nothing else */
-static void IRAM_ATTR rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
+static void IRAM_ATTR rx_frame(void *buf, wifi_promiscuous_pkt_type_t type)
 {
     (void)type;
     if (!atomic_load(&on) || !buf) return;
@@ -72,24 +75,44 @@ static void IRAM_ATTR rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
     else xip_link_native_rx_commit(link_addr, &b, len, mac_token(p->payload + 10), signal);   /* packed signal: rssi low 16 bits, no snr */
 }
 
+static void IRAM_ATTR rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
+{
+    if (!atomic_load(&on)) return;
+    atomic_fetch_add(&readers, 1);
+    if (atomic_load(&on)) rx_frame(buf, type);
+    atomic_fetch_sub(&readers, 1);
+}
+
+static void release_link(void)
+{
+    /* Stop admission first; an entered SDK callback must finish before its
+     * link address can be reused by another provider. */
+    while (atomic_load(&readers)) vTaskDelay(1);
+    if (link_addr >= 0) {
+        (void)xip_link_native_set_state(link_addr, XIP_LINK_DOWN, 0);
+        xip_link_native_unregister(link_addr);
+        link_addr = -1;
+    }
+}
+
 int xip_link_promisc_set(const xip_wifi_monitor *m)
 {
     if (m->channel > 13) return XIP_ERR_ARG;
     if (!m->enable) {
         atomic_store(&on, false);
         if (esp_wifi_set_promiscuous(false) != ESP_OK) return XIP_ERR_IO;
-        if (link_addr >= 0) (void)xip_link_native_set_state(link_addr, XIP_LINK_DOWN, 0);
+        release_link();
         return XIP_OK;
     }
+    if (m->channel && !xip_wifi_associated() && !xip_wifi_set_channel(m->channel)) return XIP_ERR_IO;
     if (link_addr < 0) {
         link_addr = xip_link_native_register("promisc", LINK_MTU, 0, no_tx, NULL);
         if (link_addr < 0) return link_addr;
     }
-    if (m->channel && !xip_wifi_associated() && !xip_wifi_set_channel(m->channel)) return XIP_ERR_IO;
     xip_link_native_rx_prepare();
-    if (esp_wifi_set_promiscuous_rx_cb(rx_cb) != ESP_OK) return XIP_ERR_IO;
+    if (esp_wifi_set_promiscuous_rx_cb(rx_cb) != ESP_OK) { atomic_store(&on, false); release_link(); return XIP_ERR_IO; }
     atomic_store(&on, true);
-    if (esp_wifi_set_promiscuous(true) != ESP_OK) { atomic_store(&on, false); return XIP_ERR_IO; }
+    if (esp_wifi_set_promiscuous(true) != ESP_OK) { atomic_store(&on, false); release_link(); return XIP_ERR_IO; }
     (void)xip_link_native_set_state(link_addr, XIP_LINK_UP, 0);
     return XIP_OK;
 }
@@ -97,9 +120,9 @@ int xip_link_promisc_set(const xip_wifi_monitor *m)
 /* the radio stops: the driver forgets promiscuous mode, so the link goes down */
 void xip_link_promisc_stop(void)
 {
-    if (!atomic_exchange(&on, false)) return;
+    atomic_store(&on, false);
     (void)esp_wifi_set_promiscuous(false);
-    if (link_addr >= 0) (void)xip_link_native_set_state(link_addr, XIP_LINK_DOWN, 0);
+    release_link();
 }
 
 unsigned xip_link_promisc_frames(void) {

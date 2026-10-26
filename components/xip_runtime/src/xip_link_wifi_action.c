@@ -46,5 +46,9 @@ int xip_link_wifi_action_start(void)
 void xip_link_wifi_action_stop(void)
 {
     active = false;
-    if (action_link >= 0) (void)xip_link_native_set_state(action_link, XIP_LINK_DOWN, 0);
+    if (action_link >= 0) {
+        (void)xip_link_native_set_state(action_link, XIP_LINK_DOWN, 0);
+        xip_link_native_unregister(action_link);
+        action_link = -1;
+    }
 }

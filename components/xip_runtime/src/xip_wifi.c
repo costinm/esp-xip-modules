@@ -74,6 +74,8 @@ int xip_wifi_nv(const char *key, size_t key_len, const uint8_t *value, size_t va
     static const struct { const char *name, *nvs_key; uint16_t lo, hi; } keys[] = {
         {"wifi.rx_static", "rx_static", 2, 64}, {"wifi.rx_dynamic", "rx_dynamic", 2, 128},
         {"wifi.tx_dynamic", "tx_dynamic", 4, 128}, {"wifi.rx_ba", "rx_ba", 2, 64},
+        {"cadence", "cadence", 0, 17},
+        {"usb.sleep", "usb_sleep", 0, 1},
         {"ble.boot", "ble_boot", 0, 1},   /* the BLE component starts at boot (module ble, main.c) */
     };
     if (!key || (!value && !out)) return -1;
@@ -100,6 +102,8 @@ int xip_wifi_nv(const char *key, size_t key_len, const uint8_t *value, size_t va
                 valid = value[j] >= '0' && value[j] <= '9';
                 number = number * 10 + value[j] - '0';
             }
+            if (key_len==7 && !memcmp(key,"cadence",7)
+                && !(number==0 || number==1 || number==8 || number==16 || number==17)) valid=false;
             if (!valid || number < keys[i].lo || number > keys[i].hi) result = -1;
             else result = nvs_set_u16(nvs, keys[i].nvs_key, number) == ESP_OK &&
                           nvs_commit(nvs) == ESP_OK ? 0 : -3;

@@ -20,7 +20,7 @@ Use [dmesh-cli](../../crates/dmesh-cli/README.md) to control a device. Configure
 saved network credentials and Wi-Fi tuning through the console API.
 
 See [the module ABI](../../include/xip.h), [Wi-Fi](../../api/wifi.API.md),
-[power](../../api/power.API.md), [console control](../../modules/mod_con/API.md)
+[NAN power methods](../../modules/mod_nan/API.md#13-powerinfo--the-power-state-and-the-freertos-numbers), [console control](../../modules/mod_con/API.md)
 and [ESP-NOW](ESPNOW.md) for the relevant contracts and options. Development
 notes are under [notes/](../../notes/ai/2026-10-23-runtime-implementation.md).
 
@@ -34,8 +34,9 @@ validation gaps](../../notes/ai/modules/README.md) before device experiments.
 The CBOR envelope `{1: component, 2: method, 3: id, 5: fields}` is parsed by the runtime in one place: a **QUIC long packet of version `0x444d0002`**
 that the classifier takes from a QUIC link (PPP port `0xf7`, UDP 3339, `ble`, `espnow`). `dmesh-cli` sends every request that way. Module ports (PPP,
 UDP, any) deliver **raw frames**, the full datagram or record, as `XIP_CALL_LINK`; nothing on them is parsed. The packet goes to the module of the envelope's
-component if that module has a datagram port or hosts a component, otherwise to the module of component 20 (`mod_con`), which serves the native
-components (Wi-Fi 10, power 11, ip 12, ...) from its native method table. A module with neither is not a target. The handler receives an ordinary
+component if that module has a datagram port or hosts a component. An explicit additional envelope owner (manifest key 12) takes precedence;
+`mod_nan` owns transport component 1 this way. Otherwise the request falls back to component 20 (`mod_con`), which serves still-unowned native
+components (Wi-Fi 10, ip 12, ...) from its native method table. A primary module with neither a port nor a hosted component is not a target. The handler receives an ordinary
 request with `XIP_CALL_ENVELOPE`: the envelope's component and method, the fields map as `data`, the link and token to answer on (`from`, `id`) and
 the envelope's own id (`request_id`, `request_has_id`, appended to `xip_call`). What it sends back with `reply` is wrapped as `{1, 2, 3, 6: result}` and
 sent to the peer as a `0x444d0002` packet with the CIDs swapped; a bare negative integer (an `XIP_ERR_*`) becomes `{1, 2, 3, 7: error}`, the one error
@@ -63,3 +64,16 @@ wrappers from an `API.md` (`scripts/gen.sh`).
 Which methods of a hosted vtable an envelope can reach: those of the module's `API.md` (numbered, CBOR, in the catalog) are remote-callable, and only
 they are in the generated `dispatch`. Methods that only `get_component` callers use, with their own parameters (up to five words, like the psa vtable),
 are declared in `API.local.md` beside it; they are in the table after the remote ones and no envelope reaches them.
+
+## UART wake
+
+Local RX bytes and a physical UART wake edge open five seconds of activity
+without requiring a complete PPP packet. After restoring active module roles,
+the serialized worker emits PPP port 248 (`0xf8`) with payload `01`: "I got
+local input and am awake". Multiple RX chunks coalesce; a busy transmitter retains
+the pending ACK. An empty record on port 248 is the host's idempotent wake probe.
+The CLI sends a probe immediately, retries only that probe until ACK, then sends
+the real request once on port 247 using the same port owner. It does not depend
+on a DW announcement. Passive watch does not send probes. Native commands use
+`dmesh-cli DEVICE METHOD`, with `wake`, `sleep`, and `nv KEY[=VALUE]` shortcuts;
+the old `console` prefix is retained only for compatibility.

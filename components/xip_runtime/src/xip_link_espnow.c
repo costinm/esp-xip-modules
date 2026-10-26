@@ -313,6 +313,7 @@ void xip_link_espnow_stop(void)
     }
     (void)esp_timer_stop(s->retry_timer);
     (void)esp_timer_delete(s->retry_timer);
+    xip_link_native_unregister(s->link);
     free(s);
 }
 void xip_link_espnow_stats(xip_espnow_stats_t *out)

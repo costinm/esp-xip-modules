@@ -205,7 +205,7 @@ void xip_quic_rx_set(const xip_quic_rx_ops *ops);
  *    entry hands the packet to the `local` callback (ownership passes: it must release it with xip_quic_pkt_release or pass it on with
  *    xip_quic_pkt_send). A RELAY entry forwards the same pool packet to its link and peer address with the DCID replaced (forward or drop and count: no queue, no retransmission). Unknown DCID: dropped, counted;
  *  - LONG header, version XIP_QUIC_VERSION_CBOR (0x444d0002): after the SCID comes the CBOR envelope {1: component, 2: method, 3: id, 5: fields}. It
- *    goes to the module whose component is the envelope's if it has a datagram port bound or hosts a component (manifest key 11); otherwise to the
+ *    goes to the module claiming its component in manifest key 12, or to the module of that component if it has a datagram port or hosts a table; otherwise to the
  *    console module (component 20), which serves console and native methods. This is the only place an envelope is parsed: the runtime parses it
  *    (xip_envelope.h) and the handler gets an ordinary request, XIP_CALL_ENVELOPE; module ports deliver raw frames. The module's answer to the link and token it came from is sent as a 0x444d0002 long packet (DCIDs
  *    swapped), within XIP_QUIC_REPLY_MS;
@@ -273,6 +273,7 @@ typedef struct {
     char components[XIP_COMPONENTS_MAX][16];   /* manifest key 11: names of the components the module hosts (copied); "" = unused. get_component(name) falls
                                     * through to the running module that hosts it: the caller gets a table of runtime thunks that take the global module
                                     * lock, call the module's function with the module's context, and return XIP_ERR_NOTFOUND once the module is gone. */
+    int32_t envelope_components[XIP_COMPONENTS_MAX]; /* manifest key 12: additional envelope component IDs; zero = unused. */
 } xip_instance_config_t;
 
 /* `name` (copied, <= 15 bytes) is used in logs and as the settings namespace "em_<name>". The instance is idle until
@@ -336,6 +337,10 @@ int xip_serial_request_baud(uint32_t baud);
 int xip_serial_control(uint32_t port, const uint8_t *data, size_t len);
 void xip_serial_activity_window(uint32_t ms);
 void xip_serial_activate(void);
+/* Local RX/wake edge requests an awake ACK; worker emits PPP 0xf8 payload 01
+ * after restoring active module roles. No complete wake request is required. */
+void xip_serial_note_wake(void);
+void xip_serial_ack_awake(void);
 /* Generic activity mechanism; policy decides whether/how to sleep.
  * activate extends (never shortens) the current interval; zero is a no-op. */
 void xip_power_activate(uint32_t duration_ms);

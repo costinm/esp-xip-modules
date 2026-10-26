@@ -19,29 +19,18 @@
  *   6. Deliver HOST_WAKE to the modules that have an ALARM_WINDOW alarm. Its value is the wake cause (4 timer, 8 UART, 7 GPIO).
  *   A rejected sleep is NOT a wake: the radio is restored once and the rest of the request is dropped - a PM-lock rejection must never become a stop/start loop.
  *   A wake that is not the timer (a person typing on the UART, a peer's packet) means "swap to active": the rest of the request is dropped and the module,
- *   which sees the cause in HOST_WAKE, decides what follows (DMesh: stay awake for a 60 s grace and accept the profile change).
+ *   which sees the cause in HOST_WAKE, decides what follows (NAN: restore active roles for the shared five-second activity grace).
  *   Between two cycles of one request there is an awake time (a timer that queues the next cycle) so modules run.
  *
- * USB-SERIAL/JTAG: WHY A SLEEP IS SOFT WHEN A HOST IS ATTACHED  (settled after bench tests, 2026-10-17; do not re-open without new evidence)
- *   The C6 can take its console on the native USB-Serial/JTAG port. Light sleep powers that port down: ESP-IDF disables its pad and clock
- *   (esp_hw_support/sleep_modes.c; SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP is commented out for the C6 in soc_caps.h, "TODO IDF-6395"; DMesh does not define it either).
- *   The host therefore sees a disconnect on every physical sleep. On the bench (three C6 boards, Linux host) this left the device in a state that only a replug
- *   or a reset cleared: 500 ms sleeps with 50 ms or 1 s awake left it half-enumerated (a USB device with no strings and no ttyACM) or with a silent console, and
- *   even 4 s sleeps with 3 s awake made one board vanish from the bus after working once. DMesh knows this too: its comment in main_runtime.rs says USB-JTAG
- *   "is powered down by physical light sleep" and it keeps the CPU awake there (usb_jtag_debug_hold, the `sleepy-soft` boot policy).
- *   So, as DMesh: while the console is on USB-Serial/JTAG AND a host is attached (xip_serial_usb_active), the sleep is SOFT - the same radio steps 1 and 5 run
- *   around a plain delay and the CPU does not sleep - and info.soft_sleep says how the last sleep was done. The soft sleep still proves the radio/state machine.
- *   Why this is acceptable: a device on USB is being charged by the host (laptop or phone), so it may use a bit more power and the saving is not the point there.
- *   The way out in the field is to DISCONNECT USB cleanly when the device is not in use, so that sleep can start again; with USB away the sleep is physical (the same
- *   code, untested on the bench for lack of a way to unplug remotely), and the sleep-related information (SLEEP_PENDING / WAKE) is carried by the DW announces
- *   (NAN publish, ESP-NOW broadcast) instead of the port. The C6 boards with two connectors were switched to the slower UART console for this reason; a UART
- *   console sleeps physically (tested: 13 cycles of 500 ms, radio back in ~10 ms, early wake by a byte on the UART).
- *   There is deliberately no option to force a physical sleep on USB. If someone needs to look at it again, the experiment is: build with the soft test removed,
- *   use a board you can replug, and expect to lose the USB port.
- *
- * TODO: coordinate USB shutdown/re-enumeration with the host so physical sleep
- * can be supported there. Evaluate USB mode changes, including CDC Ethernet;
- * retain the soft path until host recovery has explicit device-side proof.
+ * USB-SERIAL/JTAG: coordinated NAN sleep is vetoed while a host is attached by
+ * default. NV usb.sleep=1 explicitly opts into USJ PHY pull-up removal before
+ * physical sleep. The runtime leaves it detached across timer/DW wakes; only
+ * NAN transport.set selecting serial on restores the prior PHY state. Explicit
+ * serial on also vetoes USB sleep until policy selects serial off again.
+ * This is experimental: prior automatic re-enumeration around light sleep left
+ * bench hosts with missing/half-enumerated ports. Do not infer host recovery or
+ * power savings from a successful build or queued sleep. The standalone power
+ * diagnostic retains its soft path with the default attached-host policy.
  *
  * Runs on the host worker; the C Wi-Fi owner supplies suspend/resume. */
 #include <stdatomic.h>
@@ -89,15 +78,16 @@ uint32_t xip_power_active_remaining_ms(void)
 void xip_power_activate(uint32_t ms)
 {
     if (!ms) return;
-    signal_activity();
     if (ms > INT32_MAX) ms = INT32_MAX;
     uint32_t now = activity_now_ms(), next = now + ms;
     if (!next) next = 1; /* zero is the inactive sentinel */
     unsigned current = atomic_load(&active_until_ms);
     for (;;) {
-        if (current && (int32_t)(current - now) > 0 && (int32_t)(current - next) >= 0) return;
-        if (atomic_compare_exchange_weak(&active_until_ms, &current, next)) return;
+        if (current && (int32_t)(current - now) > 0 && (int32_t)(current - next) >= 0) break;
+        if (atomic_compare_exchange_weak(&active_until_ms, &current, next)) break;
     }
+    /* Publish the grace before waking the higher-priority policy worker. */
+    signal_activity();
 }
 /* Temporary module work is separate from UART/explicit active-mode intent.
  * One wrap-safe monotonic deadline, no per-module allocations or vote table. */
@@ -219,7 +209,7 @@ void xip_power_cycle(void)
     const uint64_t relative_us = (uint64_t)atomic_load(&duration_ms) * 1000;
     const bool coordinated = request_deadline != 0;
     /* A stale queued request or activity since admission cannot shut down Wi-Fi. */
-    if ((coordinated && (request_activity != atomic_load(&activity_seq) || xip_power_active_remaining_ms() || request_wifi_generation != current_wifi_generation())) || xip_power_awake_for(0)) {
+    if ((coordinated && (xip_serial_usb_sleep_blocked() || request_activity != atomic_load(&activity_seq) || xip_power_active_remaining_ms() || request_wifi_generation != current_wifi_generation())) || xip_power_awake_for(0)) {
         atomic_store(&left, 0); atomic_store(&busy, false);
         xip_host_wake_window_value(xip_power_active_remaining_ms() ? 8 : 4);
         return;
@@ -227,7 +217,7 @@ void xip_power_cycle(void)
     atomic_fetch_add(&metrics.attempts, 1);
     atomic_store(&metrics.last_requested, coordinated ? (uint32_t)(request_deadline > (uint64_t)esp_timer_get_time()
         ? request_deadline - esp_timer_get_time() : 0) : (uint32_t)relative_us);
-    atomic_store(&metrics.soft_now, xip_serial_usb_active());
+    atomic_store(&metrics.soft_now, xip_serial_usb_sleep_blocked());
     atomic_store(&metrics.physical, false);
     atomic_store(&metrics.last_duration, 0);
     atomic_store(&metrics.last_resume, 0);
@@ -241,6 +231,7 @@ void xip_power_cycle(void)
     atomic_store(&state_now, XIP_POWER_SLEEPING);
     const bool soft = atomic_load(&metrics.soft_now);
     esp_err_t rc = ESP_OK;
+    if (!soft) xip_serial_sleep_suspend();
     const int64_t before = esp_timer_get_time();
     const uint64_t asked_us = coordinated
         ? (request_deadline > (uint64_t)before ? request_deadline - before : 0) : relative_us;
@@ -270,6 +261,9 @@ void xip_power_cycle(void)
         }
     }
     atomic_store(&sleep_task, NULL);
+    /* The UART wake edge may precede delivery of the first buffered byte.
+     * Give the trusted local sender a full packet-receive grace immediately. */
+    if (rc==ESP_OK && waited && cause==8) xip_serial_note_wake();
     atomic_store(&metrics.last_duration, (uint32_t)(esp_timer_get_time() - before));
     atomic_store(&metrics.wake_cause, cause);
     atomic_store(&metrics.physical, waited && !soft && rc == ESP_OK);
@@ -329,7 +323,7 @@ int xip_power_until(uint32_t owner, uint64_t wake_at_us, uint32_t flags)
 {
     const uint64_t now = esp_timer_get_time();
     if ((flags & ~XIP_POWER_TRACE_UART) || wake_at_us < now + MIN_SLEEP_MS * 1000 || wake_at_us - now > UINT32_MAX) return XIP_ERR_ARG;
-    if (xip_power_active_remaining_ms() || xip_power_awake_for(0)) return XIP_ERR_BUSY;
+    if (xip_serial_usb_sleep_blocked() || xip_power_active_remaining_ms() || xip_power_awake_for(0)) return XIP_ERR_BUSY;
     if (atomic_exchange(&busy, true)) return XIP_ERR_BUSY;
     request_owner = owner;
     request_activity = atomic_load(&activity_seq);

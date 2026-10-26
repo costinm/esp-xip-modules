@@ -78,8 +78,13 @@ static void socket_delivered(uint32_t handle,int event)
          * These notifications need no read/write call from their consumer, so
          * restore read interest when delivered. READABLE retains explicit
          * consumer rearming through socket_read (backpressure). */
-        if(event==XIP_SOCKET_EVENT_OPEN || event==XIP_SOCKET_EVENT_WRITE_DONE)
-            c_poll_update(s->watch,s->fd,POLLIN|(s->tx_slot>=0?POLLOUT:0));
+        /* READABLE can race an application write while peer FIN remains
+         * readable. If the consumer has finished reading, it need not call
+         * socket_read again: accepted TX must still regain write interest. */
+        if(s->tx_slot>=0)c_poll_update(s->watch,s->fd,POLLOUT);
+        else if(event==XIP_SOCKET_EVENT_OPEN || event==XIP_SOCKET_EVENT_WRITE_DONE)
+            c_poll_update(s->watch,s->fd,POLLIN);
+
     }
     xSemaphoreGive(sockets_lock);
 }

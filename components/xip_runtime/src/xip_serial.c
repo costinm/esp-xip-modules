@@ -30,17 +30,22 @@
 #include "esp_sleep.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
-#if CONFIG_IDF_TARGET_ESP32C6
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
 #include "driver/usb_serial_jtag.h"
+#include "hal/usb_serial_jtag_ll.h"
 #endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "xip_runtime.h"
+#include "xip_wifi.h"
 #include "internal.h"
 
 static const char *TAG = "serial";
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+static atomic_bool usb_detached;
+#endif
 
 #define UART_BAUD 115200
 #define USB_WAKE_MS 250
@@ -81,7 +86,7 @@ static struct {
     bool usb;
     volatile bool stop;
     bool running;
-} s = {.activity_ms = ATOMIC_VAR_INIT(4000), .rx_enabled = ATOMIC_VAR_INIT(true)};
+} s = {.activity_ms = ATOMIC_VAR_INIT(5000), .rx_enabled = ATOMIC_VAR_INIT(true)};
 
 uint64_t xip_serial_pins(void) { return (1ull << TX_PIN) | (1ull << RX_PIN); }
 
@@ -149,7 +154,12 @@ int xip_serial_write(const void *data, size_t len)
 {
     if (!s.running || s.stop || !len) return s.running && !s.stop ? 0 : XIP_ERR_NOTFOUND;
 #if CONFIG_IDF_TARGET_ESP32C6
-    if (s.usb) return usb_serial_jtag_write_bytes(data, len, pdMS_TO_TICKS(USB_WRITE_MS));
+    if (s.usb) {
+        /* An explicitly detached PHY has no receiver. Reports must not fill
+         * the USB driver's queue or hold a DW open waiting for a host. */
+        if (atomic_load(&usb_detached)) return XIP_ERR_NOTFOUND;
+        return usb_serial_jtag_write_bytes(data, len, pdMS_TO_TICKS(USB_WRITE_MS));
+    }
 #endif
     return uart_write_bytes(UART_NUM_0, data, len);
 }
@@ -164,7 +174,11 @@ void xip_serial_set_codec(const xip_serial_codec_t *c) { codec = c; }
  * xip_ppp.c: records to their port) has it all. */
 static void chunk(const uint8_t *buf, int n)
 {
-    xip_power_activate(atomic_load(&s.activity_ms));
+    /* Local UART/USB is a trusted wake source: the first byte must keep the
+     * next DW awake long enough to receive the rest of the packet. Network
+     * traffic gets its activity vote only after decrypted CBOR admission. */
+    xip_serial_note_wake();
+    if (!s.usb && !atomic_load(&s.rx_enabled)) return;
     if (s.client.on_bytes) s.client.on_bytes(s.client.ctx, buf, (size_t)n);
     else if (codec && codec->on_bytes) codec->on_bytes(buf, (size_t)n);
 }
@@ -331,15 +345,71 @@ static void serial_task(void *arg)
 /* The port is USB-Serial/JTAG (selected at boot), connected or not: light sleep powers it down. */
 bool xip_serial_usb_selected(void) { return s.usb; }
 
-/* A USB-Serial/JTAG console with a host attached right now: the sleep owner makes sleeps soft then (xip_power.c explains why). */
+/* SOF attachment is independent of which serial driver boot selected. IDF has
+ * no connection callback; the host worker samples this state every 250 ms. */
 bool xip_serial_usb_active(void)
 {
-#if CONFIG_IDF_TARGET_ESP32C6
-    return s.running && s.usb && usb_serial_jtag_is_connected();
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    return usb_serial_jtag_is_connected();
 #else
     return false;
 #endif
 }
+
+/* Experimental opt-in; the default never detaches an attached host. Read at
+ * driver open so settings changes are explicit at the next boot/reopen. */
+static atomic_bool usb_sleep_allowed, usb_requested_on;
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+static bool saved_pull_override;
+static usb_serial_jtag_pull_override_vals_t saved_pulls;
+#endif
+bool xip_serial_usb_sleep_allowed(void) { return atomic_load(&usb_sleep_allowed) && !atomic_load(&usb_requested_on); }
+bool xip_serial_usb_sleep_blocked(void) { return xip_serial_usb_active() && !xip_serial_usb_sleep_allowed(); }
+void xip_serial_sleep_suspend(void)
+{
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (!xip_serial_usb_sleep_allowed() || usb_detached) return;
+    /* IDF 6 has no hal/usb_phy_ll.h / usb_phy_ll_usb_wrap_pad_enable_pullup.
+     * USJ owns this PHY on C6/S3; removing its D+ pull-up simulates unplug. */
+    saved_pulls = (usb_serial_jtag_pull_override_vals_t){
+        .dp_pu=USB_SERIAL_JTAG.conf0.dp_pullup, .dp_pd=USB_SERIAL_JTAG.conf0.dp_pulldown,
+        .dm_pu=USB_SERIAL_JTAG.conf0.dm_pullup, .dm_pd=USB_SERIAL_JTAG.conf0.dm_pulldown};
+    saved_pull_override=USB_SERIAL_JTAG.conf0.pad_pull_override;
+    const usb_serial_jtag_pull_override_vals_t detached={0};
+    usb_serial_jtag_ll_phy_enable_pull_override(&detached);
+    usb_detached=true;
+    /* Give the host and IDF's SOF/PM-lock monitor time to observe disconnect.
+     * The power owner recomputes its absolute wake deadline afterwards. */
+    vTaskDelay(pdMS_TO_TICKS(20));
+#endif
+}
+static void serial_usb_on(void)
+{
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (!usb_detached) return;
+    usb_serial_jtag_ll_phy_enable_pull_override(&saved_pulls);
+    if (!saved_pull_override) usb_serial_jtag_ll_phy_disable_pull_override();
+    usb_detached=false;
+#endif
+}
+static int serial_usb_sleep(void *ctx) { (void)ctx; return xip_serial_usb_sleep_allowed(); }
+static int serial_usb(void *ctx) { (void)ctx; return xip_serial_usb_active(); }
+static int serial_mode(void *ctx, uint32_t mode)
+{
+    (void)ctx;
+    if (mode > 1) return XIP_ERR_ARG;
+    atomic_store(&usb_requested_on,mode!=0);
+    if (mode) serial_usb_on(); else xip_serial_sleep_suspend();
+    /* Leave the UART wake interrupt armed even when application RX is off.
+     * A deliberately detached USB PHY is restored only by serial-on policy. */
+    xip_serial_receive_enabled(mode != 0);
+    xip_serial_activity_window(5000);
+    return XIP_OK;
+}
+static int serial_baud(void *ctx, uint32_t baud) { (void)ctx; return s.usb ? XIP_OK : xip_serial_request_baud(baud); }
+static const xip_serial serial_component = {.version=1, .size=sizeof(xip_serial),
+    .usb_connected=serial_usb, .mode=serial_mode, .baud=serial_baud, .usb_sleep_allowed=serial_usb_sleep};
+const xip_serial *xip_serial_component(void) { return &serial_component; }
 
 void xip_serial_rearm(void)
 {
@@ -369,7 +439,10 @@ int xip_serial_drain(void)
     if (!s.running || s.stop) return XIP_ERR_NOTFOUND;
     if (atomic_load(&s.tx_state)) return XIP_ERR_BUSY;
 #if CONFIG_IDF_TARGET_ESP32C6
-    if (s.usb) return XIP_OK;
+    if (s.usb) {
+        if (atomic_load(&usb_detached) || !usb_serial_jtag_is_connected()) return XIP_OK;
+        return usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(100))==ESP_OK ? XIP_OK : XIP_ERR_IO;
+    }
 #endif
     return uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(100)) == ESP_OK ? XIP_OK : XIP_ERR_IO;
 }
@@ -444,7 +517,7 @@ int xip_serial_control(uint32_t port, const uint8_t *data, size_t len)
 {
     if (port == 0xf8) {
         if (len) return XIP_ERR_ARG;
-        xip_power_activate(60000);
+        xip_power_activate(5000); /* trusted local serial wake */
         packet_event(5, 1);
         return XIP_OK;
     }
@@ -469,6 +542,8 @@ int xip_serial_open(int baud, size_t usb_buffer_size)
     atomic_store(&s.pending_baud, 0);
     s.baud = baud;
     s.usb_buffer_size = usb_buffer_size;
+    uint8_t setting[4]={0};
+    atomic_store(&usb_sleep_allowed,xip_wifi_nv("usb.sleep",9,NULL,0,setting,sizeof(setting))==1 && setting[0]=='1');
     if (!install_driver()) { vSemaphoreDelete(s.frame_lock); s.frame_lock = NULL; return XIP_ERR_IO; }
     s.opened = true;
     return XIP_OK;

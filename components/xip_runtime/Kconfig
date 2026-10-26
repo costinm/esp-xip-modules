@@ -19,9 +19,12 @@ menu "esp-xip-modules host"
 
     config XIP_WORKER_STACK
         int "Stack of the worker task that runs every module's handlers, bytes"
+        default 20480 if IDF_TARGET_ESP32
         default 12288
         help
             Must cover the deepest handler of any installed module (a module image states its need in stack_bytes).
+            Installed flashers can nest a large upload frame with page/status
+            inspection and native flash calls; ESP32 deployment needs this margin.
 
     config XIP_WORKER_PRIORITY
         int "Priority of the worker task"

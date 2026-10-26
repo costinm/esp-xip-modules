@@ -10,6 +10,9 @@ xip_envelope_kind xip_envelope_parse(const uint8_t *cbor, size_t len, xip_envelo
     memset(e, 0, sizeof(*e));
     e->fields = empty_map; e->fields_len = 1;
     if (!cbor || !len || (cbor[0] >> 5) != 5) return XIP_ENV_NOT_MAP;
+    xip_cbor_r whole;
+    xip_cbor_reader(&whole,cbor,len);
+    if (xip_cbor_skip(&whole) || whole.len) return XIP_ENV_INVALID;
     xip_cbor_r v;
     xip_cbor_item it;
     const bool answer = xip_cbor_get(cbor, len, 6, &v) == 0 || xip_cbor_get(cbor, len, 7, &v) == 0;
@@ -31,6 +34,15 @@ xip_envelope_kind xip_envelope_parse(const uint8_t *cbor, size_t len, xip_envelo
         e->fields = v.p; e->fields_len = v.len - span.len;
     }
     return XIP_ENV_REQUEST;
+}
+
+bool xip_envelope_activity(const uint8_t *data, size_t len, bool directed)
+{
+    if (!directed) return false;
+    xip_envelope env;
+    const xip_envelope_kind kind=xip_envelope_parse(data,len,&env);
+    if (kind!=XIP_ENV_REQUEST && kind!=XIP_ENV_ANSWER) return false;
+    return env.component>0 && env.method>0;
 }
 
 size_t xip_envelope_head(uint8_t *out, size_t cap, int32_t component, int32_t method, uint64_t id, int32_t error)
