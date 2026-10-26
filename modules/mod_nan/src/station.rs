@@ -9,14 +9,17 @@ pub struct Station {
     pub scanning: bool,
 }
 impl Station {
+    /// NAN station policy creates a bounded association attempt from the current intended state.
     pub fn new(desired: WifiIntent, generation: u32, now: u64) -> Self {
         Self {desired,generation,next:now+10_000_000,attempting:true,scanning:false}
     }
+    /// The station scan policy checks whether an observed AP can satisfy the saved intent.
     pub fn matches(&self, ap: &WifiAp) -> bool {
         let i=&self.desired;
         ap.rssi >= -80 && (i.bssid==[0;6] || i.bssid==ap.bssid)
             && (i.sta_ssid_len==0 || (i.sta_ssid_len==ap.ssid_len && i.sta_ssid[..i.sta_ssid_len as usize]==ap.ssid[..ap.ssid_len as usize]))
     }
+    /// The NAN tick asks for the next association, fallback or scan transition.
     pub fn poll(&mut self, hw: &Hw, actual: &WifiState, now: u64, capture: bool) -> Result<Option<WifiIntent>,i32> {
         if actual.sta==2 {self.attempting=true;self.scanning=false;self.next=now+10_000_000;return Ok(None)}
         if now<self.next {return Ok(None)}

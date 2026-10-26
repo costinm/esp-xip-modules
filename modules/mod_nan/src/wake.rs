@@ -2,6 +2,8 @@
 use dmesh_server::control::{self, Request, TransportConfig, TransportKind};
 use xip_abi::*;
 
+/// Radio ingress validates and unwraps a follow-up addressed to this device.
+
 pub fn content<'a>(payload: &'a [u8], local: [u8; 6]) -> Option<(&'a [u8], bool)> {
     // Android's Wi-Fi Aware service-specific information may carry the WFA
     // generic-service prefix before the DMesh Follow-up wrapper.
@@ -29,6 +31,7 @@ pub fn content<'a>(payload: &'a [u8], local: [u8; 6]) -> Option<(&'a [u8], bool)
 
 /// Only explicit, locally targeted activation belongs to this module. Discovery
 /// requests and announcements must never change the sleep policy.
+/// The discovery dispatcher recognizes targeted transport activation before application dispatch.
 pub fn request<'a>(
     record: &'a [u8],
     local: [u8; 6],
@@ -49,54 +52,35 @@ pub fn request<'a>(
     Ok(Some((kind, config)))
 }
 
-/// Apply the fields emitted by Android build_sta_activation/build_activation
-/// to the saved active intent, retaining provisioned credentials. Validate the
-/// entire request before touching the radio or cancelling sleepy mode.
-pub fn intent(
-    kind: TransportKind,
-    config: TransportConfig<'_>,
-    mut saved: WifiIntent,
-) -> Result<(WifiIntent, u64), i32> {
-    let supported = TransportConfig {
-        wake_target: config.wake_target,
-        nan_dw_interval: config.nan_dw_interval,
-        now: config.now,
-        ap: config.ap,
-        ble: config.ble,
+/// The NAN wake handler converts the shared network configuration to the same
+/// intended-state struct used by native transport.set callers, before mutation.
+/// The wake handler validates shared transport fields before applying native policy.
+pub fn selection(kind: TransportKind, config: TransportConfig<'_>) -> Result<NanTransport,i32> {
+    let supported=TransportConfig {
+        wake_target:config.wake_target,nan_dw_interval:config.nan_dw_interval,
+        now:config.now,ap:config.ap,ble:config.ble,uart:config.uart,uart_mode:config.uart_mode,
+        uart_baud:config.uart_baud,radio_mode:config.radio_mode,
+        radio_frequency:config.radio_frequency,radio_bandwidth:config.radio_bandwidth,
+        radio_tx_power:config.radio_tx_power,radio_spreading_factor:config.radio_spreading_factor,
+        radio_coding_rate:config.radio_coding_rate,..Default::default()
+    };
+    if config!=supported {return Err(ERR_UNSUPPORTED);}
+    let request=NanTransport {
+        sta:u8::from(kind==TransportKind::Sta),
+        ble:config.ble.unwrap_or(255),uart:config.uart.unwrap_or(255),uart_mode:config.uart_mode.unwrap_or(255),
+        uart_baud:config.uart_baud.unwrap_or(0),radio_mode:config.radio_mode.unwrap_or(255),
+        cadence:config.nan_dw_interval.unwrap_or(0),now:config.now.unwrap_or(255),ap:config.ap.unwrap_or(u8::from(kind==TransportKind::Nan)),
+        radio_frequency:config.radio_frequency.unwrap_or(0),radio_bandwidth:config.radio_bandwidth.unwrap_or(0),
+        radio_power:config.radio_tx_power.unwrap_or(127),radio_sf:config.radio_spreading_factor.unwrap_or(0) as u32,
+        radio_cr:config.radio_coding_rate.unwrap_or(0) as u32,
         ..Default::default()
     };
-    if config != supported
-        || !matches!(kind, TransportKind::Sta | TransportKind::Nan)
-        || config.ble.is_some_and(|b| b != 0)
-    {
-        // Explicit BLE overrides and UART-only activation belong to their
-        // respective policy owners; do not acknowledge them as applied here.
-        return Err(ERR_UNSUPPORTED);
-    }
-    let dw = config
-        .nan_dw_interval
-        .map(u64::from)
-        .unwrap_or(crate::protocol::WAKE_DW);
-    if !matches!(dw, 1 | 8 | 16) {
-        return Err(ERR_UNSUPPORTED);
-    }
-    saved.radio = 1;
-    saved.sta = u8::from(kind == TransportKind::Sta);
-    if saved.sta != 0 && saved.sta_ssid_len == 0 && saved.bssid == [0; 6] {
-        return Err(ERR_ARG);
-    }
-    if let Some(ap) = config.ap {
-        saved.ap = ap;
-    }
-    if let Some(now) = config.now {
-        saved.now = u8::from(now != 2 || config.nan_dw_interval.is_some_and(|dw| dw != 0));
-    }
-    // BLE policy 0 is the shared default, not a request to disable BLE.
-    Ok((saved, dw))
+    request.validate()?;Ok(request)
 }
 
 /// Small fixed subset of control.transport.set used by the outbound wake.
 /// Kept allocation-free; tests compare byte-for-byte with the shared codec.
+/// Outbound wake transactions encode the shared control request without allocation.
 pub fn encode_activation(out: &mut [u8], target: [u8;6], nan: bool, id: u64) -> Option<usize> {
     let mut w=xip_abi::cbor::Writer::new(out);
     w.map(4).uint(1).uint(control::CONTROL_COMPONENT).uint(2).uint(control::TRANSPORT_SET)

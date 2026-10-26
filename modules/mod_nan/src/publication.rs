@@ -5,6 +5,8 @@ use xip_abi::{
     ERR_ARG,
 };
 
+/// HOST_START uses this to validate the optional opaque publication.
+
 pub fn start_record(data: &[u8]) -> Result<&[u8], i32> {
     if data.is_empty() {
         return Ok(&[]);
@@ -20,6 +22,7 @@ pub fn start_record(data: &[u8]) -> Result<&[u8], i32> {
 
 /// Announcements are observations, never another application handler request.
 /// Recognize only their envelope; interpretation/verification is a consumer job.
+/// The discovery dispatcher uses this to distinguish supplier publications from requests.
 pub fn is_announcement(packet: &[u8]) -> bool {
     tagged::decode(packet).is_some_and(|r| {
         r.component == Some(tagged::Name::Tag(announce::ANNOUNCE_COMPONENT))
@@ -41,6 +44,7 @@ pub fn is_announcement(packet: &[u8]) -> bool {
 
 /// Correlation is outside the signed facts. Copy those bytes exactly instead of
 /// decoding/re-encoding the announcement or depending on a certificate schema.
+/// Discovery reply preparation uses this to correlate an opaque supplier envelope.
 pub fn response(packet: &[u8], id: u64, out: &mut [u8]) -> Option<usize> {
     let r = tagged::decode(packet)?;
     if r.component != Some(tagged::Name::Tag(announce::ANNOUNCE_COMPONENT))

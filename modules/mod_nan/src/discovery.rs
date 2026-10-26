@@ -28,6 +28,7 @@ pub struct Discovery {
     recent: [Option<Recent>; 4],
 }
 impl Discovery {
+    /// HOST_START initializes bounded duplicate filtering and reply correlation.
     pub fn new(now: u64) -> Self {
         Self {
             pending: [None; 4],
@@ -38,6 +39,7 @@ impl Discovery {
     }
     /// Suppress duplicate callback/Subscribe work within a paired DW, not
     /// application retries in later windows. This is module protocol state.
+    /// Radio request dispatch rejects duplicate peer requests before creating work.
     pub fn admit_request(&mut self, path: ReturnPath, packet: &[u8], now: u64) -> bool {
         let fingerprint = dmesh_rawnan::fnv1a32(packet);
         if self.recent.iter().flatten().any(|r| {
@@ -68,6 +70,7 @@ impl Discovery {
         });
         true
     }
+    /// Application dispatch reserves a bounded token for a later peer reply.
     pub fn reserve(&mut self, path: ReturnPath, now: u64) -> Result<u64, i32> {
         let slot = self
             .pending
@@ -83,9 +86,11 @@ impl Discovery {
         Ok(self.next_token)
     }
     /// A peer waits for the answer to `token`.
+    /// Reply routing checks that a token still names a pending discovery request.
     pub fn pending(&self, token: u64) -> bool {
         self.pending.iter().any(|p| p.is_some_and(|p| p.token == token))
     }
+    /// Reply delivery consumes a token and recovers its original radio return path.
     pub fn take(&mut self, token: u64, now: u64) -> Option<ReturnPath> {
         let slot = self
             .pending

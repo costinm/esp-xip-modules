@@ -4,6 +4,12 @@
 extern crate alloc;
 #[cfg(test)]
 extern crate std;
+mod api_gen;
+mod power_gen;
+mod power_api;
+use api_gen::Api;
+mod report;
+mod companion;
 mod diagnostics;
 mod discovery;
 mod publication;
@@ -22,9 +28,12 @@ const C_SELF: i32 = 46;
 const TICK: i32 = 100;
 const ACQUIRE_RETRY: i32 = 101;
 const CONTINUE: i32 = RET_CONTINUE as i32;
-pub const STATE_BYTES: usize = 8;
+/// Runtime state reservation, including the hosted table.
+pub const STATE_BYTES: usize = 128;
 #[derive(Default)]
+/// Runtime-owned state; HOST_START allocates the reclaimable protocol context.
 pub struct State {
+    hosted: api_gen::Hosted,
     context: usize,
 }
 struct Context {
@@ -51,6 +60,15 @@ struct Context {
     tx: [Option<QueuedTx>; 4],
     sleep: sleep::Policy,
     sleep_original: Option<alloc::boxed::Box<WifiIntent>>,
+    cadence: u64,
+    usb: bool,
+    auto_sleep: bool,
+    ble_restore: Option<u8>,
+    radio_request: Option<alloc::vec::Vec<u8>>,
+    radio_suspended: bool,
+    usb_sleep: bool,
+    reports: report::Reports,
+    companion: Option<companion::Session>,
 }
 #[derive(Clone, Copy)]
 struct QueuedTx {
@@ -119,27 +137,15 @@ fn monitor(hw: &Hw, channel: u8, enabled: bool) -> i32 {
 }
 fn link(hw: &Hw, name: &core::ffi::CStr) -> Result<i32, i32> {
     let f = hw.link().and_then(|l| l.open).ok_or(ERR_UNSUPPORTED)?;
-    let rc = unsafe { f(hw.ctx(), name.as_ptr(), C_SELF, 0) };
-    if rc < 0 {
-        Err(rc)
-    } else {
-        // Resolve the native egress address without subscribing to arbitrary
-        // NOW traffic. Radio ingress arrives only on the virtual NAN port.
-        if let Some(close) = hw.link().and_then(|l| l.close) {
-            unsafe {
-                close(hw.ctx(), rc as u32);
-            }
-        }
-        Ok(rc)
-    }
+    // Hold the egress address across radio sleep/restart without subscribing
+    // to arbitrary NOW traffic. stop closes these references.
+    let rc = unsafe { f(hw.ctx(), name.as_ptr(), C_SELF, xip_abi::LINK_EGRESS) };
+    if rc < 0 { Err(rc) } else { Ok(rc) }
 }
 // An updater's netif must not be restarted by a module's channel hint.
 fn radio_intent(original: WifiIntent, channel: u8) -> Result<WifiIntent, i32> {
     if original.radio != 0 && (original.sta != 0 || original.ap != 0) {
-        if original.now == 0 {
-            return Err(ERR_UNSUPPORTED);
-        }
-        Ok(original)
+        Ok(WifiIntent {now:1,..original})
     } else {
         Ok(WifiIntent {
             radio: 1,
@@ -228,6 +234,7 @@ impl Context {
         ready
     }
     fn enter_sleepy(&mut self, hw: &Hw, trace: bool, cadence: u64) -> Result<(), i32> {
+        if (self.usb || serial_usb(hw)) && !self.usb_sleep { return Err(ERR_BUSY); }
         self.sleep.enable(hw, trace)?;
         if self.sleep_original.is_none() {
             let wifi = hw.wifi().ok_or(ERR_UNSUPPORTED)?;
@@ -245,12 +252,30 @@ impl Context {
             self.sleep_original = Some(saved);
             self.monitoring = false; // role change tears down/rebuilds the radio
         }
+        // Put application bearers in their coordinated low-power roles once;
+        // the runtime still owns each physical radio/sleep transition.
+        if let Err(rc) = self.quiet_transports(hw) {
+            self.leave_sleepy(hw);
+            return Err(rc);
+        }
         self.engine.wake_dw = cadence;
+        self.station = None;
         Ok(())
     }
     fn leave_sleepy(&mut self, hw: &Hw) {
         self.sleep.disable(hw);
         self.engine.wake_dw = protocol::WAKE_DW;
+        if let Some(mode) = self.ble_restore.take() {
+            if let Err(rc) = ble_mode(hw, mode) { self.engine.with_stats(|s|s.last_error=rc); }
+        }
+        if self.radio_suspended {
+            if let Some(request) = self.radio_request.as_ref() {
+                match lora_configure(hw,request) {
+                    Ok(()) => self.radio_suspended=false,
+                    Err(rc) => self.engine.with_stats(|s|s.last_error=rc),
+                }
+            }
+        }
         if let Some(original) = self.sleep_original.take() {
             if let Some(wifi) = hw.wifi() {
                 let mut current = WifiIntent::default(); let mut generation = 0;
@@ -360,24 +385,10 @@ impl Context {
     }
     fn activate_radio(&mut self, hw: &Hw, kind: dmesh_server::control::TransportKind,
         config: dmesh_server::control::TransportConfig<'_>, path: discovery::ReturnPath, now: u64) -> Result<(), i32> {
-        let wifi = hw.wifi().ok_or(ERR_UNSUPPORTED)?;
-        let mut current = WifiIntent::default(); let mut generation = 0;
-        let rc = unsafe { wifi.get.ok_or(ERR_UNSUPPORTED)?(hw.ctx(), &mut current, &mut generation) };
-        if rc < 0 { return Err(rc); }
-        // A newer native owner supersedes our saved snapshot.
-        let saved = if generation == self.generation { self.sleep_original.as_deref().copied().unwrap_or(current) } else { current };
-        let (intent, dw) = wake::intent(kind, config, saved)?;
-        let rc = unsafe { wifi.set.ok_or(ERR_UNSUPPORTED)?(hw.ctx(), &intent, &mut generation) };
-        if rc < 0 { return Err(rc); }
-        self.station=None;
-        let was_sleepy = self.sleep.enabled;
-        let trace = was_sleepy && self.sleep.tracing();
-        let changed = generation != self.generation;
-        self.sleep.disable(hw);
-        self.sleep_original = None;
-        self.generation = generation;
-        self.engine.wake_dw = dw;
-        if was_sleepy || changed { self.monitoring = false; }
+        let request=wake::selection(kind,config)?;
+        let trace=self.sleep.enabled && self.sleep.tracing();
+        self.transport(hw,&request)?;
+        let generation=self.generation;
         if trace {
             // Phase 3 means an accepted radio activation, not association/IP
             // readiness. Passive PPP observation avoids waking the target by UART.
@@ -551,11 +562,13 @@ impl Context {
         Ok(())
     }
     fn receive_message(&mut self, hw: &Hw, path: discovery::ReturnPath, payload: &[u8], now: u64, rssi: i8) {
+        let wrapped=dmesh_rawnan::parse_dmesh_nan_followup(payload.strip_prefix(&[0x50,0x6f,0x9a,2]).unwrap_or(payload)).is_some();
         let Some((payload, wake_only)) = wake::content(payload, self.engine.local)
             .or_else(|| wake::content(payload, self.sta_mac))
             .or_else(|| if self.ap_mac != [0;6] { wake::content(payload, self.ap_mac) } else { None }) else { return };
         // Type 2 cannot be used to smuggle an unrelated handler request.
         if wake_only && !matches!(self.wake_request(payload), Ok(Some(_))) { return; }
+        if wrapped {directed_activity(hw,payload);}
         self.remote_wake_peer(hw,path,payload,now);
         self.observation(hw, path, payload, now, rssi);
         if let Some(record) = dmesh_server::tagged::decode(payload) {
@@ -596,6 +609,7 @@ impl Context {
         if wire::is_nan_followup(data) {
             if !data.get(4..10).and_then(|m| m.try_into().ok()).is_some_and(|m| self.owns_mac(m)) { return; }
             if let Some(payload) = wire::followup_service_info(data, wire::DMESH_SERVICE_ID) {
+                directed_activity(hw,payload);
                 let instance = wire::service_descriptors(data)
                     .into_iter()
                     .find(|d| d.service_id == wire::DMESH_SERVICE_ID)
@@ -711,14 +725,24 @@ impl Context {
             hw.alarm_cancel(self.alarm);
         }
         let now = hw.now_us().unwrap_or(0);
+        let at=if self.auto_sleep && self.cadence!=0 && now<16_000_000 {at.min(16_000_000)} else {at};
         let ms = at.saturating_sub(now).div_ceil(1000).min(u32::MAX as u64) as u32;
         self.alarm = hw.alarm_set(ms.max(1), 0, 0, ALARM_EXACT | ALARM_WINDOW, C_SELF, method);
         if self.alarm < 0 {
             self.engine.with_stats(|s| s.last_error = self.alarm);
         }
     }
+    fn offline_report(&mut self, hw: &Hw) {
+        let mut data=[0;32];
+        if let Some(n)=self.reports.offline(hw.now_us().unwrap_or(0),&mut data) {self.emit_report(hw,&data[..n]);}
+    }
     fn arm(&mut self, hw: &Hw) {
-        if !self.radio_ready(hw) { self.schedule(hw, hw.now_us().unwrap_or(0) + 1_000_000, ACQUIRE_RETRY); return; }
+        // Acquisition must also advance bounded STA fallback while the radio is joining.
+        self.station_tick(hw,hw.now_us().unwrap_or(0));
+        // The boot deadline also applies when STA is off the NAN channel and
+        // capture cannot start. Quiet mode then releases STA and restores NAN.
+        self.boot_policy(hw);
+        if !self.radio_ready(hw) { self.offline_report(hw); self.schedule(hw, hw.now_us().unwrap_or(0) + 1_000_000, ACQUIRE_RETRY); return; }
         let called = hw.now_us().unwrap_or(0);
         let rc = monitor(hw, self.channel, true);
         if rc < 0 {
@@ -730,6 +754,9 @@ impl Context {
                 < 3_000_000
             {
                 self.schedule(hw, hw.now_us().unwrap_or(0) + 20_000, ACQUIRE_RETRY);
+            } else {
+                // A transient capture failure must not permanently stop synchronization.
+                self.schedule(hw,hw.now_us().unwrap_or(0)+1_000_000,ACQUIRE_RETRY);
             }
             return;
         }
@@ -785,9 +812,11 @@ impl Context {
         }
     }
     fn tick(&mut self, hw: &Hw) {
+        self.boot_policy(hw);
         self.station_tick(hw,hw.now_us().unwrap_or(0));
         self.expire_watches(hw, hw.now_us().unwrap_or(0));
         if !self.radio_ready(hw) {
+            self.offline_report(hw);
             let now=hw.now_us().unwrap_or(0);
             let next=self.station.as_ref().map_or(now+1_000_000,|p|p.next.max(now+1000).min(now+1_000_000));
             self.schedule(hw,next,TICK);return;
@@ -799,6 +828,7 @@ impl Context {
         };
         self.engine.tick(now);
         let mut plan = self.engine.plan(now);
+        self.reports.plan(&plan,now);
         let hold = self
             .engine
             .stats
@@ -827,6 +857,11 @@ impl Context {
                     s.close(returned);
                 }
             });
+        }
+        let mut report_data=[0;64];
+        let now_cluster=self.engine.nan.is_now_master() || (self.engine.master.is_some() && !self.engine.master_is_beacon);
+        if let Some(n)=self.reports.periodic(&plan,self.engine.nan.cluster().map(|m|m.0),now_cluster,&mut report_data) {
+            self.emit_report(hw,&report_data[..n]);
         }
         if self.remote_wake.as_ref().is_some_and(|w|now>=w.until) {self.clear_remote_wake(hw);}
         if self.remote_wake.as_ref().is_some_and(|w|if w.now {plan.sync}else{plan.public}) {self.remote_wake_tick(hw,now);}
@@ -943,6 +978,7 @@ impl Context {
     }
 }
 impl State {
+    /// The runtime calls at module start to acquire radio links and begin synchronization.
     fn start(&mut self, hw: &Hw, data: &[u8]) -> Result<(), i32> {
         hw.now_us().ok_or(ERR_UNSUPPORTED)?;
         let channel = cbor::get_int(data, 1).ok().flatten().unwrap_or(6);
@@ -1013,6 +1049,8 @@ impl State {
                 tx: [None; 4],
                 sleep: sleep::Policy::default(),
                 sleep_original: None,
+                cadence: boot_cadence(hw), usb: serial_usb(hw), auto_sleep: true,
+                ble_restore: None, radio_request: None, radio_suspended: false, usb_sleep: usb_sleep_allowed(hw), reports: report::Reports::default(), companion: None,
             });
         }
         self.context = ptr as usize;
@@ -1028,11 +1066,17 @@ impl State {
             self.stop(hw);
             return Err(rc);
         }
+        // Register the method without creating a TCP listener. Providers use the same stream API.
+        if let Some(listen)=hw.stream().and_then(|s|s.listen) {
+            let rc=unsafe {listen(hw.ctx(),C_SELF,12)};
+            if rc<0 {self.stop(hw);return Err(rc);}
+        }
         unsafe {
             (*ptr).schedule(hw, hw.now_us().unwrap() + 20_000, ACQUIRE_RETRY);
         }
         Ok(())
     }
+    /// The runtime calls before unload to cancel work, restore owned roles and free all state.
     fn stop(&mut self, hw: &Hw) {
         if self.context == 0 {
             return;
@@ -1040,6 +1084,7 @@ impl State {
         let ptr = self.context as *mut Context;
         self.context = 0;
         let cx = unsafe { &mut *ptr };
+        if let Some(session)=cx.companion.take() {session.dispose(hw);}
         cx.leave_sleepy(hw);
         if let Some(original)=cx.auto_reconnect_original {
             if let Some(f)=hw.wifi().and_then(|w|w.auto_reconnect) {unsafe {f(hw.ctx(),original);}}
@@ -1078,8 +1123,280 @@ impl State {
         hw.mem_free(ptr.cast());
     }
 }
+fn serial(hw: &Hw) -> Option<&Serial> {
+    let ptr=hw.get_component(c"serial").cast::<Serial>();
+    if ptr.is_null() {None} else {
+        let s=unsafe {&*ptr};
+        (s.version==1 && s.size as usize>=core::mem::size_of::<Serial>()).then_some(s)
+    }
+}
+fn serial_usb(hw: &Hw) -> bool {
+    serial(hw).and_then(|s|s.usb_connected).is_some_and(|f|unsafe {f(hw.ctx())}>0)
+}
+fn usb_sleep_allowed(hw: &Hw) -> bool {
+    serial(hw).and_then(|s|s.usb_sleep_allowed).is_some_and(|f|unsafe {f(hw.ctx())}>0)
+}
+fn lora(hw: &Hw) -> Result<&Lora,i32> {
+    let ptr=hw.get_component(c"lora").cast::<Lora>();
+    if ptr.is_null() {return Err(ERR_UNSUPPORTED);}
+    let table=unsafe {&*ptr};
+    if table.version!=1 || (table.size as usize)<core::mem::size_of::<Lora>() {return Err(ERR_UNSUPPORTED);}
+    Ok(table)
+}
+fn lora_configure(hw: &Hw, record: &[u8]) -> Result<(),i32> {
+    let rc=unsafe {lora(hw)?.configure.ok_or(ERR_UNSUPPORTED)?(hw.ctx(),record.as_ptr(),record.len())};
+    if rc<0 {Err(rc)} else {Ok(())}
+}
+fn lora_suspend(hw: &Hw) -> Result<(),i32> {
+    let rc=unsafe {lora(hw)?.suspend.ok_or(ERR_UNSUPPORTED)?(hw.ctx())};
+    if rc<0 {Err(rc)} else {Ok(())}
+}
+fn directed_activity(hw: &Hw, record: &[u8]) {
+    if let Some(p)=hw.power() {
+        if p.size as usize>=core::mem::size_of::<Power>() {
+            if let Some(f)=p.received {unsafe {f(hw.ctx(),record.as_ptr(),record.len(),1);}}
+        }
+    }
+}
+fn boot_cadence(hw: &Hw) -> u64 {
+    let mut v=[0;8];let n=hw.nv(b"cadence",None,&mut v);
+    if n<=0 {return 1;}
+    match &v[..(n as usize).min(v.len())] {
+        b"0"|b"1"=>1,b"8"=>8,b"16"=>16,b"17"=>0,_=>1,
+    }
+}
+fn ble_mode(hw: &Hw, mode: u8) -> Result<(),i32> {
+    let ptr=hw.get_component(c"ble").cast::<Ble>();
+    if ptr.is_null() {return Err(ERR_UNSUPPORTED);}
+    let b=unsafe {&*ptr};
+    if b.version!=1 || (b.size as usize)<core::mem::size_of::<Ble>() {return Err(ERR_UNSUPPORTED);}
+    let r=BleMode {mode,..Default::default()};
+    let rc=unsafe {b.mode.ok_or(ERR_UNSUPPORTED)?(hw.ctx(),&r)};
+    if rc<0 {Err(rc)} else {Ok(())}
+}
+impl Context {
+    fn set_sleepy(&mut self, hw: &Hw, enabled: bool, cadence: u64, trace: bool, immediate: bool) -> Result<(),i32> {
+        if enabled {
+            // Only explicit sleep bypasses packet/serial activity grace. Keep
+            // other modules' temporary work holds and the USB policy intact.
+            if immediate {
+                let f=hw.power().and_then(|p|p.activate).ok_or(ERR_UNSUPPORTED)?;
+                let rc=unsafe {f(hw.ctx(),0)};if rc<0 {return Err(rc);}
+            }
+            self.enter_sleepy(hw,trace,cadence)?;
+            self.cadence=cadence;
+        } else {self.leave_sleepy(hw);}
+        self.auto_sleep=enabled;
+        Ok(())
+    }
+    fn boot_policy(&mut self, hw: &Hw) {
+        // USB is also checked synchronously: a pending notification cannot admit sleep.
+        let usb=serial_usb(hw);
+        if usb && !self.usb_sleep {
+            self.usb=true;
+            if self.sleep.enabled {self.leave_sleepy(hw);}
+        }
+        if self.auto_sleep && (!self.usb || self.usb_sleep) && self.cadence!=0 && !self.sleep.enabled
+            && hw.now_us().unwrap_or(0)>=16_000_000 {
+            // Activity holds defer entry; do not clear the shared activity grace.
+            let mut info=PowerInfo::default();
+            if hw.power().and_then(|p|p.info).is_some_and(|f|unsafe {f(hw.ctx(),&mut info)}==0 && info.active_window!=0) {return;}
+            if let Err(rc)=self.enter_sleepy(hw,false,self.cadence) {self.engine.with_stats(|s|s.last_error=rc);}
+        }
+    }
+    fn quiet_transports(&mut self, hw: &Hw) -> Result<(),i32> {
+        // No BLE service is started just to suspend it. Native status reads are allocation-free.
+        if let Some(n)=hw.nimble() {
+            let mut status=BleStatus::default();
+            if n.status.is_some_and(|f|unsafe {f(hw.ctx(),&mut status)}==0) && status.mode==BLE_MODE_ALWAYS {
+                ble_mode(hw,BLE_MODE_RENDEZVOUS)?;
+                self.ble_restore=Some(status.mode);
+            }
+        }
+        if self.radio_request.is_some() && !self.radio_suspended {
+            lora_suspend(hw)?;
+            self.radio_suspended=true;
+        }
+        Ok(())
+    }
+    fn transport(&mut self, hw: &Hw, request: &NanTransport) -> Result<(),i32> {
+        request.validate()?;
+        let wifi=hw.wifi().ok_or(ERR_UNSUPPORTED)?;
+        let (get,set)=(wifi.get.ok_or(ERR_UNSUPPORTED)?,wifi.set.ok_or(ERR_UNSUPPORTED)?);
+        let mut current=WifiIntent::default();let mut generation=0;
+        let rc=unsafe {get(hw.ctx(),&mut current,&mut generation)};if rc<0 {return Err(rc);}
+        let saved=if generation==self.generation {self.sleep_original.as_deref().copied().unwrap_or(current)} else {current};
+        let mut intent=saved;
+        // Wi-Fi roles are independent patches; synchronization remains available.
+        intent.radio=1;intent.now=1;
+        if request.sta!=255 {intent.sta=request.sta;}
+        if intent.sta!=0 && intent.sta_ssid_len==0 && intent.bssid==[0;6] {return Err(ERR_ARG);}
+        if request.ap!=255 {intent.ap=request.ap;}
+        if request.now!=255 {intent.now=u8::from(request.now!=2 || matches!(request.cadence,1|8|16));}
+        // Sync remains the control plane even when NOW application traffic is disabled.
+        if intent.now==0 {return Err(ERR_UNSUPPORTED);}
+        let uart_baud=if request.uart_baud!=0 {request.uart_baud} else {match request.uart {0|1=>115200,6=>230400,7=>460800,9=>921600,255|8=>0,_=>return Err(ERR_UNSUPPORTED)}};
+        let serial=if request.uart!=255 || uart_baud!=0 {Some(serial(hw).ok_or(ERR_UNSUPPORTED)?)} else {None};
+        if let Some(s)=serial {if request.uart!=255 && s.mode.is_none() || uart_baud!=0 && s.baud.is_none() {return Err(ERR_UNSUPPORTED);}}
+        let radio=if request.radio_mode==1 || request.radio_mode==2 {
+            let mut data=alloc::vec![0;128];let mut w=Writer::new(&mut data);
+            let count=1+u64::from(request.radio_frequency!=0)+u64::from(request.radio_bandwidth!=0)
+                +u64::from(request.radio_sf!=0)+u64::from(request.radio_cr!=0)+u64::from(request.radio_power!=127);
+            w.map(count as usize).uint(0).text(if request.radio_mode==1 {"rx"}else{"fsk"});
+            if request.radio_frequency!=0 {w.uint(2).uint(request.radio_frequency as u64);}
+            if request.radio_bandwidth!=0 {w.uint(3).uint(request.radio_bandwidth as u64);}
+            if request.radio_sf!=0 {w.uint(4).uint(request.radio_sf as u64);}
+            if request.radio_cr!=0 {w.uint(25).uint(request.radio_cr as u64);}
+            if request.radio_power!=127 {w.uint(7).int(request.radio_power as i64);}
+            let len=w.finish().ok_or(ERR_SIZE)?.len();data.truncate(len);Some(data)
+        } else {None};
+        // Validate first; failures remain errors, never a successful intent ACK.
+        if request.ble!=255 && request.ble!=0 {
+            let ptr=hw.get_component(c"ble").cast::<Ble>();
+            if ptr.is_null() {return Err(ERR_UNSUPPORTED);}
+            let ble=unsafe {&*ptr};
+            if ble.version!=1 || (ble.size as usize)<core::mem::size_of::<Ble>() {return Err(ERR_UNSUPPORTED);}
+            let rc=if request.ble==2 {unsafe {ble.stop.ok_or(ERR_UNSUPPORTED)?(hw.ctx())}}
+                else {unsafe {ble.start.ok_or(ERR_UNSUPPORTED)?(hw.ctx(),&BleStart::default())}};
+            if rc<0 {return Err(rc);}
+        }
+        if let Some(s)=serial {
+            if uart_baud!=0 {let rc=unsafe {s.baud.unwrap()(hw.ctx(),uart_baud)};if rc<0 {return Err(rc);}}
+            if request.uart!=255 {let rc=unsafe {s.mode.unwrap()(hw.ctx(),u32::from(request.uart!=8))};if rc<0 {return Err(rc);}}
+        }
+        if request.radio_mode!=255 {
+            if let Some(data)=radio.as_ref() {lora_configure(hw,data)?;}
+            else {
+                if self.radio_request.is_some() {lora_suspend(hw)?;}
+                let rc=hw.module_stop(b"lora");if rc<0 && rc!=ERR_NOTFOUND {return Err(rc);}
+            }
+            self.radio_request=radio;self.radio_suspended=false;
+        }
+        let rc=unsafe {set(hw.ctx(),&intent,&mut generation)};if rc<0 {return Err(rc);}
+        if request.ble!=255 {self.ble_restore=None;}
+        self.usb_sleep=usb_sleep_allowed(hw);
+        self.usb=serial_usb(hw);
+        self.sleep_original=None;
+        self.generation=generation;
+        let cadence=if request.cadence==255 {self.engine.wake_dw} else if request.cadence==0 {protocol::WAKE_DW} else {request.cadence as u64};
+        self.leave_sleepy(hw);
+        self.generation=generation;self.station=None;self.monitoring=false;
+        self.engine.wake_dw=cadence;
+        self.auto_sleep=true;
+        Ok(())
+    }
+}
+impl Api for State {
+    /// Runtime USB transitions preserve sync and restore active transports on attachment.
+    fn usb(&mut self, hw: &Hw, connected: u32) -> Result<(),i32> {
+        if connected>1 {return Err(ERR_ARG);}
+        if self.context==0 {return Err(ERR_NOTFOUND);}
+        let cx=unsafe {&mut *(self.context as *mut Context)};
+        cx.usb=connected!=0;
+        if cx.usb && !cx.usb_sleep {cx.leave_sleepy(hw);} else {cx.auto_sleep=true;}
+        cx.tick(hw);Ok(())
+    }
+    /// Runtime sleep completion/UART activity re-arms capture and restores active roles.
+    fn wake(&mut self, hw: &Hw, cause: i32) -> Result<(),i32> {
+        if self.context==0 {return Err(ERR_NOTFOUND);}
+        let cx=unsafe {&mut *(self.context as *mut Context)};
+        let boundary=cx.sleep.wake(hw,cause);
+        if boundary {
+            let mut info=PowerInfo::default();
+            if let Some(f)=hw.power().and_then(|p|p.info) {unsafe {f(hw.ctx(),&mut info);}}
+            cx.reports.wake(hw.now_us().unwrap_or(0).saturating_sub(info.last_resume_us as u64));
+        }
+        if boundary || cause==4 || cause<0 {cx.monitoring=false;}
+        // UART opens a bounded runtime hold; persisted cadence resumes after it expires.
+        if !cx.sleep.enabled && cx.sleep_original.is_some() {cx.leave_sleepy(hw);}
+        cx.tick(hw);Ok(())
+    }
+    /// Local callers choose coordinated sleep; the remote sleepy request has the same semantics.
+    fn sleepy(&mut self, hw: &Hw, enabled: u32, cadence: u32, trace: u32, immediate: u32) -> Result<(),i32> {
+        if enabled>1 || trace>1 || immediate>1 || !matches!(cadence,1|8|16) {return Err(ERR_ARG);}
+        if self.context==0 {return Err(ERR_NOTFOUND);}
+        let cx=unsafe {&mut *(self.context as *mut Context)};
+        cx.set_sleepy(hw,enabled!=0,cadence as u64,trace!=0,immediate!=0)?;
+        cx.tick(hw);Ok(())
+    }
+    /// Publication suppliers replace opaque bytes without a handler message/ACK round trip.
+    fn set_announce(&mut self, _hw: &Hw, record: *const u8, len: usize) -> Result<(),i32> {
+        if self.context==0 {return Err(ERR_NOTFOUND);}
+        if len>255 || (len!=0 && record.is_null()) {return Err(ERR_ARG);}
+        let data=if len==0 {&[]} else {unsafe {core::slice::from_raw_parts(record,len)}};
+        unsafe {&mut *(self.context as *mut Context)}.engine.set_publication(data)
+    }
+    /// Direct wire requests and local native callers select managed transports through NAN policy.
+    fn transport_set(&mut self, hw: &Hw, request: *const NanTransport) -> Result<(),i32> {
+        if request.is_null() {return Err(ERR_ARG);}
+        if self.context==0 {return Err(ERR_NOTFOUND);}
+        let cx=unsafe {&mut *(self.context as *mut Context)};
+        cx.transport(hw,unsafe {&*request})?;cx.tick(hw);Ok(())
+    }
+}
+impl Context {
+    fn emit_report(&mut self,hw:&Hw,record:&[u8]) {
+        if let Some(session)=self.companion.as_ref() {
+            if let Err(rc)=session.report(hw,record) {
+                if !matches!(rc,ERR_BUSY|ERR_AGAIN|ERR_NOMEM) {
+                    if let Some(session)=self.companion.take() {session.dispose(hw);}
+                }
+            }
+        } else {report::emit(hw,record);}
+    }
+}
 impl Module for State {
-    fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
+    /// The runtime delivers transport-neutral stream events or ordinary module calls.
+    fn handle(&mut self,hw:&Hw,call:&CallView)->i32 {
+        if call.flags & CALL_STREAM!=0 {return self.companion_event(hw,call);}
+        self.handle_event(hw,call)
+    }
+}
+impl State {
+    fn reply_to(&mut self,hw:&Hw,call:&CallView,body:&[u8])->i32 {
+        hw.reply(call,body);CONTINUE
+    }
+    fn companion_event(&mut self,hw:&Hw,call:&CallView)->i32 {
+        if self.context==0 {return ERR_NOTFOUND;}
+        if call.component!=C_SELF || call.method!=12 {return ERR_UNSUPPORTED;}
+        let cx=unsafe {&mut *(self.context as *mut Context)};
+        match call.value {
+            STREAM_OPEN=>{
+                if cx.companion.is_some() {return ERR_BUSY;}
+                cx.companion=Some(companion::Session::new(call.id as u32));
+                let mut snapshot=[0;64];
+                let now=cx.engine.nan.is_now_master() || (cx.engine.master.is_some() && !cx.engine.master_is_beacon);
+                if let Some(n)=cx.reports.snapshot(cx.engine.nan.cluster().map(|m|m.0),now,&mut snapshot) {
+                    cx.emit_report(hw,&snapshot[..n]);
+                }
+                0
+            },
+            event=>{
+                if cx.companion.as_ref().is_none_or(|s|s.handle!=call.id as u32) {return ERR_NOTFOUND;}
+                match event {
+                    // A watch has no body. Peer FIN only closes its sending half.
+                    STREAM_FIN=>0,
+                    STREAM_CLOSED=>{cx.companion=None;0},
+                    STREAM_DATA if call.data.is_empty()=>0,
+                    STREAM_DATA=>{
+                        if let Some(session)=cx.companion.take() {session.dispose(hw);}
+                        ERR_UNSUPPORTED
+                    },
+                    _=>ERR_ARG,
+                }
+            }
+        }
+    }
+}
+impl State {
+    /// Lifecycle, datagram control and synchronization policy; stream events are handled above.
+    fn handle_event(&mut self, hw: &Hw, call: &CallView) -> i32 {
+        if call.is_host(HOST_TABLE) {
+            if call.data==b"nan" {
+                api_gen::provide::<State>(hw,call,core::ptr::addr_of_mut!(self.hosted),self as *mut State);
+            }
+            return CONTINUE;
+        }
         if call.is_host(HOST_START) {
             return match self.start(hw, call.data) {
                 Ok(()) => CONTINUE,
@@ -1090,8 +1407,26 @@ impl Module for State {
             self.stop(hw);
             return CONTINUE;
         }
+        if call.component == C_SELF && call.wants_response() && matches!(call.method,13..=15) {
+            let mut out = [0u8; 256];
+            match power_gen::dispatch(self, hw, call.method, call.data, &mut out) {
+                Ok(n) => return self.reply_to(hw,call,&out[..n]),
+                Err(rc) => {let mut out=[0;16];let mut w=Writer::new(&mut out);w.int(rc as i64);return self.reply_to(hw,call,w.finish().unwrap());}
+            }
+        }
         if self.context == 0 {
             return CONTINUE;
+        }
+        // Runtime routes component 1 directly here; other callers can use the
+        // hosted native method. Both entries share the same NAN policy.
+        if call.is_envelope() && call.component == 1 {
+            let result = if call.method == 4 {
+                NanTransport::decode(call.data).and_then(|request| self.transport_set(hw, &request))
+            } else { Err(ERR_UNSUPPORTED) };
+            match result {
+                Ok(()) => return self.reply_to(hw,call,&[0xa0]),
+                Err(rc) => {let mut out=[0;16];let mut w=Writer::new(&mut out);w.int(rc as i64);return self.reply_to(hw,call,w.finish().unwrap());}
+            }
         }
         let cx = unsafe { &mut *(self.context as *mut Context) };
         if call.is_host(HOST_NETWORK) {
@@ -1109,14 +1444,7 @@ impl Module for State {
             return CONTINUE;
         }
         if call.is_host(HOST_WAKE) {
-            let own_boundary = cx.sleep.wake(hw, call.value);
-            if own_boundary || call.value == 4 || call.value < 0 {
-                // Wi-Fi shutdown removed promiscuous RX. Preserve the TSF
-                // anchor, but force native receive re-arming before this DW.
-                cx.monitoring = false;
-            }
-            if !cx.sleep.enabled && cx.sleep_original.is_some() { cx.leave_sleepy(hw); }
-            cx.tick(hw);
+            let _=self.wake(hw,call.value);
             return CONTINUE;
         }
         if call.component == C_SELF && call.method == ACQUIRE_RETRY {
@@ -1165,8 +1493,10 @@ impl Module for State {
             let method = call.method;
             let mut out = [0u8; 1400];
             let n = if method == 1 {
+                // Clients query synchronization, sleep and driver state.
                 cx.status(hw, &mut out)
             } else if method == 2 {
+                // Developers query optional timing diagnostics.
                 if let Some(s) = cx.engine.stats.as_deref() {
                     s.encode(&mut out)
                 } else {
@@ -1175,12 +1505,14 @@ impl Module for State {
                     w.finish().map_or(0, |r| r.len())
                 }
             } else if method == 3 {
+                // Suppliers and clients read the current opaque publication.
                 let mut w = Writer::new(&mut out);
                 w.map(1)
                     .uint(1)
                     .bytes(&cx.engine.info[..cx.engine.info_len]);
                 w.finish().map_or(0, |b| b.len())
             } else if method == 4 {
+                // Discovery clients request one active subscription transmission.
                 let rc = cx.active_discovery(hw, hw.now_us().unwrap_or(0));
                 let mut w = Writer::new(&mut out);
                 match rc {
@@ -1192,14 +1524,20 @@ impl Module for State {
                     }
                 }
                 w.finish().map_or(0, |b| b.len())
+            } else if method == 12 {
+                // Operators query the current report; passive reporting does not issue requests.
+                let now_cluster=cx.engine.nan.is_now_master() || (cx.engine.master.is_some() && !cx.engine.master_is_beacon);
+                cx.reports.snapshot(cx.engine.nan.cluster().map(|m|m.0),now_cluster,&mut out).unwrap_or(0)
             } else if method == 11 {
                 let fields = call.data;
+                // Companion/module suppliers replace the cache without restarting sync.
                 let result = bytes(fields, 1).ok_or(ERR_ARG)
                     .and_then(|record| cx.engine.set_publication(record));
                 let mut w = Writer::new(&mut out);
                 match result { Ok(()) => { w.map(0); }, Err(rc) => { w.int(rc as i64); } }
                 w.finish().map_or(0, |b| b.len())
             } else if method == 10 {
+                // Clients extend or query a temporary shared awake hold.
                 let fields=call.data;
                 let ms=cbor::get_int(fields,1).ok().flatten().unwrap_or(-1);
                 let rc=if !(0..=300_000).contains(&ms) {ERR_ARG} else {
@@ -1208,6 +1546,7 @@ impl Module for State {
                 let mut w=Writer::new(&mut out);if rc<0 {w.int(rc as i64);}else{w.map(1).uint(1).uint(rc as u64);}
                 w.finish().map_or(0,|b|b.len())
             } else if method == 8 || method == 9 {
+                // Applications post discovery content (8) or request targeted remote activation (9).
                 let fields=call.data;
                 let result=(|| {
                     let via_now=match cbor::get(fields,3).ok().flatten().and_then(|mut r|r.next()) {None=>false,Some(Item::Bool(b))=>b,_=>return Err(ERR_ARG)};
@@ -1225,6 +1564,7 @@ impl Module for State {
                 let mut w=Writer::new(&mut out);match result {Ok(id)=>{w.map(1).uint(1).uint(id);},Err(rc)=>{w.int(rc as i64);}}
                 w.finish().map_or(0,|b|b.len())
             } else if method == 7 {
+                // Discovery clients register or cancel contextful observation streams.
                 let fields=call.data;
                 // a watch is its request: keyed by the envelope id (the runtime puts it on every event of the route)
                 let id=call.request_id.unwrap_or(call.id);
@@ -1232,6 +1572,7 @@ impl Module for State {
                 let mut w=Writer::new(&mut out);match rc {Ok(())=>{w.map(0);},Err(rc)=>{w.int(rc as i64);}}
                 w.finish().map_or(0,|b|b.len())
             } else if method == 6 {
+                // Operators explicitly arm or leave coordinated sleep.
                 let fields = call.data;
                 let result = (|| {
                     let enabled = match cbor::get(fields, 1).ok().flatten().and_then(|mut r| r.next()) {
@@ -1243,15 +1584,19 @@ impl Module for State {
                         Some(Item::Bool(on)) => on,
                         _ => return Err(ERR_ARG),
                     };
-                    let cadence = cbor::get_int(fields, 3).ok().flatten().unwrap_or(1);
+                    let cadence = cbor::get_int(fields, 3).map_err(|_|ERR_ARG)?.unwrap_or(boot_cadence(hw).max(1) as i64);
                     if !matches!(cadence, 1 | 8 | 16) { return Err(ERR_ARG); }
-                    if enabled { cx.enter_sleepy(hw, trace, cadence as u64)?; } else { cx.leave_sleepy(hw); }
+                    let immediate=match cbor::get(fields,4).map_err(|_|ERR_ARG)?.and_then(|mut r|r.next()) {
+                        None=>false,Some(Item::Bool(on))=>on,_=>return Err(ERR_ARG),
+                    };
+                    cx.set_sleepy(hw,enabled,cadence as u64,trace,immediate)?;
                     Ok::<_, i32>(())
                 })();
                 let mut w = Writer::new(&mut out);
                 match result { Ok(()) => { w.map(0); }, Err(rc) => { w.int(rc as i64); } }
                 w.finish().map_or(0, |b| b.len())
             } else if method == 5 {
+                // Applications queue an opaque record for a peer.
                 let fields = call.data;
                 let result = (|| {
                     let peer: [u8; 6] = bytes(fields, 1)
@@ -1302,8 +1647,7 @@ impl Module for State {
                 cx.tick(hw);
             }
             // an error is a bare negative integer: `7: error` in an envelope, wrapped by the runtime
-            hw.reply(call, &out[..n]);
-            return CONTINUE;
+            return self.reply_to(hw,call,&out[..n]);
         }
         if call.flags & CALL_LINK != 0 && call.flags & CALL_LINK_EVENT == 0 {
             let mut source = [0; 6];
@@ -1320,6 +1664,8 @@ impl Module for State {
             if cx.owns_mac(source) { return CONTINUE; }
             let before = cx.engine.nan.nan_sync_timing();
             cx.engine.receive(source, call.data, at, call.value as i8);
+            cx.reports.received(at,before!=cx.engine.nan.nan_sync_timing());
+            report::forward_to(source,call.data,call.value as i8,&mut |record|cx.emit_report(hw,record));
             cx.receive_radio_messages(hw, source, call.data, at, call.value as i8);
             if before != cx.engine.nan.nan_sync_timing() || cx.tx.iter().any(Option::is_some) {
                 cx.tick(hw);
@@ -1366,7 +1712,7 @@ mod lifecycle_tests {
         assert_eq!(want.sta_ssid, original.sta_ssid);
         assert_eq!(want.sta_psk, original.sta_psk);
         original.now = 0;
-        assert!(matches!(radio_intent(original, 6), Err(ERR_UNSUPPORTED)));
+        assert_eq!(radio_intent(original,6).unwrap().now,1);
         let want = radio_intent(WifiIntent::default(), 6).unwrap();
         assert_eq!(
             (want.radio, want.sta, want.ap, want.now, want.channel),
@@ -1386,6 +1732,10 @@ mod packet_lifetime_tests {
         busy: bool,
         sent: Vec<Vec<u8>>,
         sent_methods: Vec<i32>,
+        report_outputs: bool,
+        coc: bool,
+        sent_links: Vec<u32>,
+        sent_tokens: Vec<u64>,
         freed: usize,
         context_freed: usize,
         wifi: WifiIntent,
@@ -1394,6 +1744,20 @@ mod packet_lifetime_tests {
         reject_wifi: i32,
         actual: WifiState,
         monitor_changes: usize,
+        usb: bool,
+        now_us: u64,
+        nv_cadence: Vec<u8>,
+        active_window: bool,
+        cancelled: usize,
+        serial_mode: u32,
+        module_starts: Vec<Vec<u8>>,
+        module_stops: usize,
+        module_unloads: usize,
+        power_sleeps: Vec<(u32,u16,u16)>,
+        power_debug: Vec<u8>,
+        power_error: i32,
+        stream_attempts: Vec<(u32,usize)>,
+        stream_closes: Vec<u32>,
     }
     unsafe fn fixture<'a>(p: *mut core::ffi::c_void) -> &'a mut Fixture {
         &mut *p.cast()
@@ -1426,10 +1790,10 @@ mod packet_lifetime_tests {
         p: *mut core::ffi::c_void,
         id: u32,
         n: usize,
-        _: u32,
+        destination: u32,
         _: i32,
         method: i32,
-        _: u64,
+        token: u64,
     ) -> i32 {
         let f = fixture(p);
         if f.busy {
@@ -1437,7 +1801,7 @@ mod packet_lifetime_tests {
         }
         let data = f.packets.remove(&id).expect("send owns lease");
         f.sent.push(data[..n].to_vec());
-        f.sent_methods.push(method);
+        f.sent_methods.push(method);f.sent_links.push(destination);f.sent_tokens.push(token);
         0
     }
     unsafe extern "C" fn release_context(
@@ -1468,9 +1832,68 @@ mod packet_lifetime_tests {
     }
     static WIFI: Wifi = Wifi { version: WIFI_VERSION, size: core::mem::size_of::<Wifi>() as u32,
         get: Some(wifi_get), set: Some(wifi_set), state: None, scan: None, monitor: None, auto_reconnect:None,scan_channels:None };
-    unsafe extern "C" fn component(_: *mut core::ffi::c_void, name: *const core::ffi::c_char) -> *const core::ffi::c_void {
-        if core::ffi::CStr::from_ptr(name).to_bytes() == b"wifi" { (&WIFI as *const Wifi).cast() } else { core::ptr::null() }
+    unsafe extern "C" fn component(p: *mut core::ffi::c_void, name: *const core::ffi::c_char) -> *const core::ffi::c_void {
+        match core::ffi::CStr::from_ptr(name).to_bytes() {
+            b"stream" => (&COMPANION_STREAM as *const Stream).cast(),
+            b"wifi" => (&WIFI as *const Wifi).cast(),
+            b"serial" => (&SERIAL as *const Serial).cast(),
+            b"power" => (&POWER as *const Power).cast(),
+            b"lora" => (&LORA as *const Lora).cast(),
+            b"link" if fixture(p).report_outputs => (&REPORT_LINK as *const Link).cast(),
+            b"nimble" if fixture(p).report_outputs => (&REPORT_BLE as *const Nimble).cast(),
+            _ => core::ptr::null(),
+        }
     }
+    unsafe extern "C" fn companion_write(p:*mut core::ffi::c_void,handle:u32,packet:u32,n:u32,fin:u32)->i32 {
+        assert_eq!(fin,0);let f=fixture(p);let ptr=f.packets.get(&packet).unwrap().as_ptr() as usize;
+        f.stream_attempts.push((packet,ptr));send(p,packet,n as usize,handle,46,12,0)
+    }
+    unsafe extern "C" fn companion_close(p:*mut core::ffi::c_void,handle:u32)->i32 {fixture(p).stream_closes.push(handle);0}
+    unsafe extern "C" fn companion_listen(_: *mut core::ffi::c_void,component:i32,method:i32)->i32 {
+        assert_eq!((component,method),(46,12));0
+    }
+    static COMPANION_STREAM:Stream=Stream {version:STREAM_VERSION,size:core::mem::size_of::<Stream>() as u32,
+        listen:Some(companion_listen),write_pkt:Some(companion_write),close:Some(companion_close),..unsafe{core::mem::zeroed()}};
+    unsafe extern "C" fn report_open(_: *mut core::ffi::c_void, name: *const core::ffi::c_char, _: i32, _: i32) -> i32 {
+        ADDR_LINK as i32+if core::ffi::CStr::from_ptr(name).to_bytes()==b"ble" {20}else{21}
+    }
+    unsafe extern "C" fn report_close(_: *mut core::ffi::c_void, _: u32) -> i32 {0}
+    unsafe extern "C" fn report_ble(p: *mut core::ffi::c_void, out: *mut BleStatus) -> i32 {(*out).coc_connected=u8::from(fixture(p).coc);0}
+    static REPORT_LINK: Link=Link {version:LINK_VERSION,size:core::mem::size_of::<Link>() as u32,
+        open:Some(report_open),close:Some(report_close),..unsafe {core::mem::zeroed()}};
+    static REPORT_BLE: Nimble=Nimble {version:1,size:core::mem::size_of::<Nimble>() as u32,
+        status:Some(report_ble),..unsafe {core::mem::zeroed()}};
+    unsafe extern "C" fn usb(p: *mut core::ffi::c_void) -> i32 {fixture(p).usb as i32}
+    unsafe extern "C" fn mode(p: *mut core::ffi::c_void, mode: u32) -> i32 {fixture(p).serial_mode=mode;0}
+    unsafe extern "C" fn info(p: *mut core::ffi::c_void, out: *mut PowerInfo) -> i32 {let f=fixture(p);(*out).active_window=f.active_window as u8;(*out).sleep_entries=42;(*out).last_duration_us=4000000;f.power_error}
+    unsafe extern "C" fn activate(p: *mut core::ffi::c_void, ms: u32) -> i32 {fixture(p).active_window=ms!=0;0}
+    unsafe extern "C" fn cancel(p: *mut core::ffi::c_void) -> i32 {fixture(p).cancelled+=1;0}
+    unsafe extern "C" fn until(_: *mut core::ffi::c_void, _: u64, _: u32) -> i32 {0}
+    unsafe extern "C" fn policy_now(p: *mut core::ffi::c_void) -> u64 {fixture(p).now_us}
+    unsafe extern "C" fn policy_nv(p: *mut core::ffi::c_void, key: *const u8, n: usize, _: *const u8, _: usize, out: *mut u8, cap: usize) -> i32 {
+        assert_eq!(core::slice::from_raw_parts(key,n),b"cadence");
+        let data=&fixture(p).nv_cadence;
+        if data.len()>cap {return ERR_SIZE;}
+        core::ptr::copy_nonoverlapping(data.as_ptr(),out,data.len());data.len() as i32
+    }
+    unsafe extern "C" fn module_start(p: *mut core::ffi::c_void, _: *const u8, _: usize, data: *const u8, n: usize) -> i32 {
+        fixture(p).module_starts.push(core::slice::from_raw_parts(data,n).to_vec());0
+    }
+    unsafe extern "C" fn module_stop(p: *mut core::ffi::c_void, _: *const u8, _: usize) -> i32 {fixture(p).module_unloads+=1;0}
+    unsafe extern "C" fn radio_configure(p: *mut core::ffi::c_void, data: *const u8, n: usize) -> i32 {
+        fixture(p).module_starts.push(core::slice::from_raw_parts(data,n).to_vec());0
+    }
+    unsafe extern "C" fn radio_suspend(p: *mut core::ffi::c_void) -> i32 {fixture(p).module_stops+=1;0}
+    static LORA: Lora=Lora {version:1,size:core::mem::size_of::<Lora>() as u32,configure:Some(radio_configure),suspend:Some(radio_suspend)};
+    static SERIAL: Serial=Serial {version:1,size:core::mem::size_of::<Serial>() as u32,usb_connected:Some(usb),mode:Some(mode),baud:None,usb_sleep_allowed:None};
+    unsafe extern "C" fn power_sleep(p: *mut core::ffi::c_void, req: *const PowerSleep) -> i32 {
+        assert_eq!((*req).size as usize,core::mem::size_of::<PowerSleep>());
+        let f=fixture(p);f.power_sleeps.push(((*req).duration_ms,(*req).cycles,(*req).awake_ms));f.power_error
+    }
+    unsafe extern "C" fn locks(p: *mut core::ffi::c_void) -> i32 {let f=fixture(p);f.power_debug.push(3);f.power_error}
+    unsafe extern "C" fn tasks(p: *mut core::ffi::c_void) -> i32 {let f=fixture(p);f.power_debug.push(4);f.power_error}
+    static POWER: Power=Power {version:POWER_VERSION,size:core::mem::size_of::<Power>() as u32,
+        sleep:Some(power_sleep),info:Some(info),dump_locks:Some(locks),dump_tasks:Some(tasks),sleep_until:Some(until),cancel:Some(cancel),activate:Some(activate),awake_for:None,received:None};
     fn host(f: &mut Fixture) -> Host {
         let mut h: Host = unsafe { core::mem::zeroed() };
         h.abi_version = ABI_VERSION;
@@ -1482,7 +1905,49 @@ mod packet_lifetime_tests {
         h.send = Some(send);
         h.mem_free = Some(release_context);
         h.get_component = Some(component);
+        h.now_us=Some(policy_now);h.nv=Some(policy_nv);
+        h.module_start=Some(module_start);h.module_stop=Some(module_stop);
         h
+    }
+    fn companion_state()->State {
+        let p=unsafe{std::alloc::alloc(core::alloc::Layout::new::<Context>()).cast::<Context>()};
+        assert!(!p.is_null());unsafe{p.write(context());}
+        State{context:p as usize,..Default::default()}
+    }
+    fn companion_call(value:i32,data:&[u8])->CallView<'_>{
+        CallView{component:46,method:12,value,flags:CALL_STREAM,
+            data,time_us:0,pkt:0,from:48,id:77,request_id:Some(11)}
+    }
+    #[test]
+    fn report_stream_sends_bodies_and_keeps_output_after_peer_fin(){
+        let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe{Hw::new(&h)}.unwrap();let mut state=companion_state();
+        assert_eq!(state.handle(&hw,&companion_call(STREAM_OPEN,&[])),0);
+        assert_eq!(f.sent.len(),1);assert_eq!(cbor::get_int(&f.sent[0],1).unwrap(),Some(0));
+        assert_eq!(state.handle(&hw,&companion_call(STREAM_FIN,&[])),0);
+        let cx=unsafe{&mut*(state.context as *mut Context)};
+        cx.emit_report(&hw,&[0xa2,1,0,3,9]);assert_eq!(f.sent.last().unwrap(),&[0xa2,1,0,3,9]);
+        assert!(f.stream_closes.is_empty());assert!(f.packets.is_empty());
+        state.handle(&hw,&companion_call(STREAM_CLOSED,&[]));
+        assert!(unsafe{&*(state.context as *mut Context)}.companion.is_none());
+        state.stop(&hw);assert!(f.packets.is_empty());
+    }
+    #[test]
+    fn report_stream_drops_busy_observations_without_retry_or_backlog(){
+        let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe{Hw::new(&h)}.unwrap();let mut state=companion_state();
+        state.handle(&hw,&companion_call(STREAM_OPEN,&[]));f.busy=true;
+        let cx=unsafe{&mut*(state.context as *mut Context)};
+        cx.emit_report(&hw,&[0xa2,1,0,3,9]);assert!(f.packets.is_empty());assert_eq!(f.sent.len(),1);
+        f.busy=false;cx.emit_report(&hw,&[0xa2,1,0,3,10]);
+        assert_eq!(f.sent.len(),2);assert_eq!(f.sent.last().unwrap(),&[0xa2,1,0,3,10]);
+        state.stop(&hw);assert_eq!(f.stream_closes,[77]);assert!(f.packets.is_empty());
+    }
+    #[test]
+    fn report_stream_rejects_commands_without_allocating_input(){
+        let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe{Hw::new(&h)}.unwrap();let mut state=companion_state();
+        state.handle(&hw,&companion_call(STREAM_OPEN,&[]));let allocated=f.next;
+        assert_eq!(state.handle(&hw,&companion_call(STREAM_DATA,&[0xa0])),ERR_UNSUPPORTED);
+        assert_eq!(f.next,allocated);assert_eq!(f.stream_closes,[77]);assert!(f.packets.is_empty());
+        state.stop(&hw);
     }
     fn context() -> Context {
         let mut engine = Engine::new([1; 6], 1);
@@ -1505,6 +1970,171 @@ mod packet_lifetime_tests {
             tx: [None; 4],
             sleep: sleep::Policy::default(),
                 sleep_original: None,
+            cadence: 0, usb: false, auto_sleep: true, ble_restore: None,
+            radio_request: None, radio_suspended: false, usb_sleep: false, reports: report::Reports::default(), companion: None,
+        }
+    }
+    #[test]
+    fn reports_prefer_connected_coc_and_never_vote_for_activity() {
+        let record=[0xa2,1,0,5,0xf5];
+        for coc in [false,true] {
+            let mut f=Fixture {report_outputs:true,coc,..Default::default()};
+            let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+            report::emit(&hw,&record);assert_eq!(f.sent.len(),1);
+            assert!(!f.active_window);
+            assert_eq!(f.sent_links[0],ADDR_LINK+if coc {20}else{21});
+            if coc {
+                assert_eq!(&f.sent[0][..7],&[0xc0,0x44,0x4d,0,2,0,0]);
+                let env=&f.sent[0][7..];
+                assert_eq!(cbor::get_int(env,2).unwrap(),Some(12));
+                assert_eq!(item(env,6).unwrap(),record);
+            } else {assert_eq!(f.sent[0],record);assert_eq!(f.sent_tokens[0],PORT_NAN_REPORT as u64);}
+        }
+    }
+    #[test]
+    fn busy_report_output_drops_without_retaining_a_pool_lease() {
+        let mut f=Fixture {report_outputs:true,busy:true,..Default::default()};
+        let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+        report::emit(&hw,&[0xa1,1,0]);
+        assert!(f.sent.is_empty());assert!(f.packets.is_empty());assert_eq!(f.freed,1);
+    }
+    #[test]
+    fn forwarded_pub_sub_and_followups_preserve_payload_and_signed_signal() {
+        let mut f=Fixture {report_outputs:true,..Default::default()};
+        let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+        for (control,kind) in [(0x10,1),(0x11,2),(0x12,3)] {
+            let mut frame=[0;512];
+            let n=frames::sdf(&mut frame,[2;6],[0xff;6],[0x50,0x6f,0x9a,1,2,3],1,0,control,b"opaque").unwrap();
+            report::forward(&hw,[2;6],&frame[..n],-53);
+            let record=f.sent.last().unwrap();
+            assert_eq!(cbor::get_int(record,1).unwrap(),Some(kind));
+            assert_eq!(cbor::get_int(record,8).unwrap(),Some(-53));
+            assert_eq!(bytes(record,7).unwrap(),b"opaque");
+        }
+        assert_eq!(f.sent.len(),3);assert!(!f.active_window);
+    }
+    #[test]
+    fn boot_policy_has_grace_and_usb_veto_without_losing_sync() {
+        for cadence in [0,1,8,16] {
+            let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+            let mut cx=context();cx.cadence=cadence;
+            f.now_us=15_999_999;cx.boot_policy(&hw);assert!(!cx.sleep.enabled);
+            f.now_us=16_000_000;f.usb=true;cx.boot_policy(&hw);assert!(!cx.sleep.enabled);
+            f.usb=false;cx.usb=false;cx.boot_policy(&hw);
+            assert_eq!(cx.sleep.enabled,cadence!=0);
+            if cadence!=0 {assert_eq!(cx.engine.wake_dw,cadence);}
+            let anchor=cx.engine.started_us;
+            f.usb=true;cx.boot_policy(&hw);assert!(!cx.sleep.enabled);
+            assert_eq!(cx.engine.started_us,anchor);
+        }
+    }
+    #[test]
+    fn usb_sleep_opt_in_allows_cadence_without_treating_reattach_as_activity() {
+        let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+        let mut cx=context();cx.usb_sleep=true;cx.usb=true;cx.cadence=8;
+        f.usb=true;f.now_us=16_000_000;cx.boot_policy(&hw);
+        assert!(cx.sleep.enabled);assert_eq!(cx.engine.wake_dw,8);
+    }
+    #[test]
+    fn nv_cadence_defaults_to_one_and_seventeen_disables_sleep() {
+        let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+        for (value,want) in [(&b""[..],1),(&b"0"[..],1),(&b"1"[..],1),(&b"8"[..],8),(&b"16"[..],16),(&b"17"[..],0),(&b"bad"[..],1)] {
+            f.nv_cadence=value.to_vec();assert_eq!(boot_cadence(&hw),want);
+        }
+    }
+    #[test]
+    fn usb_veto_also_applies_to_explicit_sleep_and_activity_defers_boot() {
+        let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+        let mut cx=context();cx.cadence=8;f.now_us=16_000_000;
+        f.usb=true;assert_eq!(cx.enter_sleepy(&hw,false,8),Err(ERR_BUSY));assert_eq!(f.wifi_sets,0);
+        f.usb=false;f.active_window=true;cx.boot_policy(&hw);assert!(!cx.sleep.enabled);
+        f.active_window=false;cx.boot_policy(&hw);assert!(cx.sleep.enabled);
+    }
+    #[test]
+    fn public_power_methods_dispatch_without_console_or_nan_capture_context() {
+        let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+        let mut state=State::default();
+        for (method,data) in [(14,&[0xa3,1,0x19,1,0xf4,2,2,3,10][..]),(13,&[0xa0][..]),(15,&[0xa0][..])] {
+            let call=CallView {component:C_SELF,method,value:0,flags:1|CALL_ENVELOPE,data,
+                time_us:0,pkt:0,from:ADDR_LINK,id:12,request_id:Some(99)};
+            assert_eq!(state.handle(&hw,&call),CONTINUE);
+            let reply=f.sent.last().unwrap();
+            if method==13 {
+                assert_eq!(cbor::get_int(reply,13).unwrap(),Some(42));
+                assert_eq!(cbor::get_int(reply,16).unwrap(),Some(4000000));
+                assert_eq!(cbor::get_int(reply,27).unwrap(),Some(0));
+            } else {assert_eq!(reply,&[0xa0]);}
+        }
+        assert_eq!(f.power_sleeps,[(500,2,10)]);assert_eq!(f.power_debug,[3]);
+        f.power_error=ERR_BUSY;
+        let mut out=[0u8;256];
+        assert_eq!(power_gen::dispatch(&mut state,&hw,13,&[0xa0],&mut out),Err(ERR_BUSY));
+        assert_eq!(power_gen::dispatch(&mut state,&hw,99,&[0xa0],&mut out),Err(ERR_UNSUPPORTED));
+        assert_eq!(power_gen::dispatch(&mut state,&hw,14,&[0xa1,1,0x20],&mut out),Err(ERR_ARG));
+    }
+    #[test]
+    fn native_transport_patches_roles_and_uart_off_preserves_sync() {
+        let mut f=Fixture::default();f.wifi.ap=1;
+        let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();let mut cx=context();
+        cx.transport(&hw,&NanTransport {uart:8,..Default::default()}).unwrap();
+        assert_eq!(f.serial_mode,0);
+        assert_eq!((f.wifi.radio,f.wifi.now,f.wifi.sta,f.wifi.ap),(1,1,0,1));
+        cx.transport(&hw,&NanTransport {ap:0,..Default::default()}).unwrap();
+        assert_eq!(f.wifi.ap,0);assert_eq!(f.serial_mode,0);
+        assert_eq!(cx.enter_sleepy(&hw,false,8),Ok(()));
+    }
+    #[test]
+    fn direct_transport_envelope_uses_nan_policy_and_rejects_retired_fields() {
+        let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+        let ptr=std::boxed::Box::into_raw(std::boxed::Box::new(context()));
+        let mut state=State {context:ptr as usize,..Default::default()};
+        for (method,fields,error) in [
+            (4,&[0xa2,0x10,1,0x12,8][..],0),
+            (4,&[0xa1,1,6][..],ERR_ARG),
+            (4,&[0xa1,0x18,25,0x46,0,0,0,0,0,0][..],ERR_UNSUPPORTED),
+            (1,&[0xa0][..],ERR_UNSUPPORTED),
+        ] {
+            let call=CallView {component:1,method,value:0,flags:1|CALL_ENVELOPE,data:fields,
+                time_us:0,pkt:0,from:ADDR_LINK,id:12,request_id:Some(99)};
+            state.handle(&hw,&call);
+            let reply=f.sent.last().unwrap();
+            if error==0 {assert_eq!(reply,&[0xa0]);}
+            else {assert_eq!(cbor::Reader::new(reply).next().and_then(|v|v.as_int()),Some(error as i64));}
+            assert_eq!((f.wifi.ap,f.serial_mode),(1,0));
+        }
+        unsafe {drop(std::boxed::Box::from_raw(ptr));}
+    }
+    #[test]
+    fn boot_sleep_policy_runs_before_off_channel_capture_retry() {
+        unsafe extern "C" fn off_channel(p: *mut core::ffi::c_void, name: *const core::ffi::c_char) -> *const core::ffi::c_void {
+            if core::ffi::CStr::from_ptr(name).to_bytes()==b"wifi" {(&RADIO_WIFI as *const Wifi).cast()}
+            else {component(p,name)}
+        }
+        let mut f=Fixture {now_us:20_000_000,actual:WifiState {radio:1,sta:2,channel:1,..Default::default()},..Default::default()};
+        let mut h=host(&mut f);h.get_component=Some(off_channel);
+        let hw=unsafe {Hw::new(&h)}.unwrap();let mut cx=context();cx.cadence=8;
+        cx.arm(&hw);
+        assert!(cx.sleep.enabled,"off-channel association must not bypass the boot sleep deadline");
+        assert_eq!((f.wifi.sta,f.wifi.now,f.wifi.channel),(0,1,6));
+    }
+    #[test]
+    fn lora_and_fsk_start_records_are_valid_and_sleep_releases_owned_radio() {
+        for mode in [1,2] {
+            let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+            let mut cx=context();
+            cx.transport(&hw,&NanTransport {radio_mode:mode,radio_frequency:915_000_000,..Default::default()}).unwrap();
+            let record=&f.module_starts[0];
+            assert_eq!(cbor::get_text(record,0).unwrap().unwrap(),if mode==1 {&b"rx"[..]}else{&b"fsk"[..]});
+            assert_eq!(cbor::get_int(record,2).unwrap(),Some(915_000_000));
+            cx.enter_sleepy(&hw,false,8).unwrap();assert!(cx.radio_suspended);
+            cx.leave_sleepy(&hw);assert!(!cx.radio_suspended);assert_eq!(f.module_starts.len(),2);
+            assert_eq!(f.module_unloads,0,"sleep/restore must not queue a module stop");
+            cx.transport(&hw,&NanTransport {radio_mode:mode,..Default::default()}).unwrap();
+            assert_eq!(f.module_starts.len(),3);
+            assert_eq!(f.module_unloads,0,"role replacement is a direct call");
+            cx.transport(&hw,&NanTransport {radio_mode:0,..Default::default()}).unwrap();
+            assert_eq!(f.module_unloads,1);
+            assert!(cx.radio_request.is_none());
         }
     }
     unsafe extern "C" fn startup_now(_: *mut core::ffi::c_void) -> u64 { 1234 }
@@ -1521,6 +2151,7 @@ mod packet_lifetime_tests {
     static STARTUP_LINK: Link = Link {version:LINK_VERSION,size:core::mem::size_of::<Link>() as u32,open:Some(startup_link),..unsafe {core::mem::zeroed()} };
     unsafe extern "C" fn startup_component(_: *mut core::ffi::c_void, name:*const core::ffi::c_char) -> *const core::ffi::c_void {
         match core::ffi::CStr::from_ptr(name).to_bytes() {
+            b"stream" => (&COMPANION_STREAM as *const Stream).cast(),
             b"wifi" => (&WIFI as *const Wifi).cast(),
             b"link" => (&STARTUP_LINK as *const Link).cast(),
             b"identity" | b"psa" => panic!("NAN startup must not request identity or crypto"),
@@ -1555,7 +2186,7 @@ mod packet_lifetime_tests {
         let lease = cx.tx[0].unwrap().pkt;
         let clock = (cx.engine.nan.cluster(), cx.engine.master, cx.engine.started_us, cx.engine.wake_dw);
         let ptr = std::boxed::Box::into_raw(std::boxed::Box::new(cx));
-        let mut state = State { context: ptr as usize };
+        let mut state = State { context: ptr as usize, ..Default::default() };
         for (fields, expected) in [
             (&[0xa1,1,0x43,b'n',b'e',b'w'][..], 0),
             (&[0xa1,1,0x61,b'x'][..], ERR_ARG),
@@ -1586,11 +2217,36 @@ mod packet_lifetime_tests {
     }
 
     #[test]
+    fn hosted_table_calls_share_policy_and_publication_without_messages() {
+        let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+        let ptr=std::boxed::Box::into_raw(std::boxed::Box::new(context()));
+        let mut state=State {context:ptr as usize,..Default::default()};
+        let call=CallView {component:HOST_COMPONENT as i32,method:HOST_TABLE as i32,value:0,
+            flags:1,data:b"nan",time_us:0,pkt:0,from:ADDR_MAIN,id:1,request_id:None};
+        assert_eq!(state.handle(&hw,&call),CONTINUE);
+        let table=&state.hosted.table;
+        let ctx=core::ptr::addr_of!(state.hosted.ctx) as *mut core::ffi::c_void;
+        assert_eq!(unsafe {table.set_announce.unwrap()(ctx,b"native".as_ptr(),6)},0);
+        assert_eq!(unsafe {&*ptr}.engine.info_len,6);
+        f.usb=true;
+        assert_eq!(unsafe {table.usb.unwrap()(ctx,1)},0);
+        assert_eq!(unsafe {table.sleepy.unwrap()(ctx,1,8,0,0)},ERR_BUSY);
+        assert!(!unsafe {&*ptr}.sleep.enabled);
+        state.stop(&hw);
+    }
+    #[test]
+    fn immediate_sleep_clears_grace_but_ordinary_sleep_preserves_it() {
+        let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
+        let mut cx=context();f.active_window=true;
+        cx.set_sleepy(&hw,true,8,false,false).unwrap();assert!(f.active_window);
+        cx.set_sleepy(&hw,true,8,false,true).unwrap();assert!(!f.active_window);
+    }
+    #[test]
     fn sleepy_command_over_ppp_returns_a_success_result() {
         let mut f = Fixture::default(); let h = host(&mut f);
         let hw = unsafe { Hw::new(&h) }.unwrap();
         let ptr = std::boxed::Box::into_raw(std::boxed::Box::new(context()));
-        let mut state = State { context: ptr as usize };
+        let mut state = State { context: ptr as usize, ..Default::default() };
         // {1: 46, 2: 6, 3: 42, 5: {1: false}} as the runtime hands it over: method 6, the fields; it wraps the answer in the envelope
         let data = &[0xa1, 1, 0xf4];
         let call = CallView { component: C_SELF, method: 6, value: 0,
@@ -1666,6 +2322,7 @@ mod packet_lifetime_tests {
             .unwrap();
         }
         let mut state = State {
+            hosted: api_gen::Hosted::default(),
             context: ptr as usize,
         };
         state.stop(&hw);

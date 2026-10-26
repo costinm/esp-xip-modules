@@ -53,6 +53,7 @@ pub struct Stats {
     next: usize,
 }
 impl Stats {
+    /// Diagnostic startup allocates optional timing observations only when requested.
     pub fn new(wait_us: u64) -> Self {
         Self {
             wait_us,
@@ -60,6 +61,7 @@ impl Stats {
             ..Default::default()
         }
     }
+    /// The capture scheduler records the actual receive-window opening delay.
     pub fn open(&mut self, called: u64, enabled: u64, plan: &Plan) {
         self.samples[self.next] = Capture {
             called,
@@ -80,6 +82,7 @@ impl Stats {
         let c = &mut self.samples[(self.next + SAMPLES - 1) % SAMPLES];
         (c.closed == 0).then_some(c)
     }
+    /// The capture scheduler records completion of an observed receive window.
     pub fn close(&mut self, now: u64) {
         let missed = if let Some(c) = self.active() {
             c.closed = now;
@@ -89,6 +92,7 @@ impl Stats {
         };
         self.missed += u32::from(missed);
     }
+    /// Radio ingress records selected beacon timing for diagnostic queries.
     pub fn beacon(&mut self, source: [u8; 6], at: u64, tsf: u64, interval: u16, selected: bool) {
         self.beacons += 1;
         if selected {
@@ -117,6 +121,7 @@ impl Stats {
     }
     /// Called on each scheduler/receive turn. A miss extends an existing
     /// capture once; it never toggles the radio while waiting for a late beacon.
+    /// The NAN tick asks whether diagnostics require extending the receive window.
     pub fn hold_until(&mut self, now: u64, would_close: bool) -> Option<u64> {
         let wait = self.wait_us;
         let mut miss = false;
@@ -149,6 +154,7 @@ impl Stats {
     /// Retain advertised capability/availability from the selected beacon.
     /// Missing attributes remain empty; never infer DW0/DW8 from their absence.
     /// Bound malformed IE/TLV walks and expose truncation of large attributes.
+    /// Beacon ingress retains bounded capability attributes for troubleshooting.
     pub fn attributes(&mut self, source: [u8; 6], tsf: u64, frame: &[u8]) {
         self.capability_len = 0;
         self.availability_len = 0;
@@ -190,6 +196,7 @@ impl Stats {
             ies = &ies[2 + n..];
         }
     }
+    /// The tracking request handler serializes optional diagnostics for the caller.
     pub fn encode(&self, out: &mut [u8]) -> usize {
         let mut w = Writer::new(out);
         w.map(17)

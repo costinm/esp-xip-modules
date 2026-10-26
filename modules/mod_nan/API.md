@@ -5,6 +5,53 @@ port 246 (0xf6) receives NAN frames and NSY1 NOW bodies. QUIC stays on its norma
 bearer/router. See [current behavior](../../notes/ai/nan/README.md) and
 [troubleshooting](../../notes/ai/nan/TROUBLESHOOTING.md).
 
+The installed module auto-starts and maintains synchronization. ASCII NVS
+`cadence` missing/`0`/`1` selects one discovery-window cadence; `8` selects
+about four seconds (8 DW), `16` selects 16 DW, and `17` means never sleep.
+Sleep starts after 16 seconds uptime and at least five seconds since activity.
+A DW cadence unit is 512 TU (524.288 ms); 8 is 4.194304 seconds. No device name
+or power-meter board has special behavior.
+
+By default, attached USB Serial/JTAG vetoes sleepy mode entirely, including
+explicit `sleepy` requests. ASCII NV `usb.sleep=1` enables experimental USB PHY
+detach before physical sleep (read at boot/reopen). It stays detached across
+all timer/DW wakes. Only explicit serial-on selection by NAN `transport.set`
+reattaches it; explicit serial on vetoes USB sleep until serial is selected off.
+This does not repeatedly enumerate the host on each DW. Host recovery and power
+savings still require device testing. USB is detected from SOF even without an
+open terminal; power banks and external UART/USB bridges do not supply that
+state to the ESP Serial/JTAG peripheral.
+
+Local UART/USB bytes and the first physical UART wake byte immediately open a
+five-second activity grace, allowing the full packet to arrive. Network input
+votes only after decryption and full CBOR-envelope decoding in the runtime and
+selection of a local directed record. Broadcast discovery, malformed/trailing
+CBOR and nonlocal targets do not extend grace. Each accepted directed packet
+renews it. NAN transport adapters use native `Power.received` after selecting a
+local follow-up; ordinary runtime envelope delivery uses the same decoder.
+
+The `nan` hosted table has native policy and supplier calls documented in
+[API.local.md](API.local.md). The runtime calls USB/wake methods directly under
+the module lock. Contextful discovery/watch requests retain their remote handler.
+`transport.set` (component 1, method 4) routes directly to NAN through its
+manifest's additional envelope ownership. Independent STA/AP/NOW, BLE, UART and
+LoRa/FSK fields patch only the requested settings; there is no aggregate mode or
+wake target. Peer activation remains nan.wake, whose legacy targeted radio
+format is decoded only by the wake adapter. Unimplemented fields fail explicitly. Shared UART selector
+18 is default/baud (0/1/6/7/9) or off (8); other rates are unsupported by the
+current driver. Framing selector 28 accepts default/PPP (0/2). USB ignores baud;
+serial-on restores a detached PHY and serial-off gates application UART RX while
+preserving physical wake/recovery. BLE uses default/on/off (0/1/2). Radio mode is off/LoRa/FSK (0/1/2);
+FSK retains its fixed 100 kbit/s profile. Radio frequency/bandwidth/SF/CR/power
+settings require an explicit enabled radio mode. Transport admission is not
+association, radio initialization or receiver-side delivery completion. Failures
+are reported and may leave earlier independently applied transport changes.
+
+NAN puts BLE in rendezvous mode and synchronously suspends configured LoRa/FSK
+resources through its native table while sleepy; active transitions restore the
+role. Suspension keeps the module mapped; explicit radio off unloads it. Native C
+retains physical serial, BLE, SPI, pool and sleep mechanisms.
+
 Start parameters: CBOR map `{1: channel, 2: service_info, 3: diagnostics,
 4: miss_wait_ms, 5: lead_ms}`. Defaults: channel 6, empty publication, diagnostics false, miss wait 0, lead
 8 ms. Service information is opaque and at most 255 bytes. The companion or a
@@ -118,14 +165,16 @@ control slots are available. Discovery observation events never use this queue.
 |---:|---|---|---|
 | 1 | `enabled` | `bool` | Required; enable or leave sleepy policy. |
 | 2 | `trace` | `bool` | Default false; PPP sleep-boundary diagnostics. |
-| 3 | `cadence` | `uint` | Default 1; the wake period in 512-TU discovery windows: 1 (512 TU), 8 (DW0/DW8, 4096 TU) or 16 (8192 TU). Only read when enabling. |
+| 4 | `immediate` | `bool` | Default false; ignore the shared activity grace for this explicit sleep request. USB and other active-work vetoes still apply. |
+| 3 | `cadence` | `uint` | Defaults to the saved NV cadence (one DW if automatic sleep is disabled); the wake period in 512-TU discovery windows: 1 (512 TU), 8 (DW0/DW8, 4096 TU) or 16 (8192 TU). Only read when enabling. |
 
 Sleepy mode light-sleeps between the adjacent 16-TU NAN/NOW windows, which repeat
 every `cadence × 512 TU` (default 1: every 512 TU; 8 is the DW0/DW8 four-second
-cycle). Wi-Fi is NOW-only during timer wakes, with no IP listeners. UART or
-targeted NAN/NOW activation exits sleepy policy and restores active roles.
+cycle). Wi-Fi is NOW-only during timer wakes, with no IP listeners. Directed activity temporarily restores active roles; cadence resumes after its
+five-second grace. A targeted NAN/NOW activation applies shared transport policy.
 Temporary `awake` holds defer sleep without disabling the policy. Physical sleep
-needs an external UART board; attached USB-JTAG uses the soft path.
+needs an unplugged/UART device by default; `usb.sleep=1` enables experimental
+USB detach. A queued result does not prove physical sleep.
 
 ## 7. `watch` — fresh observations for a bounded interval
 
@@ -184,7 +233,7 @@ No pairing window or secret installation is opened by this operation.
 | 1 | `duration_ms` | `uint` | Required, 0..300000; zero queries without changing the deadline. |
 
 Returns `{1: remaining_ms}`. Other modules use native `Power.awake_for` directly.
-Renewal never shortens an existing hold. This is separate from UART activity
+Renewal never shortens an existing hold. This is separate from packet/serial activity
 and explicit active-mode transitions.
 
 ## 11. `set_announce` — replace cached publication without restarting
@@ -214,3 +263,146 @@ Trust/authorization and record freshness belong to the supplier/outer control
 path. Received radio announcements remain live observations for consumers,
 never requests to replace this cache. Stop/update discards the record; supply
 it again at startup or with this method.
+
+## 12. `report` — current compact radio timing snapshot
+
+**Response:** [Report](#report)
+
+Operators may query the most recent receive-window timing and current clock state. This
+request opens normal activity grace. Use the passive reports below when
+measuring sleep; NAN retains timing state only, with no observation history.
+
+On a runtime stream, the opening nan.report request registers one live report
+sink. The runtime parses and dispatches that opening request. NAN writes a CBOR
+sequence of Report bodies directly, without component/method/request-ID envelopes.
+The first observation is the current snapshot, followed by live timing/discovery
+reports. A slow reader loses observations; there is no event backlog or history.
+
+The module uses only the transport-neutral Stream table and events. QUIC is the
+current provider (including UART/BLE/UDP bearers); NAN creates no TCP listener
+and contains no socket adapter. A future provider can use the same interface.
+There are no commands or request bodies after the opening watch; extra input is
+rejected without input buffering. Client FIN half-closes its sending direction
+and reports continue. Full close or module stop releases the sink. Datagram
+nan.watch and one-shot nan.report remain separate existing APIs.
+
+## 13. `powerinfo` — The power state and the FreeRTOS numbers
+
+**C function:** power/Power.info
+
+**Access:** authenticated
+
+**Response:** [PowerInfo](#powerinfo)
+
+## 14. `powersleep` — Timer light sleep, a number of cycles
+
+**C function:** power/Power.sleep
+
+Returns at once; the sleeps run on the host worker with `awake_ms` awake between them so modules run. A rejected sleep (a power-management lock)
+restores the radio once and drops the rest of the request. With a USB-Serial/JTAG host attached, the runtime uses a soft wait and stops/restarts Wi-Fi; physical sleep requires UART or disconnected USB.
+
+**Execution:** non-blocking
+**Access:** any of `system`, `mesh.owner`, `mesh.admin`
+
+**Request:** [PowerSleep](#powersleep)
+
+### Errors
+
+| Error | Meaning |
+|---|---|
+| `invalid_argument` | A duration under 10 ms. |
+| `unavailable` | A request is already running. |
+
+## 15. `dump_locks` — Print the power-management locks to the device log
+
+**C function:** power/Power.dump_locks
+
+Who keeps the CPU frequency up or light sleep out (`esp_pm_dump_locks`).
+
+**Access:** any of `system`, `mesh.owner`, `mesh.admin`
+
+# Events
+
+## Live reports
+
+NAN emits a compact report near the start of each DW0 receive window: one per
+sixteen-DW cycle, approximately 8.39 seconds, independently of the configured
+sleep cadence. Without a usable radio clock, the retry paths emit an
+empty-cluster/no-timing report on the same interval using local uptime.
+UART uses PPP port 251 (`0xfb`) with the CBOR map below. If a BLE
+CoC is active it is preferred instead: the map is an unsolicited `nan.report`
+result envelope `{1:46,2:12,6:report}` in a native `0x444d0002` datagram. There is
+no request ID on these unsolicited reports. Android consumers should recognize
+that form separately from correlated request responses.
+
+# Types
+
+## `Report`
+
+The same schema covers periodic summaries and live observations; only relevant
+fields are present. Kind 0 contains fields 2..5. Observation kinds 1..4 contain
+fields 6..11. Observation records are opaque and untrusted.
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `kind` | `uint` | 0 DW0 summary, 1 PUB, 2 SUB, 3 Follow-up, 4 NOW Service Info. |
+| 2 | `cluster` | `bytes` | Last three bytes of cluster ID; empty if absent. |
+| 3 | `first_rx_ms` | `uint` | Wake/capture-open to first NAN/NOW RX, saturated to 65535 ms; omitted if none. Includes radio resume time after physical wake. |
+| 4 | `sync_ms` | `uint` | Wake/capture-open to first observed clock synchronization update; omitted if none. |
+| 5 | `now_cluster` | `bool` | Local NOW anchor or a selected NOW clock parent is active. |
+| 6 | `peer` | `bytes` | Source radio MAC, six bytes. |
+| 7 | `record` | `bytes` | Opaque service information. |
+| 8 | `rssi` | `int` | Signed received RSSI. |
+| 9 | `service` | `bytes` | Six-byte NAN service ID; omitted for NOW. |
+| 10 | `instance` | `uint` | NAN service instance; zero for NOW. |
+| 11 | `via_now` | `bool` | True for NOW Service Info. |
+
+These outputs do not create activity grace. Sending is best effort; full/busy
+outputs lose an observation rather than retaining work. UART emission is not
+yet gated on a host-watching indication. `dmesh-cli DEVICE watch` observes these
+reports passively and does not send a wake request.
+
+
+## `PowerSleep`
+
+**C type:** PowerSleep
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `duration_ms` | `u32` | Length of each sleep, milliseconds (at least 10). |
+| 2 | `cycles` | `u16` | How many sleeps; 0 is one. |
+| 3 | `awake_ms` | `u16` | Awake time between two sleeps so modules run (0: 50). |
+
+## `PowerInfo`
+
+**C type:** PowerInfo
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `state` | `u8` | 0 idle, 1 sleeping, 2 resuming (the radio is coming back), 3 awake between cycles. |
+| 2 | `pm_configured` | `u8` | ESP-IDF power management is configured (frequency scaling). |
+| 3 | `auto_light_sleep` | `u8` | Automatic light sleep when idle (otherwise sleep is explicit). |
+| 4 | `tickless_idle` | `u8` | FreeRTOS tickless idle is built in. |
+| 5 | `cpu_mhz` | `u16` | CPU frequency now. |
+| 6 | `min_mhz` | `u16` | Lowest frequency of the power configuration. |
+| 7 | `max_mhz` | `u16` | Highest frequency of the power configuration. |
+| 8 | `tick_hz` | `u16` | FreeRTOS tick rate. |
+| 9 | `cycles_left` | `u16` | Sleeps still to run for the request. |
+| 10 | `wake_cause` | `u8` | Why the last sleep ended (`esp_sleep_wakeup_cause_t`: 4 timer, 7 GPIO, 8 UART, 0 none). |
+| 11 | `promiscuous` | `u8` | Promiscuous receive is on. |
+| 12 | `sleep_attempts` | `u32` | Sleeps attempted. |
+| 13 | `sleep_entries` | `u32` | Sleeps that returned without error. |
+| 14 | `sleep_skipped` | `u32` | Sleeps rejected at once (a power-management lock). |
+| 15 | `last_requested_us` | `u32` | The last sleep: microseconds asked. |
+| 16 | `last_duration_us` | `u32` | The last sleep: microseconds it lasted. |
+| 17 | `last_resume_us` | `u32` | The last sleep: microseconds from wake until the radio was started again. |
+| 18 | `tasks` | `u32` | FreeRTOS tasks. |
+| 19 | `ticks` | `u32` | FreeRTOS tick count since boot. |
+| 20 | `heap_free` | `u32` | Internal heap free. |
+| 21 | `heap_min` | `u32` | Internal heap, lowest ever. |
+| 22 | `heap_largest` | `u32` | Internal heap, largest block. |
+| 23 | `filter_dropped` | `u32` | Frames the early receive filter dropped. |
+| 24 | `promisc_frames` | `u32` | Promiscuous frames delivered. |
+| 25 | `soft_sleep` | `u8` | How the last sleep was done: 1 soft, 0 physical. Soft while the console is on USB-Serial/JTAG with a host attached (light sleep powers that port down and the host does not recover the device): the radio is stopped and restarted around a plain delay and the CPU does not sleep. Physical with a UART console or no host. |
+| 26 | `active_window` | `u8` | A five-second activity interval from local serial bytes or a validated directed network record is still active. Modules decide sleep policy; querying this flag does not acquire a PM lock. |
+| 27 | `ip_sockets` | `u8` | Open runtime TCP sockets plus the default UDP listener. Zero during NAN/NOW-only sleepy windows. |

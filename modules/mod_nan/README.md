@@ -3,13 +3,13 @@
 NAN service discovery and clock synchronization.
 
 The runtime delivers radio frames through the module's virtual NAN port;
-there is no firmware-specific radio setup in the module. It follows the cluster
-clock on DW0/DW8 and sends NOW timing announcements on each wake, including
+there is no firmware-specific radio setup in the module.
+
+It follows the cluster clock on DW0/DW8 and sends NOW timing announcements on each wake, including
 when following a peer.
 
 Build with `scripts/build.sh esp32c6`; the package is `mod_nan.dmod`
-(`scripts/flash-serial.sh SERIAL --module-only mod_nan`). Start runtime module
-`nan` through console.start, then
+(`scripts/flash-serial.sh SERIAL --module-only mod_nan`). The installed module auto-starts;
 query `nan.status` for synchronization. Use `nan.watch` for fresh discovery
 observations; the module keeps no peer inventory. The module
 caches an opaque supplied announcement, answers compatible discovery requests, and exchanges NAN
@@ -32,10 +32,43 @@ remaining migration work, see the [NAN/NOW overview](../../notes/ai/nan/README.m
 and [troubleshooting](../../notes/ai/nan/TROUBLESHOOTING.md).
 
 Use the `nan.sleepy` command to arm sleep between paired discovery windows.
-UART input or a targeted Android-compatible NAN/NOW wake request returns it to awake mode. Optional PPP boundary records report the
-measured sleep and Wi-Fi restart; USB-JTAG uses a soft wait, so physical sleep
-validation requires an external UART. See [the API](API.md#6-sleepy--arm-or-leave-coordinated-sleep).
+The persisted `cadence` setting (missing/0/1: one DW, 8: about 4 seconds,
+16: sixteen DW, 17: never sleep) arms sleep after 16 seconds uptime and five
+seconds without activity. Local UART/USB bytes open grace immediately; network
+packets count only after decryption, valid CBOR decoding and local direction
+selection. Broadcast discovery never holds it awake. USB-JTAG attachment vetoes
+sleep by default. Experimental `usb.sleep=1` detaches before sleep and keeps the
+PHY detached across DW wakes until NAN transport.set explicitly selects serial
+on again. Optional PPP records report sleep and Wi-Fi restart; physical sleep
+and host recovery require hardware evidence. See [the API](API.md#6-sleepy--arm-or-leave-coordinated-sleep).
 
 The module reserves two consecutive link slots in `modules/SLOTS`; it remains
 one independently upgradable image. Multi-page images require a current loader
 and updater plus enough consecutive flash pages.
+
+Native commands can be invoked directly, such as `dmesh-cli lora1 nan.status`.
+Configured LoRa/FSK roles use the native `lora` table: sleepy entry synchronously
+quiesces radio resources, and activation restores the role. The module stays
+mapped during suspension; explicit radio off unloads it.
+The CLI wakes the UART companion and waits for an awake ACK first; `sleep`
+explicitly ignores activity grace and uses saved cadence. `watch` is passive:
+it displays compact DW0 summaries and live PUB/SUB/Follow-up observations.
+Reports prefer an active BLE CoC and otherwise use UART, without an output
+backlog or extra activity grace. See [the user guide](../../notes/docs/sleep_wakeup.md).
+
+`transport.set` reaches NAN directly through manifest component ownership,
+without the debug console. STA/AP and the other transport settings are
+independent patches; peer wake remains `nan.wake`.
+
+For live report bodies on a runtime stream, currently provided by QUIC:
+
+```sh
+dmesh-cli nan-stream DEVICE --seconds 30
+dmesh-cli nan-stream udp://DEVICE_IP:3339 --seconds 30
+```
+
+Only the opening nan.report request is sent. The CLI half-closes its sending
+side and reads report bodies; no further commands or response envelopes travel
+on this feed. Slow readers lose observations. NAN uses the common Stream API,
+with no TCP listener, socket handling or input buffer.
+The virtual IP interface is independent; NAN may enable it, while the runtime owns its packet handling.

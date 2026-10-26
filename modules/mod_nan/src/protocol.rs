@@ -48,6 +48,7 @@ pub struct Engine {
     acquiring: bool,
 }
 impl Engine {
+    /// HOST_START creates a synchronization engine with an initial acquisition interval.
     pub fn new(local: [u8; 6], now: u64) -> Self {
         Self {
             nan: NanState::new(MASTER_STALE_US),
@@ -69,6 +70,7 @@ impl Engine {
     }
     /// A supplier owns content/signing policy. A bounded copy into the active
     /// context is the only retained publication; no identity/certificate cache.
+    /// Supplier methods replace the opaque publication used by future transmissions.
     pub fn set_publication(&mut self, record: &[u8]) -> Result<(), i32> {
         if record.len() > INFO_MAX { return Err(xip_abi::ERR_SIZE); }
         self.info[..record.len()].copy_from_slice(record);
@@ -76,6 +78,7 @@ impl Engine {
         self.info_len = record.len();
         Ok(())
     }
+    /// Diagnostic startup enables optional timing storage without taxing ordinary operation.
     pub fn enable_stats(&mut self, wait_us: u64) -> bool {
         let ptr =
             unsafe { alloc::alloc::alloc(core::alloc::Layout::new::<Stats>()) }.cast::<Stats>();
@@ -88,14 +91,17 @@ impl Engine {
         }
         true
     }
+    /// Protocol and driver paths update counters only when diagnostics exist.
     pub fn with_stats(&mut self, f: impl FnOnce(&mut Stats)) {
         if let Some(s) = self.stats.as_mut() {
             f(s);
         }
     }
+    /// Native radio-state refresh keeps a local master aligned with its actual source MAC.
     pub fn local_source_changed(&mut self, source: [u8;6]) {
         if self.nan.is_now_master() { self.anchor_master = source; }
     }
+    /// Radio ingress feeds validated NAN/NOW observations into clock selection.
     pub fn receive(&mut self, source: [u8; 6], data: &[u8], at: u64, rssi: i8) {
         if source == self.local {
             return;
@@ -213,6 +219,7 @@ impl Engine {
         }
     }
     /// Acquisition is measured from capture becoming available, not radio setup.
+    /// The capture owner starts bounded clock acquisition after the radio becomes ready.
     pub fn acquire(&mut self, now: u64) {
         self.acquiring = true;
         self.acquire_until = now + ACQUIRE_US;
@@ -228,6 +235,7 @@ impl Engine {
             self.acquire(now);
         }
     }
+    /// The NAN scheduler advances clock expiry and acquisition state.
     pub fn tick(&mut self, now: u64) {
         self.expire_master(now);
         if self.nan.tick(now) == wire::Action::Rediscover {
@@ -246,6 +254,7 @@ impl Engine {
             self.nan_aligned = false;
         }
     }
+    /// The capture/sleep scheduler obtains the next TSF-aligned discovery windows.
     pub fn plan(&self, now: u64) -> Plan {
         if self.acquiring {
             return Plan {
@@ -309,14 +318,17 @@ impl Engine {
             acquiring: false,
         }
     }
+    /// The sender checks whether this device should emit synchronization announcements.
     pub fn emits_sync(&self) -> bool {
         // Every awake participant announces the selected clock. This is not a
         // claim to be master; receive admission uses originator flags above.
         self.nan.cluster().is_some() && !self.acquiring
     }
+    /// The sync sender encodes a NOW announcement using the current publication.
     pub fn now_body(&self, now: u64, out: &mut [u8]) -> Option<usize> {
         self.now_message(now, &self.info[..self.info_len], out)
     }
+    /// Control/data senders encode a NOW body with the current clock anchor.
     pub fn now_message(&self, now: u64, payload: &[u8], out: &mut [u8]) -> Option<usize> {
         if !self.emits_sync() {
             return None;
@@ -341,6 +353,7 @@ impl Engine {
         out[30..n].copy_from_slice(payload);
         Some(n)
     }
+    /// The publication sender encodes a NAN service frame for the current window.
     pub fn publish(&self, out: &mut [u8]) -> Option<usize> {
         let cluster = self.nan.cluster()?.0;
         let n = 43 + self.info_len;

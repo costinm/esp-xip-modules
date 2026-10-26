@@ -1,6 +1,7 @@
 //! Encode directly into a uniquely owned pool packet. No temporary frame Vec.
 use dmesh_rawnan as wire;
 /// SDEA Generic SSI, with the Android-compatible fixed nine-byte SDA.
+/// The discovery sender builds a bounded NAN Subscribe or Publish frame.
 pub fn sdf(
     out: &mut [u8],
     local: [u8; 6],
@@ -44,6 +45,7 @@ pub fn sdf(
     out[header..n].copy_from_slice(payload);
     Some(n)
 }
+/// Discovery replies build a normal application Follow-up for the observed peer.
 pub fn followup(
     out: &mut [u8],
     local: [u8; 6],
@@ -76,6 +78,7 @@ pub fn followup(
     p[24..].copy_from_slice(payload);
     Some(n)
 }
+/// The sender selects normal or Android activation Follow-up framing.
 pub fn followup_type(out: &mut [u8], local: [u8;6], dest: [u8;6], bssid: [u8;6], requestor: u8, sequence: u16, payload: &[u8], msg_type: u8) -> Option<usize> {
     let n=followup(out,local,dest,bssid,requestor,sequence,payload)?;
     out[54+3]=msg_type;

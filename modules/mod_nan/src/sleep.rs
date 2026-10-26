@@ -13,6 +13,7 @@ pub struct Policy {
     trace: bool,
 }
 impl Policy {
+    /// Activation replies query whether the operator requested boundary diagnostics.
     pub fn tracing(&self) -> bool { self.trace }
     fn power(hw: &Hw) -> Result<&'static Power, i32> {
         let p = hw.power().ok_or(ERR_UNSUPPORTED)?;
@@ -22,16 +23,17 @@ impl Policy {
         }
         Ok(p)
     }
+    /// NAN policy arms coordinated sleep while preserving decoded-packet activity grace.
     pub fn enable(&mut self, hw: &Hw, trace: bool) -> Result<(), i32> {
-        let p = Self::power(hw)?;
-        // This explicit command supersedes the UART activity that carried it.
-        let rc = unsafe { p.activate.unwrap()(hw.ctx(), 0) };
-        if rc < 0 { return Err(rc); }
+        Self::power(hw)?;
+        // Activity from the command is a real directed packet too; its grace
+        // expires naturally before native sleep can be admitted.
         self.enabled = true;
         self.trace = trace;
         self.resume_lead_us = RESUME_FLOOR_US;
         Ok(())
     }
+    /// NAN stop, USB attachment or activation cancels its pending sleep.
     pub fn disable(&mut self, hw: &Hw) {
         if self.enabled || self.waiting {
             if let Ok(p) = Self::power(hw) { unsafe { p.cancel.unwrap()(hw.ctx()); } }
@@ -39,13 +41,14 @@ impl Policy {
         self.enabled = false;
         self.waiting = false;
     }
+    /// The NAN scheduler requests native sleep only outside capture and owned work.
     pub fn between_windows(&mut self, hw: &Hw, plan: &Plan, pending: bool, now: u64) -> Result<bool, i32> {
         if !self.enabled || self.waiting || plan.capture || plan.acquiring || pending { return Ok(false); }
         let p = Self::power(hw)?;
         let mut info = PowerInfo::default();
         let rc = unsafe { p.info.unwrap()(hw.ctx(), &mut info) };
         if rc < 0 { self.disable(hw); return Err(rc); }
-        if info.active_window != 0 { self.disable(hw); return Ok(false); }
+        if info.active_window != 0 { return Ok(false); }
         if p.awake_for.is_some_and(|f| unsafe { f(hw.ctx(), 0) } > 0) { return Ok(false); }
         self.resume_lead_us = RESUME_FLOOR_US.max(info.last_resume_us as u64 + RESUME_MARGIN_US);
         let wake_at = plan.next_us.saturating_sub(self.resume_lead_us);
@@ -57,7 +60,8 @@ impl Policy {
         Ok(true)
     }
     /// Returns true only after our radio-off boundary, not for unrelated wake
-    /// notifications. UART activity leaves sleepy policy disabled until commanded.
+    /// notifications. Directed activity restores active roles until the shared grace expires.
+    /// Runtime wake delivery clears the pending boundary and checks activity vetoes.
     pub fn wake(&mut self, hw: &Hw, cause: i32) -> bool {
         let was_waiting = self.waiting;
         self.waiting = false;
@@ -95,7 +99,7 @@ mod tests {
     unsafe extern "C" fn awake_for(ctx: *mut c_void, _: u32) -> i32 { (*(ctx as *const Fixture)).held_ms }
     static POWER: Power = Power { version: POWER_VERSION, size: core::mem::size_of::<Power>() as u32,
         sleep: None, info: Some(info), dump_locks: None, dump_tasks: None,
-        sleep_until: Some(until), cancel: Some(cancel), activate: Some(activate), awake_for: Some(awake_for) };
+        sleep_until: Some(until), cancel: Some(cancel), activate: Some(activate), awake_for: Some(awake_for), received: None };
     unsafe extern "C" fn component(_: *mut c_void, name: *const c_char) -> *const c_void {
         if CStr::from_ptr(name).to_bytes() == b"power" { (&POWER as *const Power).cast() } else { core::ptr::null() }
     }
@@ -122,7 +126,8 @@ mod tests {
         let mut f = Fixture { active: true, resume_us: 150_000, ..Default::default() };
         let h = host(&mut f); let hw = unsafe { Hw::new(&h) }.unwrap();
         let mut p = Policy::default(); p.enable(&hw, true).unwrap();
-        assert!(!f.active);
+        assert!(f.active); // enabling never discards the command's activity grace
+        f.active=false;
         assert!(p.between_windows(&hw, &plan(), false, 1_000_000).unwrap());
         assert_eq!(f.deadline, 4_825_000); assert_eq!(f.flags, POWER_TRACE_UART);
         assert!(p.wake(&hw, 4)); assert!(p.enabled);
@@ -145,11 +150,12 @@ mod tests {
         let mut p = Policy::default(); p.enable(&hw, false).unwrap();
         f.active = true;
         assert!(!p.between_windows(&hw, &plan(), false, 1).unwrap());
-        assert!(!p.enabled);
+        assert!(p.enabled); // grace defers, rather than permanently disabling cadence
+        f.active=false;
         p.enable(&hw, false).unwrap();
         assert!(p.between_windows(&hw, &plan(), false, 1).unwrap());
         assert!(p.wake(&hw, 8)); assert!(!p.enabled); assert!(!p.waiting);
-        assert_eq!(f.cancelled, 2);
+        assert_eq!(f.cancelled, 1);
     }
     #[test]
     fn rejected_sleep_disarms_and_stopping_cancels_once() {

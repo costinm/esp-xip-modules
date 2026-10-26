@@ -9,6 +9,7 @@ pub struct Listener { pub route: Route, pub id: u64, pub until: u64 }
 #[derive(Default)]
 pub struct Watches { listeners: Vec<Listener> }
 impl Watches {
+    /// The watch request handler adds, renews or cancels the caller's observation route.
     pub fn register(&mut self, route: Route, id: u64, ms: u64, now: u64) -> Result<(), i32> {
         if ms > 300_000 { return Err(ERR_ARG); }
         if let Some(i) = self.listeners.iter().position(|s| s.route == route && s.id == id) { self.listeners.swap_remove(i); }
@@ -21,8 +22,11 @@ impl Watches {
         if self.listeners.is_empty() { self.listeners = Vec::new(); }
         Ok(())
     }
+    /// The NAN scheduler uses this to wake in time to expire subscriptions.
     pub fn next_expiry(&self) -> Option<u64> { self.listeners.iter().map(|s| s.until).min() }
+    /// Observation delivery reads the live routes without caching peer inventories.
     pub fn listeners(&self) -> &[Listener] { &self.listeners }
+    /// The NAN tick removes expired routes and sends their completion events.
     pub fn expire(&mut self, now: u64, mut send: impl FnMut(Listener)) {
         let mut i=0;
         while i < self.listeners.len() {
