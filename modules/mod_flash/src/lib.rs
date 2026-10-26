@@ -266,7 +266,7 @@ fn module_floor(hw: Hw, l: &Layout, view: &state::View, name: &[u8]) -> Result<O
         .iter()
         .enumerate()
         .filter(|(page, p)| p.as_ref().is_some_and(|p| p.first==*page && p.name() == name))
-        .filter_map(|(page, _)| view.minver_module[page])
+        .filter_map(|(page, _)| view.module_floor(page))
         .max())
 }
 /// `f(name, component, running, page)` for every module the host lists (`page`: the flash page of the image, key 12, when the host says);
@@ -502,6 +502,10 @@ impl Reply {
 }
 struct Connection {
     socket: u32,
+    stream: bool,
+    stream_provider:u32,
+    stream_fin: bool,
+    stream_reply: u32,
     session: Session,
     log: StateLog<Journal>,
     layout: Layout,
@@ -541,6 +545,10 @@ impl Connection {
         let l = layout(hw)?;
         Ok(Self {
             socket,
+            stream: false,
+            stream_provider:0,
+            stream_fin: false,
+            stream_reply: 0,
             session: Session::new(crate::crypto::Psa::from_host(hw).ok_or(wire::CRYPTO)?)?,
             log: StateLog::open(Journal {
                 hw,
@@ -595,6 +603,9 @@ impl Connection {
     }
     #[inline(always)]
     fn open(&mut self, hw: Hw, t: u8, name: &[u8], size: u32, version: u32, dry: bool) -> Result<(), Reject> {
+        // Firmware/recovery writes stop every other module; a QUIC upload
+        // cannot stop the module carrying that very stream. Start with modules.
+        if self.stream && t!=target::MODULE {return Err(wire::WRONG_TARGET);}
         self.target = t;
         self.size = size;
         self.dry = dry;
@@ -618,7 +629,7 @@ impl Connection {
             }
             target::MODULE => {
                 let (page, tag) = module_page(hw, &self.layout, name, version,size)?;
-                if tag == COMPONENT as u16 || name.len() > self.name.len() {
+                if tag == COMPONENT as u16 || (self.stream && self.stream_provider!=0 && tag as u32==self.stream_provider) || name.len() > self.name.len() {
                     return Err(wire::WRONG_TARGET);
                 }
                 self.page = page;
@@ -872,6 +883,10 @@ impl Connection {
         if self.reply.len != 0 || self.work != Work::None || self.waiting {
             return Ok(());
         }
+        if self.stream {
+            if self.stream_fin { self.stream_fin=false; self.eof()?; }
+            return Ok(());
+        }
         if self.rx == 0 {
             self.rx = match hw.pkt_alloc() {
                 Ok(p) => p,
@@ -893,6 +908,17 @@ impl Connection {
                 return Err(wire::SHORT_READ);
             }
             if n == 0 {
+                self.eof()?;
+                return Ok(());
+            }
+            self.rx_len = n as usize;
+            self.last = hw.now_ms();
+        }
+        let n = self.feed(hw, unsafe { core::slice::from_raw_parts(ptr.add(self.rx_at), self.rx_len-self.rx_at) })?;
+        self.rx_at += n;
+        Ok(())
+    }
+    fn eof(&mut self) -> Result<(), Reject> {
                 let action = self.session.eof()?;
                 match action {
                     Action::Commit {
@@ -908,6 +934,7 @@ impl Connection {
                         self.commit(target, version, &key)?;
                     }
                     Action::RequestLoader { dry } => {
+                        if self.stream {return Err(wire::WRONG_TARGET);}
                         self.reply.text(b"OK 0 request-loader");
                         if dry {
                             self.reply.text(b" dry");
@@ -921,13 +948,13 @@ impl Connection {
                     }
                     _ => return Err(wire::SHORT_READ),
                 }
-                return Ok(());
-            }
-            self.rx_len = n as usize;
-            self.last = hw.now_ms();
-        }
+        Ok(())
+    }
+    fn feed(&mut self, hw: Hw, bytes: &[u8]) -> Result<usize, Reject> {
+        if self.reply.len != 0 || self.work != Work::None || self.waiting { return Ok(0); }
+        self.last = hw.now_ms();
         let step = self.session.feed(
-            unsafe { core::slice::from_raw_parts(ptr.add(self.rx_at), self.rx_len - self.rx_at) },
+            bytes,
             &Rules {
                 view: &self.log.view,
                 auth: self.auth,
@@ -941,12 +968,12 @@ impl Connection {
         let start = self.fed.max(header_at);
         let end = (self.fed + step.consumed).min(header_at + wire::HEADER_SIZE);
         if end > start {
-            let from = self.rx_at + start - self.fed;
-            let bytes = unsafe { core::slice::from_raw_parts(ptr.add(from), end-start) };
+            let from = start - self.fed;
+            let bytes = &bytes[from..from+end-start];
             self.signed_header[start-header_at..end-header_at].copy_from_slice(bytes);
         }
         self.fed += step.consumed;
-        self.rx_at += step.consumed;
+        let consumed=step.consumed;
         match step.action {
             Some(Action::Open {
                 target,
@@ -969,12 +996,12 @@ impl Connection {
                 self.base = self.origin + index * 4096;
             }
             _ => {
-                if step.consumed == 0 && self.rx_at < self.rx_len {
+                if step.consumed == 0 && step.consumed < bytes.len() {
                     return Err(wire::BAD_LENGTH);
                 }
             }
         }
-        Ok(())
+        Ok(consumed)
     }
     fn trace(&mut self, hw: Hw) {
         let now = hw.now_ms();
@@ -1010,6 +1037,22 @@ impl Connection {
             }
         }
         if self.reply.len != 0 {
+            if self.stream {
+                let Some(table)=hw.stream() else{return true;};
+                if self.stream_reply==0 {
+                    let Ok(pkt)=hw.pkt_alloc() else { return false; };
+                    self.stream_reply=pkt;
+                    let Ok((p,cap))=hw.pkt_buf(pkt) else { return true; };
+                    if self.reply.len>cap { return true; }
+                    // A small protocol reply is encoded once into its outgoing lease.
+                    unsafe { core::ptr::copy_nonoverlapping(self.reply.bytes.as_ptr(),p,self.reply.len); }
+                }
+                let rc=unsafe { table.write_pkt.unwrap()(hw.ctx(),self.socket,self.stream_reply,self.reply.len as u32,1) };
+                if rc==ERR_BUSY || rc==ERR_NOMEM { return false; }
+                if rc<0 { return true; }
+                self.stream_reply=0;
+                return true;
+            }
             let n = hw.socket_write(
                 self.socket,
                 &self.reply.bytes[self.reply.at..self.reply.len],
@@ -1076,7 +1119,8 @@ impl State {
         if !self.connection.is_null() {
             unsafe {
                 let c = &mut *self.connection;
-                hw.socket_close(c.socket);
+                if !c.stream { hw.socket_close(c.socket); }
+                if c.stream_reply!=0 { hw.pkt_free(c.stream_reply); }
                 if c.rx != 0 {
                     hw.pkt_free(c.rx);
                 }
@@ -1110,6 +1154,35 @@ impl Module for State {
             self.started = false;
             self.status_published = false;
             return 0;
+        }
+        if call.flags & xip_abi::CALL_STREAM != 0 {
+            if call.component!=COMPONENT || call.method!=1 { return xip_abi::ERR_UNSUPPORTED; }
+            match call.value {
+                xip_abi::STREAM_OPEN => {
+                    if !self.started {return ERR_BUSY;}
+                    if !self.connection.is_null() { return ERR_BUSY; }
+                    let memory=hw.mem_alloc(core::mem::size_of::<Connection>()).cast::<Connection>();
+                    if memory.is_null() { return ERR_NOMEM; }
+                    match Connection::new(*hw,call.id as u32,self.auth) {
+                        Ok(mut c)=>{c.stream=true;c.stream_provider=call.from; unsafe {memory.write(c);} self.connection=memory;},
+                        Err(_)=>{hw.mem_free(memory.cast());return xip_abi::ERR_IO;}
+                    }
+                    return 0;
+                }
+                _=>{
+                    if self.connection.is_null() { return xip_abi::ERR_NOTFOUND; }
+                    let c=unsafe { &mut *self.connection };
+                    if !c.stream || c.socket!=call.id as u32 { return xip_abi::ERR_NOTFOUND; }
+                    match call.value {
+                        xip_abi::STREAM_DATA=>return match c.feed(*hw,call.data) {
+                            Ok(n)=>n as i32, Err(r)=>{c.fail(r);0}
+                        },
+                        xip_abi::STREAM_FIN=>c.stream_fin=true,
+                        xip_abi::STREAM_CLOSED=>{self.dispose(*hw);return 0;},
+                        _=>return xip_abi::ERR_ARG,
+                    }
+                }
+            }
         }
         if call.component == COMPONENT
             && call.method == IO

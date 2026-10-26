@@ -361,7 +361,7 @@ fn fragmented_module_upload_commits_state_before_block_zero() {
         .unwrap();
     assert!(last_state < first_head);
     let persisted = StateLog::open(Raw(f.flash[0xee000..0xf0000].to_vec()));
-    assert_eq!(persisted.view.minver_module[0], Some(2));
+    assert_eq!(persisted.view.module_floor(0), Some(2));
 }
 #[test]
 fn bad_signature_and_dry_run_never_erase() {
@@ -574,8 +574,8 @@ fn a_module_goes_to_the_first_free_page_never_over_its_installed_version() {
     assert!(written_page(&f, 2, &image));
     assert_eq!(&f.flash[0x380000 + 3 * 0x10000..][..80], old.as_slice(), "the installed version is not touched");
     let persisted = StateLog::open(Raw(f.flash[0xee000..0xf0000].to_vec()));
-    assert_eq!(persisted.view.minver_module[2], Some(2), "the journal entry follows the page of the image");
-    assert_eq!(persisted.view.minver_module[3], None);
+    assert_eq!(persisted.view.module_floor(2), Some(2), "the journal entry follows the page of the image");
+    assert_eq!(persisted.view.module_floor(3), None);
     assert_eq!(f.rescans, 1, "the loader is asked to look again after the commit");
     // a new module takes the first page that is not a module
     let mut f = Fake::new(&image, target::MODULE, false);
@@ -627,7 +627,7 @@ fn with_no_free_page_the_oldest_shadowed_page_is_reused() {
     assert!(done, "{:?}", f.out);
     assert!(written_page(&f, 2, &image), "the lowest shadowed version (test v1) goes first");
     let persisted = StateLog::open(Raw(f.flash[0xee000..0xf0000].to_vec()));
-    assert_eq!(persisted.view.minver_module[2], Some(5));
+    assert_eq!(persisted.view.module_floor(2), Some(5));
     // the next one: test v3 on page 4 is now the lowest shadowed version of all (b v2 is 2, below it)
     let pages = read_pages_of(&f);
     assert_eq!(choose_page(&pages, b"test", 6, 0).unwrap().0, 7, "b v2 (page 7) is the oldest shadowed image now");
@@ -873,4 +873,46 @@ fn expanded_module_partition_admits_and_protects_high_pages() {
     assert!(choose_span(&pages,b"other",1,protected,4,24).is_err(),"running high-page head protects its entire four-page image");
     let mut journal=StateLog::open(Raw(vec![255;8192]));assert!(journal.append_module_version(20,77));
     assert_eq!(module_floor(hw,&l,&journal.view,b"quic").unwrap(),Some(77));
+}
+
+unsafe extern "C" fn stream_reply(u:*mut core::ffi::c_void,_:u32,pkt:u32,len:u32,fin:u32)->i32 {
+    assert_eq!(fin,1);
+    let f=f(u);
+    let bytes=f.packets.remove(&pkt).expect("reply transfers exact owned packet");
+    f.out.extend_from_slice(&bytes[..len as usize]);0
+}
+static STREAM:xip_abi::Stream=xip_abi::Stream{listen:None,version:1,size:core::mem::size_of::<xip_abi::Stream>() as u32,
+    open:None,feed:None,close:None,write_pkt:Some(stream_reply),take:None,written:None};
+unsafe extern "C" fn stream_components(u:*mut core::ffi::c_void,name:*const core::ffi::c_char)->*const core::ffi::c_void {
+    if core::ffi::CStr::from_ptr(name).to_bytes()==b"stream" {(&STREAM as *const xip_abi::Stream).cast()}
+    else {crate::psa_test::get_component(u,name)}
+}
+#[test]
+fn stream_upload_matches_tcp_commit_and_rejects_corruption_without_socket_reads() {
+    for corrupt in [false,true] {
+        let image=module_image();
+        let mut tcp=Fake::new(&image,target::MODULE,false);
+        if corrupt {*tcp.input.last_mut().unwrap()^=1;}
+        let (_,done)=run(&mut tcp);assert!(done);
+        let mut f=Fake::new(&image,target::MODULE,false);
+        f.input=tcp.input.clone();
+        let mut h=f.host();h.get_component=Some(stream_components);
+        h.socket_read=None;h.socket_write=None;
+        let hw=unsafe{Hw::new(&h)}.unwrap();
+        let mut c=Connection::new(hw,99,f.auth).unwrap();c.stream=true;
+        let input=f.input.clone();let mut at=0;let mut done=false;
+        for _ in 0..10000 {
+            if let Some((id,rc))=f.job.take(){assert_eq!(id,c.job);c.waiting=false;if rc<0{c.fail(wire::FLASH);}else if c.work==Work::Erase{c.session.opened(true).unwrap();c.work=Work::None;}}
+            if at<input.len(){
+                match c.feed(hw,&input[at..(at+37).min(input.len())]){Ok(n)=>at+=n,Err(r)=>c.fail(r)}
+            }else if !c.stream_fin {c.stream_fin=true;}
+            if c.advance(hw){done=true;break;}
+        }
+        assert!(done,"stream upload must finish even while asynchronous flash work applies backpressure");
+        assert_eq!(f.out,tcp.out);
+        assert_eq!(f.flash,tcp.flash,"both transports have identical durable flash and journal state");
+        assert_eq!(f.rescans,tcp.rescans);
+        assert_eq!(c.rx,0,"QUIC body must never allocate a socket read packet");
+        assert!(f.packets.is_empty(),"reply lease transfers once and is reclaimed");
+    }
 }

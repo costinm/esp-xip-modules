@@ -1,6 +1,7 @@
 # mod_flash
 
-Install signed firmware/module packages over TCP port 5227 during development.
+Install signed firmware/module packages over TCP port 5227, or module packages
+over QUIC streams.
 The module accepts one upload at a time and is included in the normal module
 build. The default mode requires a trusted signing key provisioned on the device.
 
@@ -9,7 +10,7 @@ From the repository root:
 ```sh
 . ./env.sh
 scripts/build.sh esp32c6
-python3 tools/flash_upload.py --help
+dmesh-cli flash --help
 ```
 
 Choose authentication when starting `flash` through `console.start`:
@@ -45,3 +46,5 @@ Main, loader and Stage2 updates require a restart.
 See [the flashing guide](../../notes/docs/flashing.md) for package preparation
 and upload steps, and [module troubleshooting](../../notes/ai/modules/TROUBLESHOOTING.md)
 for placement, inspection and recovery.
+
+QUIC upload commands: [UART, UDP and NOW relay](../../notes/docs/quic_flash.md).

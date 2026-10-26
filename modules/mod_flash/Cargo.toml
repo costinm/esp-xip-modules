@@ -6,7 +6,7 @@ license = "Apache-2.0"
 publish = false
 
 [package.metadata]
-# component 44 (no API.md: no console methods); stream port 2 = TCP 5227 (PORT_NET + 2), open from boot
+# component 44; upload is stream-only. Stream port 2 = TCP 5227 (PORT_NET + 2), open from boot
 mkmod = "--name flash --tag 44 --stack 12288 --state 128 --stream 2 --autostart"
 
 [workspace]

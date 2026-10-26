@@ -44,7 +44,10 @@ pub(crate) struct View {
     pub(crate) minver: Option<u32>,
     pub(crate) minver_loader: Option<u32>,
     pub(crate) minver_stage2: Option<u32>,
-    pub(crate) minver_module: [Option<u32>; MODULE_SLOTS],
+    // Match the native journal view: a bitmap distinguishes absent, version 0,
+    // and u32::MAX without doubling every entry to an Option discriminant.
+    module_versions: [u32; MODULE_SLOTS],
+    module_present: [u32; MODULE_SLOTS/32],
     pub(crate) header: Option<[u8; HEADER_SIZE]>,
     /// 0 none, 1 QIO ok, 2 DIO only.
     pub(crate) qio: u8,
@@ -53,11 +56,14 @@ pub(crate) struct View {
 impl Default for View {
     fn default() -> Self {
         Self { pin:None,minver:None,minver_loader:None,minver_stage2:None,
-            minver_module:[None;MODULE_SLOTS],header:None,qio:0 }
+            module_versions:[0;MODULE_SLOTS],module_present:[0;MODULE_SLOTS/32],header:None,qio:0 }
     }
 }
 
 impl View {
+    pub(crate) fn module_floor(&self,page:usize)->Option<u32>{
+        if page>=MODULE_SLOTS || self.module_present[page/32] & (1<<(page%32))==0 {None}else{Some(self.module_versions[page])}
+    }
     fn apply(&mut self, ty: u8, d: &[u8]) {
         let u32_of =
             |d: &[u8]| (d.len() == 4).then(|| u32::from_le_bytes([d[0], d[1], d[2], d[3]]));
@@ -65,8 +71,9 @@ impl View {
             REC_PIN if d.len() == PUBKEY_SIZE => self.pin = Some(d.try_into().unwrap()),
             REC_MINVER => self.minver = u32_of(d).or(self.minver),
             REC_MINVER_MODULE if d.len() == 5 && (d[0] as usize) < MODULE_SLOTS => {
-                self.minver_module[d[0] as usize] =
-                    Some(u32::from_le_bytes([d[1], d[2], d[3], d[4]]));
+                let page=d[0] as usize;
+                self.module_versions[page]=u32::from_le_bytes([d[1],d[2],d[3],d[4]]);
+                self.module_present[page/32] |= 1<<(page%32);
             }
             REC_HEADER if d.len() == HEADER_SIZE => self.header = Some(d.try_into().unwrap()),
             REC_QIO if d.len() == 1 => self.qio = d[0],
@@ -272,8 +279,8 @@ impl<F: FlashOps> StateLog<F> {
                 }
             }
         }
-        for (slot, val) in v.minver_module.iter().enumerate() {
-            if let Some(x) = val {
+        for slot in 0..MODULE_SLOTS {
+            if let Some(x) = v.module_floor(slot) {
                 let mut rec = [0u8; 5];
                 rec[0] = slot as u8;
                 rec[1..].copy_from_slice(&x.to_le_bytes());

@@ -137,7 +137,7 @@ fn power_loss_during_compaction_keeps_one_readable_copy() {
         });
         assert!(again.view.pin.is_some(), "cut {cut}");
         assert_eq!(
-            (again.view.minver_loader, again.view.minver_module[2]),
+            (again.view.minver_loader, again.view.module_floor(2)),
             (Some(7), Some(9)),
             "cut {cut}"
         );
@@ -177,7 +177,7 @@ fn all_page_floors_survive_compaction_and_interruption_without_format_change() {
         let mut l=StateLog::open(Mem {data:snapshot.clone(),fail_at:Some(cut),..Default::default()});
         let _=l.append(state::REC_HEADER,&[43;216]);
         let mut healed=StateLog::open(Mem {data:std::mem::take(&mut l.ops().data),..Default::default()});
-        for page in 0..256 {assert_eq!(healed.view.minver_module[page],Some(if page==255{u32::MAX}else{page as u32+7}),"page {page}, cut {cut}");}
+        for page in 0..256 {assert_eq!(healed.view.module_floor(page),Some(if page==255{u32::MAX}else{page as u32+7}),"page {page}, cut {cut}");}
         assert!(healed.append_u32(state::REC_MINVER_LOADER,123));
     }
 }
@@ -215,9 +215,20 @@ int main(int argc,char**argv){
         .arg(&source).arg(root.join("boot/bootloader_components/main/state_core.c")).arg("-o").arg(&bin).status().unwrap();assert!(status.success());
     let image=dir.join("state.bin");assert!(Command::new(&bin).arg("write").arg(&image).status().unwrap().success());
     let mut log=StateLog::open(Mem {data:fs::read(&image).unwrap(),..Default::default()});
-    for page in 0..256 {assert_eq!(log.view.minver_module[page],Some(page as u32+7));}
+    for page in 0..256 {assert_eq!(log.view.module_floor(page),Some(page as u32+7));}
     assert!(log.append_module_version(255,u32::MAX));for _ in 0..40 {assert!(log.append(state::REC_HEADER,&[99;216]));}
     fs::write(&image,log.flash_snapshot()).unwrap();assert!(Command::new(&bin).arg("read").arg(&image).status().unwrap().success());
-    let log=StateLog::open(Mem {data:fs::read(&image).unwrap(),..Default::default()});assert_eq!(log.view.minver_module[255],Some(u32::MAX));
+    let log=StateLog::open(Mem {data:fs::read(&image).unwrap(),..Default::default()});assert_eq!(log.view.module_floor(255),Some(u32::MAX));
     fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn journal_view_stack_budget_covers_all_256_pages(){
+    assert!(core::mem::size_of::<state::View>()<=1400, "journal view copies must fit the 12 KiB shared worker");
+    let mut view=state::View::default();
+    // Frozen journal decoding must distinguish absent, zero and max versions.
+    let mut log=StateLog::open(Mem::blank());
+    assert_eq!(view.module_floor(0),None);
+    assert!(log.append_module_version(0,0));assert!(log.append_module_version(255,u32::MAX));
+    view=log.view.clone();assert_eq!(view.module_floor(0),Some(0));assert_eq!(view.module_floor(255),Some(u32::MAX));
 }
