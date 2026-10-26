@@ -1,20 +1,19 @@
 //! Experimental bounded plaintext QUIC-lite endpoint on C-owned pool/links.
-//! One serialized owner, one association, two echo streams; no radio ownership.
+//! Local QUIC associations and opaque streams on native C-owned packets/links.
 #![no_std]
 extern crate alloc;
 #[cfg(test)]
 extern crate std;
 mod bearer;
 mod pool;
+mod streams;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use bearer::{Bearer, Bridge};
 use pool::{Buffer, Native, Pool};
 use quic_lite::{nostd::NoStdRuntime, *};
 use spin::Mutex;
-use xip_abi::{
-    cbor::Writer,
-    *,
-};
+use streams::Session;
+use xip_abi::{cbor::Writer, *};
 const COMPONENT: i32 = 48;
 const RX: i32 = 100;
 const TICK: i32 = 101;
@@ -23,19 +22,23 @@ pub const STATE_BYTES: usize = 8;
 pub struct State {
     context: usize,
 }
-struct Echo {
-    stream: QuicStream,
-    bytes: Vec<u8>,
-    at: usize,
-    fin: bool,
-}
 struct Core {
     // Field order is intentional: runtime/callback queues and all buffer owners
     // drop before the boxed pool shim whose reference the library calls static.
     runtime: Box<NoStdRuntime<Pool>>,
     bridges: Vec<Arc<Mutex<Bridge>>>,
-    echoes: Vec<Echo>,
+    sessions: Vec<Session>,
+    streams: Option<&'static Stream>,
     pool: Box<Pool>,
+}
+impl Drop for Core {
+    fn drop(&mut self) {
+        if let Some(close) = self.pool.native.hw.link().and_then(|l| l.close) {
+            for bridge in &self.bridges {
+                unsafe { close(self.pool.native.hw.ctx(), bridge.lock().link); }
+            }
+        }
+    }
 }
 impl Core {
     fn new(native: Native) -> Result<Self, i32> {
@@ -50,7 +53,7 @@ impl Core {
         runtime
             .set_limits(NodeLimits {
                 max_associations: 1,
-                max_routes: 8,
+                max_routes: 8, // Local association/path entries; no relay resolver is installed.
                 relay_control_packet_reserve: 1,
             })
             .map_err(|_| ERR_ARG)?;
@@ -68,7 +71,8 @@ impl Core {
         Ok(Self {
             runtime,
             bridges: Vec::new(),
-            echoes: Vec::new(),
+            sessions: Vec::new(),
+            streams: native.hw.stream(),
             pool,
         })
     }
@@ -122,7 +126,18 @@ impl Core {
             },
         };
         self.bridges.try_reserve(1).map_err(|_| ERR_NOMEM)?;
-        self.runtime.add_bearer(bearer).map_err(|_| ERR_ARG)?;
+        let table = native.hw.link().ok_or(ERR_UNSUPPORTED)?;
+        let held = unsafe { table.open.ok_or(ERR_UNSUPPORTED)?(
+            native.hw.ctx(), info.name.as_ptr().cast(), COMPONENT, LINK_EGRESS) };
+        if held < 0 { return Err(held); }
+        if held as u32 != link {
+            if let Some(close) = table.close { unsafe { close(native.hw.ctx(), held as u32); } }
+            return Err(ERR_IO);
+        }
+        if self.runtime.add_bearer(bearer).is_err() {
+            if let Some(close) = table.close { unsafe { close(native.hw.ctx(), link); } }
+            return Err(ERR_ARG);
+        }
         self.bridges.push(bridge.clone());
         Ok(bridge)
     }
@@ -186,76 +201,146 @@ impl Core {
     // Keep timer/retirement scratch out of the live ingress call chain. The
     // shared worker cannot retain both phase frames while admitting a peer.
     #[inline(never)]
-    fn advance_clock(&mut self, now: u64) {
-        let _ = self.runtime.advance_time(now);
+    fn advance_clock(&mut self, now: u64)->Result<(),i32> {
+        match self.runtime.advance_time(now){Ok(_)=>Ok(()),Err(e) if e.is_retryable()=>Ok(()),Err(_)=>Err(ERR_IO)}
     }
     #[inline(never)]
-    fn progress_ingress(&mut self) {
+    fn progress_ingress(&mut self)->Result<(),i32> {
         for _ in 0..4 {
             match self.runtime.progress() {
                 Ok(true) => {}
-                Ok(false) | Err(_) => break,
+                Ok(false)=>break,
+                Err(e) if e.is_retryable()=>break,
+                Err(_)=>return Err(ERR_IO),
             }
         }
+        Ok(())
     }
     fn progress(&mut self, now: u64) -> Result<(), i32> {
         self.poll_completions()?;
-        self.advance_clock(now);
-        self.progress_ingress();
+        self.advance_clock(now)?;
+        self.progress_ingress()?;
         while self.runtime.next_association().is_some() {}
-        // At most two application chunks outside the core. Each Vec is moved
-        // from its existing owned receive chunk, not defensively cloned.
-        if self.echoes.iter().all(|e| e.bytes.is_empty()) {
+        let table = self.streams.ok_or(ERR_UNSUPPORTED)?;
+        // The portable owned-chunk API bounds admission to one queued chunk per
+        // stream. Retain/move that allocation until its consumer accepts it;
+        // no read/copy through lwIP or a second body queue.
+        if self.sessions.iter().all(|s| s.input.is_none()) {
             if let Some(chunk) = self.runtime.next_stream_chunk() {
-                if let Some(e) = self
-                    .echoes
-                    .iter_mut()
-                    .find(|e| e.stream.same_stream(&chunk.stream))
+                let at = if let Some(i) = self
+                    .sessions
+                    .iter()
+                    .position(|s| s.stream.same_stream(&chunk.stream))
                 {
-                    if e.at == e.bytes.len() {
-                        e.bytes = chunk.bytes;
-                        e.at = 0;
-                        e.fin = chunk.fin;
-                    } else {
+                    i
+                } else {
+                    if self.sessions.len() >= 2 {
                         return Err(ERR_BUSY);
                     }
-                } else {
-                    if self.echoes.len() >= 2 {
-                        return Err(ERR_UNSUPPORTED);
-                    }
-                    self.echoes.try_reserve(1).map_err(|_| ERR_NOMEM)?;
-                    self.echoes.push(Echo {
-                        stream: chunk.stream,
-                        bytes: chunk.bytes,
-                        at: 0,
-                        fin: chunk.fin,
-                    });
-                }
-            }
-        }
-        for e in &mut self.echoes {
-            if e.at < e.bytes.len() {
-                let result = if e.fin {
-                    self.runtime
-                        .write_stream_and_finish(&mut e.stream, &e.bytes[e.at..])
-                } else {
-                    self.runtime.write_stream(&mut e.stream, &e.bytes[e.at..])
+                    self.sessions.try_reserve(1).map_err(|_| ERR_NOMEM)?;
+                    self.sessions.push(Session::new(chunk.stream));
+                    self.sessions.len() - 1
                 };
-                if let Ok(n) = result {
-                    e.at += n;
+                self.sessions[at].input = Some(streams::Input {
+                    bytes: chunk.bytes,
+                    fin: chunk.fin,
+                });
+            }
+        }
+        for s in &mut self.sessions {
+            if s.closed {
+                continue;
+            }
+            if let Err(rc) = s.feed(self.pool.native, table) {
+                s.close(self.pool.native, table);
+                let _ = self.runtime.finish_stream(&mut s.stream);
+                return Err(rc);
+            }
+            if s.handle != 0 && s.output.is_none() && self.pool.native.info()?.available > 2 {
+                let mut out = StreamPacket::default();
+                let rc = unsafe {
+                    table.take.ok_or(ERR_UNSUPPORTED)?(
+                        self.pool.native.hw.ctx(),
+                        s.handle,
+                        &mut out,
+                    )
+                };
+                if rc == 1 {
+                    let buffer = Buffer::owned(self.pool.native, out.packet)?;
+                    let packet = OwnedPacket::new(
+                        buffer,
+                        PKT_HEADROOM as usize..PKT_HEADROOM as usize + out.len as usize,
+                    )
+                    .map_err(|_| ERR_ARG)?;
+                    s.output = Some(packet.try_erase().map_err(|_| ERR_ARG)?);
+                    s.output_fin = out.fin != 0;
+                } else if rc == ERR_NOTFOUND {
+                    // The consumer closed/stopped: propagate EOF to the peer,
+                    // retaining the stream while reliable FIN admission is busy.
+                    match self.runtime.finish_stream(&mut s.stream) {
+                        Ok(()) => s.close(self.pool.native, table),
+                        Err(e) if e.is_retryable() => {},
+                        Err(_) => s.close(self.pool.native, table),
+                    }
+                    continue;
+                } else if rc < 0 && rc != ERR_BUSY {
+                    s.close(self.pool.native, table);
+                    continue;
                 }
-            } else if e.fin {
-                let _ = self.runtime.finish_stream(&mut e.stream);
+            }
+            if let Some(packet) = s.output.as_ref() {
+                let remaining = packet.bytes().len() - s.output_at;
+                let count = remaining
+                    .min(DEFAULT_MAX_STREAM_PAYLOAD)
+                    .min(self.runtime.stream_send_window(&s.stream).unwrap_or(0) as usize);
+                let result = if remaining == 0 {
+                    self.runtime.finish_stream(&mut s.stream)
+                } else if count == 0 {
+                    continue;
+                } else {
+                    // Split immutable ranges of the SAME pool lease. Reliable
+                    // history owns each accepted range; no payload clone.
+                    let (buffer, range) = packet.clone_shared().into_parts();
+                    let start = range.start + s.output_at;
+                    let part =
+                        OwnedPacket::new(buffer, start..start + count).map_err(|_| ERR_ARG)?;
+                    self.runtime
+                        .write_stream_owned_packet(
+                            &mut s.stream,
+                            part,
+                            s.output_fin && count == remaining,
+                        )
+                        .map(|n| {
+                            s.output_at += n;
+                        })
+                        .map_err(|(e, _lease)| e)
+                };
+                match result {
+                    Ok(()) if s.output_at == packet.bytes().len() => {
+                        s.output = None;
+                        s.output_at = 0;
+                        unsafe {
+                            table.written.ok_or(ERR_UNSUPPORTED)?(
+                                self.pool.native.hw.ctx(),
+                                s.handle,
+                            );
+                        }
+                        if s.output_fin {
+                            s.close(self.pool.native, table);
+                        }
+                    }
+                    Ok(()) => {}
+                    Err(error) if error.is_retryable() => {}
+                    Err(_) => {
+                        s.close(self.pool.native, table);
+                        return Err(ERR_IO);
+                    }
+                }
             }
         }
-        // Retain stable send offsets for peer-opened streams until association
-        // retirement. Fully sent buffers are freed, not kept as scratch capacity.
-        for e in &mut self.echoes {
-            if e.at == e.bytes.len() {
-                e.bytes = Vec::new();
-                e.at = 0;
-            }
-        }
+        // Reliable history is owned by the node. Completed application handles
+        // need no lifetime reservation; the peer may open subsequent streams.
+        self.sessions.retain(|s|!s.closed);
         Ok(())
     }
     fn in_flight(&self) -> bool {
@@ -280,7 +365,12 @@ impl Context {
                 self.last_error = rc;
             }
             if c.runtime.telemetry().live_associations == 0 {
-                c.echoes.clear();
+                if let Some(t) = c.streams {
+                    for s in &mut c.sessions {
+                        s.close(c.pool.native, t);
+                    }
+                }
+                c.sessions.clear();
             }
             if c.runtime.telemetry().live_associations == 0 && !c.in_flight() {
                 self.core = None;
@@ -315,6 +405,13 @@ impl Context {
         }
         unsafe {
             self.native.table.detach.ok_or(ERR_UNSUPPORTED)?(self.native.hw.ctx());
+        }
+        if let Some(c) = &mut self.core {
+            if let Some(t) = c.streams {
+                for s in &mut c.sessions {
+                    s.close(c.pool.native, t);
+                }
+            }
         }
         self.core = None;
         let rc =

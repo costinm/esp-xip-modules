@@ -1,10 +1,14 @@
 # `quic` API (48)
 
-Optional experimental QUIC-lite echo endpoint for the C runtime. Start it through
+QUIC-lite module stream endpoint for the C runtime. Start it through
 the module manager; it receives unhandled local QUIC packets on native links.
 Control requests are normal compact CBOR envelopes in 0x444d0002 datagrams (PPP port 0xf7 for dmesh-cli); PPP port 244 carries raw QUIC frames. No start
-parameters. This version is plaintext and unauthenticated: use trusted test peers.
-It does not implement a TCP proxy or an IP tunnel.
+parameters. Relay forwarding and routing belong to the native runtime. This version is plaintext and unauthenticated: use trusted test peers.
+The endpoint passes stream bytes and FIN to the native runtime. The runtime
+frames and parses the opening CBOR envelope and dispatches to its selected
+consumer, using the same envelope parser and component ownership as datagrams.
+`flash.upload` (44.1) accepts WLU1 packages; its response is the same upload
+protocol response as TCP 5227.
 
 ## 1. `status` — endpoint state
 
@@ -18,7 +22,7 @@ It does not implement a TCP proxy or an IP tunnel.
 | 4 | `errors` | `uint` | Local processing errors. |
 | 5 | `last_error` | `int` | Last native/module error. |
 | 6 | `protected` | `bool` | Always false in this experimental endpoint. |
-| 7 | `stream_limit` | `uint` | Two streams per association. |
+| 7 | `stream_limit` | `uint` | Two concurrent streams per association. |
 
 ## 2. `reset` — discard endpoint associations
 

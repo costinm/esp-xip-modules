@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "quic-lite"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=889d651cebad28e3b13387dc1bd3ffa479a607ad#889d651cebad28e3b13387dc1bd3ffa479a607ad"
+source = "git+https://github.com/costinm/dmesh?rev=ab109bf1836bbe1be117b859f60ac90ec3cb9010#ab109bf1836bbe1be117b859f60ac90ec3cb9010"
 dependencies = [
  "smallvec",
  "spin",

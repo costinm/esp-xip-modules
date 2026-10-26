@@ -13,6 +13,12 @@ struct Physical {
     ticket: u32,
     epoch: u32,
 }
+#[derive(Default)]
+struct Consumer {
+    opening: Vec<u8>,
+    bytes: Vec<u8>,
+    fin: bool,
+}
 struct Fake {
     next: u32,
     held: BTreeMap<u32, Slot>,
@@ -25,6 +31,8 @@ struct Fake {
     now: u64,
     allocations: BTreeMap<usize, core::alloc::Layout>,
     alarms: u32,
+    consumers: BTreeMap<u32, Consumer>,
+    stream_next: u32,
 }
 impl Default for Fake {
     fn default() -> Self {
@@ -40,6 +48,8 @@ impl Default for Fake {
             now: 1,
             allocations: BTreeMap::new(),
             alarms: 0,
+            consumers: BTreeMap::new(),
+            stream_next: 0,
         }
     }
 }
@@ -228,16 +238,99 @@ unsafe extern "C" fn link_info(_: *mut c_void, _: u32, out: *mut LinkInfo) -> i3
     *out = info;
     0
 }
+unsafe extern "C" fn link_open(_: *mut c_void, _: *const c_char, _: i32, method: i32) -> i32 {
+    assert_eq!(method, LINK_EGRESS);
+    (ADDR_LINK + 1) as i32
+}
+unsafe extern "C" fn link_close(_: *mut c_void, _: u32) -> i32 { 0 }
 static LINK: Link = Link {
+    open: Some(link_open), close: Some(link_close),
     version: LINK_VERSION,
     size: core::mem::size_of::<Link>() as u32,
     info: Some(link_info),
     ..unsafe { core::mem::zeroed() }
 };
+unsafe extern "C" fn stream_open(p: *mut c_void, bytes: *const u8, len: usize) -> i32 {
+    assert!(bytes.is_null(), "transport must leave envelope framing to runtime");
+    assert_eq!(len,0);
+    let f = f(p);
+    f.stream_next += 1;
+    let id = f.stream_next;
+    f.consumers.insert(id, Consumer::default());
+    id as i32
+}
+unsafe extern "C" fn stream_feed(
+    p: *mut c_void,
+    id: u32,
+    bytes: *const u8,
+    len: usize,
+    fin: u32,
+) -> i32 {
+    let f = f(p);
+    // Hold consumption on alternate turns to exercise exact-chunk retry.
+    if len != 0 && (f.now / 10000) % 2 == 0 {
+        return 0;
+    }
+    let c = f.consumers.get_mut(&id).unwrap();
+    if len != 0 {
+        // This fake accepts the fixture's known 10-byte opening. Actual runtime
+        // framing/dispatch is covered by the native C broker regression.
+        let bytes=core::slice::from_raw_parts(bytes,len);
+        let opening=(10-c.opening.len()).min(bytes.len());
+        c.opening.extend_from_slice(&bytes[..opening]);
+        if c.opening.len()==10 {
+            assert_eq!(c.opening,[0xa4,1,0x18,44,2,1,3,1,5,0xa0]);
+        }
+        c.bytes.extend_from_slice(&bytes[opening..]);
+    }
+    if fin != 0 {
+        c.fin = true;
+    }
+    len as i32
+}
+unsafe extern "C" fn stream_take(p: *mut c_void, id: u32, out: *mut StreamPacket) -> i32 {
+    let f = f(p);
+    let Some(c) = f.consumers.get_mut(&id) else {
+        return ERR_NOTFOUND;
+    };
+    if c.bytes.len() < 500 && !c.fin {
+        return 0;
+    }
+    let n = c.bytes.len().min(1500);
+    let bytes: Vec<_> = c.bytes.drain(..n).collect();
+    let fin = c.fin && c.bytes.is_empty();
+    let h = f.alloc(true);
+    f.held.get_mut(&h).unwrap().bytes[144..144 + n].copy_from_slice(&bytes);
+    *out = StreamPacket {
+        packet: h,
+        len: n as u32,
+        fin: fin as u32,
+    };
+    1
+}
+unsafe extern "C" fn stream_close(p: *mut c_void, id: u32) -> i32 {
+    f(p).consumers.remove(&id);
+    0
+}
+unsafe extern "C" fn stream_written(_: *mut c_void, _: u32) -> i32 {
+    0
+}
+static STREAM: Stream = Stream {
+    listen:None,
+    version: 1,
+    size: core::mem::size_of::<Stream>() as u32,
+    open: Some(stream_open),
+    feed: Some(stream_feed),
+    close: Some(stream_close),
+    take: Some(stream_take),
+    write_pkt: None,
+    written: Some(stream_written),
+};
 unsafe extern "C" fn component(_: *mut c_void, name: *const c_char) -> *const c_void {
     match CStr::from_ptr(name).to_bytes() {
         b"quic" => (&QUIC as *const Quic).cast(),
         b"link" => (&LINK as *const Link).cast(),
+        b"stream" => (&STREAM as *const Stream).cast(),
         _ => core::ptr::null(),
     }
 }
@@ -272,7 +365,9 @@ fn receive(state: &mut State, hw: &Hw, fake: &mut Fake, bytes: &[u8]) {
         time_us: fake.now as u32,
         pkt: h,
         from: ADDR_LINK + 1,
-        id: 1, request_id: None };
+        id: 1,
+        request_id: None,
+    };
     state.handle(hw, &call);
     if fake.held.get(&h).is_some_and(|s| !s.owned) {
         fake.held.remove(&h);
@@ -288,7 +383,9 @@ fn tick(state: &mut State, hw: &Hw) {
         time_us: 0,
         pkt: 0,
         from: 0,
-        id: 0, request_id: None };
+        id: 0,
+        request_id: None,
+    };
     state.handle(hw, &call);
 }
 type ClientPool = HeapPacketPool<16, 1704>;
@@ -327,7 +424,7 @@ impl PacketBearer<ClientPool> for ClientBearer {
     }
 }
 #[test]
-fn two_stream_echo_uses_native_pool_and_busy_retains_exact_packets() {
+fn opaque_stream_delivery_preserves_bytes_under_loss_backpressure_and_busy() {
     echo_fixture(false);
     echo_fixture(true);
 }
@@ -368,10 +465,16 @@ fn echo_fixture(loss: bool) {
         )
         .unwrap();
     let mut streams = None;
-    let input = [vec![0x7e; 4096], vec![0x7d; 4096]];
-    let mut sent = [0usize; 2];
-    let mut received = [Vec::new(), Vec::new()];
-    let mut ids = [0; 2];
+    let input = [vec![0x7e; 4096], vec![0x7d; 4096],vec![0x55;1537]];
+    let header = [0xa4, 1, 0x18, 44, 2, 1, 3, 1, 5, 0xa0];
+    let wire_input = input.each_ref().map(|body| {
+        let mut bytes = header.to_vec();
+        bytes.extend_from_slice(body);
+        bytes
+    });
+    let mut sent = [0usize; 3];
+    let mut received = [Vec::new(), Vec::new(),Vec::new()];
+    let mut ids = [0; 3];
     fake.busy = 3;
     let mut dropped = false;
     for step in 0..3000 {
@@ -409,14 +512,17 @@ fn echo_fixture(loss: bool) {
         if streams.is_none() && client.association_is_established(association) {
             let a = client.open_stream(association).unwrap();
             let b = client.open_stream(association).unwrap();
-            ids = [a.id(), b.id()];
-            streams = Some([a, b]);
+            ids = [a.id(), b.id(),0];
+            streams = Some(vec![a,b]);
         }
         if let Some(streams) = streams.as_mut() {
-            for i in 0..2 {
-                if sent[i] < input[i].len() {
+            if streams.len()==2 && received[0].len()==input[0].len() && received[1].len()==input[1].len(){
+                if let Ok(c)=client.open_stream(association){ids[2]=c.id();streams.push(c);}
+            }
+            for i in 0..streams.len() {
+                if sent[i] < wire_input[i].len() {
                     if let Ok(n) =
-                        client.write_stream_and_finish(&mut streams[i], &input[i][sent[i]..])
+                        client.write_stream_and_finish(&mut streams[i], &wire_input[i][sent[i]..])
                     {
                         sent[i] += n;
                     }
@@ -428,7 +534,7 @@ fn echo_fixture(loss: bool) {
             assert_eq!(chunk.offset as usize, received[i].len());
             received[i].extend(chunk.bytes);
         }
-        if received[0].len() == input[0].len() && received[1].len() == input[1].len() {
+        if received.iter().zip(input.iter()).all(|(a,b)|a.len()==b.len()) {
             break;
         }
     }
@@ -439,7 +545,7 @@ fn echo_fixture(loss: bool) {
     assert_eq!(
         received.iter().map(Vec::len).collect::<Vec<_>>(),
         input.iter().map(Vec::len).collect::<Vec<_>>(),
-        "echo did not complete; errors {} last {} sent {:?}",
+        "stream dispatch did not complete; errors {} last {} sent {:?}",
         unsafe { &*(state.context as *const Context) }.errors,
         unsafe { &*(state.context as *const Context) }.last_error,
         sent

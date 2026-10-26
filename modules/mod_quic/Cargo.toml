@@ -8,7 +8,7 @@ publish = false
 [workspace]
 [dependencies]
 xip-abi = { path = "../../crates/xip-abi" }
-quic-lite = { git = "https://github.com/costinm/dmesh", rev = "889d651cebad28e3b13387dc1bd3ffa479a607ad", default-features = false }
+quic-lite = { git = "https://github.com/costinm/dmesh", rev = "ab109bf1836bbe1be117b859f60ac90ec3cb9010", default-features = false }
 spin = { version = "0.10", default-features = false, features = ["mutex","spin_mutex"] }
 [package.metadata]
 mkmod = "--name quic --tag 48 --stack 12288 --state 8 --port 244"
