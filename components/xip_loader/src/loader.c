@@ -417,6 +417,34 @@ static uint32_t manifest_port(int slot, const xip_dmod_header *h, uint64_t key)
     return (uint32_t)port;
 }
 
+/* Additional wire request owners; module lifecycle/events keep the header tag. */
+static int manifest_envelopes(int slot, const xip_dmod_header *h, int32_t ids[XIP_COMPONENTS_MAX])
+{
+    if (!h->manifest_size) return XIP_OK;
+    if (h->manifest_size > 4096) return XIP_ERR_SIZE;
+    uint8_t *m = malloc(h->manifest_size);
+    if (!m) return XIP_ERR_NOMEM;
+    int rc = XIP_ERR_ARG;
+    xip_cbor_r value;
+    xip_cbor_item it;
+    if (esp_partition_read(em.part, em.slots_found[slot].offset + h->manifest_offset, m, h->manifest_size) == ESP_OK) {
+        const int found = xip_cbor_get(m, h->manifest_size, 12, &value);
+        if (found == 1) rc = XIP_OK;
+        else if (found == 0 && !xip_cbor_next(&value, &it) && it.type == XIP_CBOR_ARRAY && it.n <= XIP_COMPONENTS_MAX) {
+            rc = XIP_OK;
+            for (size_t i = 0; i < it.n; i++) {
+                xip_cbor_item id;
+                int64_t n;
+                if (xip_cbor_next(&value, &id) || xip_cbor_as_int(&id, &n) || n <= 0 || n > INT32_MAX) { rc = XIP_ERR_ARG; break; }
+                ids[i] = (int32_t)n;
+                for (size_t j = 0; j < i; j++) if (ids[j] == ids[i]) rc = XIP_ERR_ARG;
+            }
+        }
+    }
+    free(m);
+    return rc;
+}
+
 int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
 {
     if (!xip_loader_slot(slot)) return XIP_LOADER_ERR_SLOT;
@@ -433,6 +461,9 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
                  xip_dmod_reason(st->st.last_check));
         return XIP_LOADER_ERR_IMAGE;
     }
+    int32_t envelopes[XIP_COMPONENTS_MAX] = {0};
+    int envelope_rc = manifest_envelopes(slot, &h, envelopes);
+    if (envelope_rc < 0) return envelope_rc;
     uint8_t *copy = NULL;
     if (request_len) {
         copy = malloc(request_len);
@@ -479,6 +510,7 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
              (unsigned)h.image_size, (unsigned)h.state_bytes);
     xip_instance_config_t config = ic;
     manifest_components(slot, &h, config.components);
+    memcpy(config.envelope_components, envelopes, sizeof(envelopes));
     xip_instance_t *inst = xip_instance_create(em.slots_found[slot].name, &config);
     if (!inst) {
         unmap_image(st);
@@ -586,7 +618,9 @@ int xip_loader_manifest(int slot, uint8_t *out, size_t capacity)
 
 int xip_loader_autostart(void)
 {
-    enum { MAX_MANIFEST = 1024 };
+    /* Match the manifest bound used for hosted components and port bindings.
+     * API growth (for example NAN reports) must not silently disable startup. */
+    enum { MAX_MANIFEST = 4096 };
     uint8_t *m = malloc(MAX_MANIFEST);
     int started = 0;
     if (!m) return 0;
