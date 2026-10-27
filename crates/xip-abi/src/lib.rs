@@ -86,8 +86,6 @@ mod hardware;
 pub use hardware::*;
 
 pub mod psa;
-mod ip;
-pub use ip::*;
 mod identity;
 pub use identity::*;
 
@@ -120,7 +118,7 @@ impl Hw {
     /// # Safety
     /// `host` must be the pointer the handler received, and stay valid during the call.
     pub unsafe fn new(host: *const Host) -> Option<Hw> {
-        if host.is_null() || (*host).abi_version == 0 || ((*host).size as usize) < slot::LOG + 4 {
+        if host.is_null() || (*host).abi_version != ABI_VERSION || ((*host).size as usize) < slot::LOG + 4 {
             return None;
         }
         Some(Hw { host })
@@ -215,7 +213,7 @@ impl Hw {
         if rc == 0 { Ok((ptr, max)) } else { Err(rc) }
     }
 
-    /// Full uniquely owned slot for in-place prefix/suffix framing. Valid until release or transfer.
+    /// Full slot for reading. Writing requires uniqueness; valid until release or transfer.
     pub fn pkt_span(&self, pkt: u32) -> Result<(*mut u8, usize), i32> {
         let (mut base, mut cap) = (core::ptr::null_mut(), 0usize);
         let rc = call!(self, PKT_SPAN, pkt_span(pkt, &mut base, &mut cap));
@@ -240,6 +238,13 @@ impl Hw {
         let (mut address, mut port, mut scope) = ([0; 16], 0, 0);
         let rc = call!(self, SOCKET_PEER, socket_peer(socket, address.as_mut_ptr(), &mut port, &mut scope));
         if rc == 0 { Ok((address, port, scope)) } else { Err(rc) }
+    }
+
+    /// Send a datagram from a runtime-owned UDP socket (the `call.from` handle of a
+    /// datagram receive) to `dest`. ERR_BUSY: send again later. The helper copies
+    /// like `socket_write`; a failed `send` owns nothing.
+    pub fn udp_send(&self, handle: u32, dest: ([u8; 16], u16, u32), data: &[u8]) -> i32 {
+        call!(self, UDP_SEND, udp_send(handle, dest.0.as_ptr(), dest.1, dest.2, data.as_ptr(), data.len()))
     }
 
     /// Transfer a held packet only when the runtime accepts the write. On error the packet remains held.
@@ -411,7 +416,7 @@ impl Hw {
         call!(self, FLASH_READ, flash_read(address, offset, out.as_mut_ptr(), out.len()))
     }
 
-    /// Keep the packet of this call beyond the call.
+    /// Retain one additional reference; each clone must be released or transferred.
     pub fn pkt_keep(&self, pkt: u32) -> i32 {
         call!(self, PKT_KEEP, pkt_keep(pkt))
     }
@@ -525,7 +530,7 @@ pub struct CallView<'a> {
     pub data: &'a [u8],
     /// Radio receive time, low 32 bits of the host microsecond clock.
     pub time_us: u32,
-    /// The packet `data` lives in (0: none), lent for this call: `Hw::pkt_keep` it or `Hw::send` it on.
+    /// The owned packet reference delivered with this call (0: none). handle_owned receives its Drop guard.
     pub pkt: u32,
     /// Who sent it (`ADDR_MAIN` = 0: the application): answer with `Hw::send` to this address.
     pub from: u32,
@@ -535,6 +540,10 @@ pub struct CallView<'a> {
     /// `method` and `data` (the fields) are the envelope's too; `id` stays the reply token. A module that keeps a request open (a subscription)
     /// keys it by this.
     pub request_id: Option<u64>,
+    /// Source of a datagram received on a runtime-owned UDP socket (`CALL_LINK`,
+    /// `from` its handle): `(address, port, scope)` to answer with
+    /// [`Hw::udp_send`]; `None` on other bearers (and on a shorter call).
+    pub src: Option<([u8; 16], u16, u32)>,
 }
 
 impl<'a> CallView<'a> {
@@ -550,7 +559,9 @@ impl<'a> CallView<'a> {
         let has_request = (c.size as usize) >= core::mem::size_of::<Call>();
         let data = if c.len == 0 || c.data.is_null() { &[][..] } else { core::slice::from_raw_parts(c.data, c.len) };
         let (pkt, from, id) = if has_packet { (c.pkt, c.from, c.id) } else { (0, 0, 0) };
-        Some(CallView { component: c.component, method: c.method, value: c.value, flags: c.flags, data, time_us: if (c.size as usize) >= core::mem::offset_of!(Call, time_us)+4 {c.time_us} else {0}, pkt, from, id, request_id: (has_request && c.request_has_id != 0).then_some(c.request_id) })
+        let src = ((c.size as usize) >= core::mem::size_of::<Call>() && c.src_port != 0)
+            .then_some((c.src_ip, c.src_port, c.src_scope));
+        Some(CallView { component: c.component, method: c.method, value: c.value, flags: c.flags, data, time_us: if (c.size as usize) >= core::mem::offset_of!(Call, time_us)+4 {c.time_us} else {0}, pkt, from, id, request_id: (has_request && c.request_has_id != 0).then_some(c.request_id), src })
     }
 
     /// The call is a request that expects an answer ([`Hw::reply`]).
@@ -570,12 +581,32 @@ impl<'a> CallView<'a> {
     }
 }
 
+/// One owned packet reference. Drop releases it; into_raw transfers it.
+/// Construct only from a reference transferred by the host or retained explicitly.
+pub struct Packet { hw: Hw, handle: u32 }
+impl Packet {
+    /// Take ownership of a live raw reference, exactly once.
+    pub unsafe fn from_raw(hw: Hw, handle: u32) -> Self { Self { hw, handle } }
+    pub fn raw(&self) -> u32 { self.handle }
+    pub fn into_raw(mut self) -> u32 { let h=self.handle; self.handle=0; h }
+    pub fn try_clone(&self) -> Result<Self,i32> {
+        let rc=self.hw.pkt_keep(self.handle);
+        if rc<0 {Err(rc)} else {Ok(unsafe {Self::from_raw(self.hw,self.handle)})}
+    }
+}
+impl Drop for Packet { fn drop(&mut self) { if self.handle!=0 { self.hw.pkt_free(self.handle); } } }
+
 /// A module's state and handler. The host keeps the state block (`state_bytes` of the image header), zeroed at
 /// the start: **an all-zero `Self` must be a valid initial value** (integers, bools, arrays of them, `Option` of
 /// those; no references or enums without a zero variant). [`export_module!`] wires it to `xip_handle`.
 pub trait Module: Sized {
     /// Handle one call. Return [`RET_CONTINUE`], [`RET_DONE`] or a negative error.
     fn handle(&mut self, hw: &Hw, call: &CallView) -> i32;
+    /// Owned packet delivery. Override to move a packet into longer-lived work.
+    /// The default releases it when the ordinary handler returns.
+    fn handle_owned(&mut self, hw: &Hw, call: &CallView, _packet: Option<Packet>) -> i32 {
+        self.handle(hw,call)
+    }
 }
 
 /// Export `xip_handle` for a [`Module`] type; `state = N` asserts at compile time that the type fits the state
@@ -590,7 +621,8 @@ macro_rules! export_module {
             let Some(view) = $crate::CallView::new(call) else { return $crate::ERR_ARG };
             let module = &mut *(state as *mut $ty);
             let saved = $crate::heap::enter(host);
-            let rc = <$ty as $crate::Module>::handle(module, &hw, &view);
+            let packet=(view.pkt!=0).then(|| $crate::Packet::from_raw(hw,view.pkt));
+            let rc = <$ty as $crate::Module>::handle_owned(module, &hw, &view, packet);
             $crate::heap::leave(saved);
             rc
         }

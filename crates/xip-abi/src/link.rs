@@ -14,23 +14,17 @@
 //! the link's broadcast. The packet's payload window starts at least `PKT_HEADROOM` bytes into the slot, so whoever sends it next
 //! writes its own envelope in front without moving the payload (a relay sends the same packet on another link).
 //!
-//! * **Receive.** A subscriber gets every frame as a packet call `(component, method)` it chose in [`Link::open`]: `call.from`
-//!   is the link's address, `call.data` the frame, `call.pkt` its packet (use `pkt_keep` before retaining it or sending it to a link),
-//!   `call.id` the source token, `call.value` the signal ([`signal`]), `call.time_us` the receive time (low 32 bits of the
-//!   microsecond clock, taken by the driver, not at delivery). `call.flags` has [`CALL_LINK`], which also says `id` is an
-//!   address and not a request to answer.
-//! * **Transmit.** `send(pkt, len, dst = link address, component, method, id = destination token)`. The runtime owns the packet
-//!   from the moment the link accepts it. If `component` or `method` is not 0 the packet comes **back** to the sender when the
-//!   link is done with it, as a call `(component, method)` with `CALL_LINK | CALL_LINK_EVENT` and [`LINK_EVENT_TX_DONE`]
-//!   in `call.flags >> 8`: `call.value` is the outcome (0 sent, a negative `ERR_*`), `call.id` the token, `call.time_us` the
-//!   microseconds it took, `call.pkt` the same packet (to retransmit, or let go). With both 0 the packet is released when sent.
-//!   `ERR_BUSY` means the link has no room: that is the one case where `send` does **not** consume the packet, so the sender can
-//!   try another link.
+//! * **Receive.** Subscribers receive an owned reference with CALL_LINK. `call.from`
+//!   is the link, `call.id` the peer token, `call.value` the signal and `call.time_us`
+//!   the driver timestamp. Rust handle_owned supplies its Drop guard.
+//! * **Transmit.** BUSY retains the exact reference so the sender can try another
+//!   link. Acceptance transfers it to the provider, which releases it after use.
+//!   There is no return-packet TX_DONE path. Other terminal errors consume it.
 //! * **Events.** Subscribers also get calls with `CALL_LINK | CALL_LINK_EVENT` (`call.flags >> 8` is the kind): [`LINK_EVENT_READY`]
 //!   (capacity returned after `ERR_BUSY`) and [`LINK_EVENT_STATE`] (`call.value` the new state, `call.id` the rate in kbit/s).
 //! * **Provide.** A module that owns a transport calls [`Link::provide`] once. Frames sent to the link arrive as calls
 //!   `(component, method)` it gave (`call.from` the sender, `call.id` the token, `call.pkt` the packet: keep it while the radio
-//!   transmits, then [`Link::tx_done`]; a packet it does not keep counts as sent when the call returns). It reports what it
+//!   transmits, then release it with [`Link::tx_done`] or `pkt_free`). It reports what it
 //!   receives with [`Link::rx`], capacity with [`Link::ready`] and its state with [`Link::set_state`].
 //!
 //! # Forwarding in the runtime
@@ -66,7 +60,7 @@ pub const CALL_ENVELOPE: u32 = 8;
 /// events). The last message is sent without it. Only the lower 30 bits are the method.
 pub const SEND_MORE: i32 = 1 << 30;
 
-/// Event: a frame sent to the link is done (the packet comes back, `call.value` is the outcome).
+/// Reserved legacy event id. ABI 3 releases driver references without returning packets.
 pub const LINK_EVENT_TX_DONE: u32 = 1;
 /// Event: the link has capacity again after answering a send with `ERR_BUSY`.
 pub const LINK_EVENT_READY: u32 = 2;
@@ -107,9 +101,15 @@ pub const PORT_NAN_REPORT: u32 = 0xfb;
 /// PPP port of DMesh's QUIC packets (`0xf7`). The record's payload is one QUIC packet: the runtime hands it, in a pool packet with the serial
 /// link in the metadata, to the common QUIC receive function (`xip_quic_rx_set`), like the frames of ESP-NOW and the BLE channel.
 pub const PORT_QUIC: u32 = 0xf7;
-/// Multicast port: bound by a module's manifest (key 9), the runtime's `xip_mc` UDP listener delivers datagrams of the DMesh discovery group
-/// (IPv6 `ff02::5227`, IPv4 later) here; the module answers by sending back to the source token it arrived with.
+/// Datagram registration port of the local QUIC endpoint provider.
+/// Both this carrier and PORT_QUIC enter the native classifier.
+pub const PORT_QUIC_ENDPOINT: u32 = 0xf4;
+/// Multicast port: bound by a module's manifest (key 9), the runtime's discovery UDP port delivers datagrams of the DMesh discovery group
+/// (IPv6 `ff02::5227`, IPv4 later) here, with their source in the deliver (`call.src`); the module answers with `udp_send` on the socket handle it received on `call.from`.
 pub const PORT_MC: u32 = 0xfa;
+/// Handle space of a runtime-owned UDP socket: `ADDR_UDP + fd`. Modules never parse it — a
+/// datagram receive carries it on `call.from`, and a module sends with `udp_send` back on it.
+pub const ADDR_UDP: u32 = 0x60000000;
 pub const PORT_NET: u32 = 5225;
 
 /// Who provides a link ([`LinkInfo::provider`]).
@@ -214,8 +214,8 @@ pub struct Link {
     /// the radio received it; 0: now). The packet is consumed whether this succeeds or not (a link with nobody listening is a
     /// success). `ERR_ARG` for an address this module does not provide.
     pub rx: Option<unsafe extern "C" fn(ctx: *mut c_void, addr: u32, pkt: u32, len: usize, source: u64, signal: i32, time_us: u32) -> c_int>,
-    /// The provider is done with a frame it was given (the held packet `pkt`, which it kept): `outcome` is 0 or a negative
-    /// `ERR_*`. If the sender asked, the packet goes back to it as a `LINK_EVENT_TX_DONE` call; otherwise it is released.
+    /// Release the provider's completed TX reference. `outcome` is retained for
+    /// source compatibility; no packet or callback returns to the original sender.
     pub tx_done: Option<unsafe extern "C" fn(ctx: *mut c_void, addr: u32, pkt: u32, outcome: c_int) -> c_int>,
     /// The provider has capacity again after refusing a frame: every subscriber gets `LINK_EVENT_READY`.
     pub ready: Option<unsafe extern "C" fn(ctx: *mut c_void, addr: u32) -> c_int>,

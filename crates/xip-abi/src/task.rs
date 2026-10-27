@@ -16,10 +16,10 @@
 //! Reserve component `-2147483647` for this helper's alarms. Each live sleep
 //! uses its own method, so an early notification re-arms only its actual timer.
 //! Four incoming calls may wait while the future is busy. Further calls, failed
-//! payload allocations, and packet-quota refusals increment `rejected_calls()`
+//! payload allocations, and snapshot failures increment `rejected_calls()`
 //! and leave the task running. Rejected requests receive CBOR integer ERR_BUSY
-//! with their original correlation/routing, reusing the borrowed packet where
-//! possible so a full held quota can still reply. `failed_replies()` counts
+//! with their original correlation/routing, reusing a unique incoming packet where
+//! possible. `failed_replies()` counts
 //! delivery failures. Packet calls retain their original pool lease;
 //! packetless calls reserve owned payload storage fallibly.
 //!
@@ -136,12 +136,13 @@ impl<T> Drop for SharedRef<T> {
 type Rc<T> = SharedRef<T>;
 type Arc<T> = SharedRef<T>;
 
-/// A packet retained under the module's held-packet quota. Drop and access it
+/// A retained pool reference owned by this task. Drop and access it
 /// only during a task poll or cancellation, while host access is available.
 /// A link returning ERR_BUSY leaves this exact lease available for retry.
 pub struct Packet {
     ctx: TaskContext,
     handle: u32,
+    offset: usize,
     len: usize,
 }
 impl Packet {
@@ -152,12 +153,12 @@ impl Packet {
         if self.handle == 0 {
             return Err(ERR_ARG);
         }
-        let (p, cap) = self.ctx.with_hw(|h| h.pkt_buf(self.handle))??;
-        if self.len > cap {
+        let (p, cap) = self.ctx.with_hw(|h| h.pkt_span(self.handle))??;
+        if self.offset>cap || self.len > cap-self.offset {
             return Err(ERR_SIZE);
         }
         // The guard owns the retained lease and no mutable buffer is exposed.
-        Ok(unsafe { core::slice::from_raw_parts(p, self.len) })
+        Ok(unsafe { core::slice::from_raw_parts(p.add(self.offset), self.len) })
     }
     pub fn send(&mut self, dst: u32, component: i32, method: i32, id: u64) -> i32 {
         if self.handle == 0 {
@@ -195,6 +196,9 @@ pub struct OwnedCall {
     pub time_us: u32,
     pub from: u32,
     pub id: u64,
+    /// A datagram's source when it was received on a runtime-owned UDP socket
+    /// (kept through a snapshot for the async reply).
+    pub src: Option<([u8; 16], u16, u32)>,
     pub packet: Option<Packet>,
     bytes: Vec<u8>,
 }
@@ -215,25 +219,26 @@ impl OwnedCall {
             from: self.from,
             id: self.id,
             data: self.data()?,
-            pkt: self.packet.as_ref().map_or(0, Packet::handle), request_id: None })
+            pkt: self.packet.as_ref().map_or(0, Packet::handle), request_id: None, src: self.src })
     }
     fn snapshot(ctx: &TaskContext, hw: &Hw, c: &CallView) -> Result<Self, i32> {
         let mut bytes = Vec::new();
         let packet = if c.pkt != 0 {
-            let rc = hw.pkt_keep(c.pkt);
-            if rc < 0 {
-                return Err(rc);
+            // Normalize an envelope's fields before retaining a read reference.
+            let (base,capacity)=hw.pkt_span(c.pkt)?;
+            let mut data=c.data.as_ptr();
+            if let Ok((p,cap))=hw.pkt_buf(c.pkt) {
+                if c.data.len()>cap {return Err(ERR_SIZE);}
+                if !c.data.is_empty() && data!=p.cast_const() {unsafe {core::ptr::copy(data,p,c.data.len());}}
+                data=p.cast_const();
             }
-            // A request the runtime parsed from an envelope lends the fields, which lie inside the packet: move them to its start so the
-            // packet is the payload (`Packet::data`, `Packet::send` take it from there).
-            if let Ok((p, cap)) = hw.pkt_buf(c.pkt) {
-                if c.data.len() <= cap && !c.data.is_empty() && c.data.as_ptr() != p as *const u8 {
-                    unsafe { core::ptr::copy(c.data.as_ptr(), p, c.data.len()) };
-                }
-            }
+            let offset=(data as usize).checked_sub(base as usize).ok_or(ERR_ARG)?;
+            if offset>capacity || c.data.len()>capacity-offset {return Err(ERR_SIZE);}
+            let rc=hw.pkt_keep(c.pkt);if rc<0 {return Err(rc);}
             Some(Packet {
                 ctx: ctx.clone(),
                 handle: c.pkt,
+                offset,
                 len: c.data.len(),
             })
         } else {
@@ -251,12 +256,13 @@ impl OwnedCall {
             time_us: c.time_us,
             from: c.from,
             id: c.id,
+            src: c.src,
             packet,
             bytes,
         })
     }
 }
-// Reuse the incoming borrowed packet when unique: a full held quota must not
+// Reuse the unique incoming packet: allocation pressure must not
 // prevent its own rejection response. Sending consumes that borrowed lease; the
 // runtime releases it after the handler if a blocked link retained it instead.
 fn reply_busy(hw: &Hw, call: &CallView) -> i32 {
@@ -266,7 +272,10 @@ fn reply_busy(hw: &Hw, call: &CallView) -> i32 {
                 unsafe {
                     p.write(0x24);
                 }
-                return hw.send(call.pkt, 1, call.from, call.component, call.method, call.id);
+                if hw.pkt_keep(call.pkt)<0 {return ERR_NOMEM;}
+                let rc=hw.send(call.pkt,1,call.from,call.component,call.method,call.id);
+                if call.from>=crate::ADDR_LINK && rc==crate::ERR_BUSY {hw.pkt_free(call.pkt);}
+                return rc;
             }
         }
     }
@@ -342,7 +351,7 @@ impl TaskContext {
     pub fn with_hw<T>(&self, f: impl FnOnce(&Hw) -> T) -> Result<T, i32> {
         self.0.hw.get().map(|hw| f(&hw)).ok_or(ERR_ARG)
     }
-    /// Refusals since this task started, including inbox, heap and packet quota.
+    /// Refusals since this task started, including inbox and heap pressure.
     pub fn rejected_calls(&self) -> u32 {
         self.0.rejected.get()
     }
@@ -527,7 +536,7 @@ impl Task {
         self.0 = Some(running);
         self.poll(hw, None)
     }
-    /// Number of incoming calls refused by this task (inbox, heap, or packet quota).
+    /// Number of incoming calls refused by this task (inbox or heap pressure).
     pub fn rejected_calls(&self) -> u32 {
         self.1
     }
@@ -675,6 +684,7 @@ mod tests {
             h.pkt_free = Some(free);
             h.pkt_alloc = Some(allocate);
             h.pkt_buf = Some(buffer);
+            h.pkt_span = Some(buffer);
             h.send = Some(send);
             h
         }
@@ -727,7 +737,6 @@ mod tests {
     ) -> i32 {
         assert_eq!(pkt, 7);
         let f = fixture(p);
-        assert!(f.held.get());
         *ptr = f.bytes.get().cast::<u8>();
         *cap = 16;
         0
@@ -735,9 +744,7 @@ mod tests {
     unsafe extern "C" fn keep(p: *mut c_void, pkt: u32) -> i32 {
         assert_eq!(pkt, 7);
         let f = fixture(p);
-        if f.held.replace(true) {
-            return ERR_BUSY;
-        }
+        f.held.set(true);
         f.kept.set(f.kept.get() + 1);
         0
     }
@@ -778,7 +785,7 @@ mod tests {
             from: 0,
             id: 0,
             data: &[],
-            pkt: 0, request_id: None }
+            pkt: 0, request_id: None, src: None }
     }
     fn hw(h: &Host) -> Hw {
         unsafe { Hw::new(h) }.unwrap()
@@ -974,32 +981,6 @@ mod tests {
         task.handle(&hw, &call(HOST_COMPONENT as i32, HOST_STOP as i32));
         assert!(!f.held.get());
         assert_eq!(f.freed.get(), 1);
-    }
-
-    #[test]
-    fn packet_quota_refusal_drops_only_the_incoming_call() {
-        let f = Fixture::new();
-        let h = f.host();
-        let hw = hw(&h);
-        let mut task = Task::default();
-        task.start(&hw, |ctx| async move {
-            ctx.next_call().await;
-            RET_DONE as i32
-        });
-        // A separate held lease has already exhausted this fixture's quota.
-        f.held.set(true);
-        let mut c = call(2, 1);
-        c.pkt = 7;
-        assert_eq!(task.handle(&hw, &c), RET_CONTINUE as i32);
-        assert_eq!(task.rejected_calls(), 1);
-        assert_eq!(f.kept.get(), 0);
-        assert_eq!(f.freed.get(), 0);
-        task.cancel(&hw);
-        assert_eq!(
-            f.freed.get(),
-            0,
-            "the refused borrowed packet was never owned by the task"
-        );
     }
 
     #[test]

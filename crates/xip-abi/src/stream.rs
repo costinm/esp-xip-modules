@@ -24,10 +24,14 @@ pub struct Stream {
     /// on stop. Primary components with a stream manifest need no explicit bind.
     pub listen:
         Option<unsafe extern "C" fn(ctx: *mut c_void, component: c_int, method: c_int) -> c_int>,
-    /// Provider opens from one complete CBOR request envelope; returns handle.
+    /// Provider opens an opaque byte stream with (NULL, 0); the runtime assembles
+    /// its opening CBOR envelope in feed and selects the consumer. A complete
+    /// envelope may also be supplied here. Opening storage is bounded to 512 bytes.
+    /// Returns a generation-bound handle; the provider does no envelope parsing.
     pub open:
         Option<unsafe extern "C" fn(ctx: *mut c_void, envelope: *const u8, len: usize) -> c_int>,
-    /// Provider delivers borrowed bytes. fin requires len=0 and follows all
+    /// Provider delivers borrowed bytes, including an unbound stream's opening
+    /// envelope. The consumed count includes header bytes. fin requires len=0 and follows all
     /// consumed body bytes. Partial/zero consumption retains bytes at provider.
     pub feed: Option<
         unsafe extern "C" fn(

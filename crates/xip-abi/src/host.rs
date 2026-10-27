@@ -2,7 +2,7 @@
 
 use core::ffi::c_void;
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 4;
 
 /// Success.
 pub const OK: i32 = 0;
@@ -22,7 +22,7 @@ pub const ERR_NOMEM: i32 = -6;
 pub const ERR_NOTFOUND: i32 = -7;
 /// The buffer is too small (`*len` says how much is needed).
 pub const ERR_SIZE: i32 = -8;
-/// A module ended holding packets (the host gets them back) or memory (`mem_alloc`: not recoverable, the slot needs a reboot to be replaced) it had not given back. The stop is reported as failed.
+/// A module ended holding managed memory (`mem_alloc`: not recoverable, the slot needs a reboot to be replaced). The stop is reported as failed.
 pub const ERR_LEAK: i32 = -9;
 /// A nonblocking socket operation would block; wait for another readiness event.
 pub const ERR_AGAIN: i32 = -10;
@@ -188,13 +188,13 @@ pub struct Call {
     pub method: i32,
     /// IRQ: the pin level. Alarm: how late it fired, in ms (saturated). `HOST_NETWORK`: 1 or 0. Request: 0. A frame of a link: its signal (`link` component).
     pub value: i32,
-    /// Bit 0: the call is a request that expects an answer (`send` to `from` with the same `id`, `Hw::reply`). Bit 1 (`CALL_LINK`): a frame of a link, `from` is its address and `id` an address token, not a request. Bit 2 (`CALL_LINK_EVENT`): an event of a link, its kind in bits 8..15. Bit 3 (`CALL_ENVELOPE`): a request that arrived as a CBOR envelope, parsed by the runtime (`component`, `method`, `data` = the fields); its answer is wrapped by the runtime.
+    /// Bit 0: the call is a request that expects an answer (`send` to `from` with the same `id`, `Hw::reply`). Bit 1 (`CALL_LINK`): a frame of a link, `from` is its address and `id` an address token, not a request; or a datagram of a runtime-owned UDP socket, `from` the socket handle (answer with `udp_send`), source in `src_*`. Bit 2 (`CALL_LINK_EVENT`): an event of a link, its kind in bits 8..15. Bit 3 (`CALL_ENVELOPE`): a request that arrived as a CBOR envelope, parsed by the runtime (`component`, `method`, `data` = the fields); its answer is wrapped by the runtime.
     pub flags: u32,
     /// Payload, valid during the call only.
     pub data: *const u8,
     /// Length of `data`.
     pub len: usize,
-    /// The packet `data` lives in, lent for this call (0: none, as for alarms and interrupts). Keep it with `pkt_keep`, pass it on with `send`; otherwise it goes back to the pool when the handler returns.
+    /// The owned packet reference transferred with this call (0: none). The handler must release or transfer it; Rust export_module supplies a Drop guard. pkt_keep clones a reference.
     pub pkt: u32,
     /// Who sent it: a component (`ADDR_MAIN` = 0: the application). Answer with `send` to this address.
     pub from: u32,
@@ -208,9 +208,15 @@ pub struct Call {
     pub request_id: u64,
     pub request_has_id: u32,
     pub request_reserved: u32,
+    /// A datagram received on a runtime-owned UDP socket (`CALL_LINK`, `from` its handle): the datagram's source,
+    /// to answer with `udp_send` on the same handle. `src_port` 0: no address. Appended: a host with a
+    /// shorter `size` does not have it; a host without it leaves the fields zero.
+    pub src_ip: [u8; 16],
+    pub src_port: u16,
+    pub src_scope: u32,
 }
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<Call>() == 64);
+const _: () = assert!(core::mem::size_of::<Call>() == 88);
 
 /// first 64 bytes of a module image
 #[repr(C, packed)]
@@ -390,19 +396,8 @@ pub struct Host {
     ///
     /// `int` — `OK`; the restart follows in 300 ms.
     pub reset: Option<unsafe extern "C" fn(user: *mut c_void) -> core::ffi::c_int>,
-    /// Take an empty packet.
-    ///
-    /// The packet is **held** by this module: it counts against a small fixed quota (`CONFIG_XIP_PKT_HELD`, default 4) and is
-    /// returned to the pool when the module sends or frees it, or ends. The handle is an opaque number that is never 0 and
-    /// stops being valid when the packet leaves the module (a stale handle gets `ERR_ARG`, not someone else's packet).
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK` and the handle in `*pkt`; `ERR_NOMEM` when the pool is down to the network's reserve; `ERR_BUSY` when the module already holds its quota.
-    ///
-    /// # Arguments
-    ///
-    /// * `pkt` (`uint32_t *`): The new handle.
+    /// Allocate one owned packet from the shared pool, without a module quota.
+    /// The caller must free or transfer it, including on module shutdown.
     pub pkt_alloc: Option<unsafe extern "C" fn(user: *mut c_void, pkt: *mut u32) -> core::ffi::c_int>,
     /// The payload window of a packet.
     ///
@@ -419,15 +414,8 @@ pub struct Host {
     /// * `ptr` (`uint8_t **`): The window.
     /// * `max` (`size_t *`): Its size.
     pub pkt_buf: Option<unsafe extern "C" fn(user: *mut c_void, pkt: u32, ptr: *mut *mut u8, max: *mut usize) -> core::ffi::c_int>,
-    /// Keep the packet of this call after the handler returns.
-    ///
-    /// # Returns
-    ///
-    /// `int` — `OK` (the packet lifetime is now held), `ERR_ARG`, `ERR_BUSY` when the module holds its quota. Retained receive references remain read borrows until unique: mutable access and link TX return `ERR_BUSY` while another reader exists; there is no implicit clone.
-    ///
-    /// # Arguments
-    ///
-    /// * `pkt` (`uint32_t`): `call.pkt`.
+    /// Clone a packet reference. Each successful retain requires one free or transfer.
+    /// Mutable payload access requires the last reference.
     pub pkt_keep: Option<unsafe extern "C" fn(user: *mut c_void, pkt: u32) -> core::ffi::c_int>,
     /// Give a packet back.
     ///
@@ -449,7 +437,7 @@ pub struct Host {
     ///
     /// # Returns
     ///
-    /// `int` — `OK`; `ERR_NOTFOUND` (no running module has that component), `ERR_BUSY` (its inbox is full), `ERR_SIZE`, `ERR_ARG`.
+    /// `int` — `OK`; `ERR_NOTFOUND` (no running module has that component), `ERR_BUSY` (the delivery queue cannot admit another packet), `ERR_SIZE`, `ERR_ARG`.
     ///
     /// # Arguments
     ///
@@ -643,11 +631,11 @@ pub struct Host {
     pub socket_peer: Option<unsafe extern "C" fn(user: *mut c_void, socket: u32, address: *mut u8, port: *mut u16, scope: *mut u32) -> core::ffi::c_int>,
     /// Full mutable pool slot for framing.
     ///
-    /// Returns the full slot and capacity while the packet is uniquely owned. The caller chooses a valid prefix, payload and suffix range; `socket_write_pkt` validates the selected range. Pointers do not survive packet release or transfer.
+    /// Returns the full slot and capacity for reading while a reference is owned. Writing requires uniqueness. The caller chooses a valid prefix, payload and suffix range; `socket_write_pkt` validates the selected range. Pointers do not survive packet release or transfer.
     ///
     /// # Returns
     ///
-    /// `int` — `OK`, `ERR_ARG`, `ERR_BUSY` when shared.
+    /// `int` — `OK`, `ERR_ARG`. Shared references permit reading; mutable access requires uniqueness.
     ///
     /// # Arguments
     ///
@@ -729,13 +717,14 @@ pub struct Host {
     pub flash_read: Option<unsafe extern "C" fn(user: *mut c_void, address: u32, offset: u32, out: *mut u8, len: usize) -> core::ffi::c_int>,
     /// Structured device and component status.
     ///
-    /// Returns one tagged-CBOR map: `{1: device, 2: wifi, 3: heap, 4: modules, 5: components}`.
+    /// Returns one tagged-CBOR map: `{1: device, 2: wifi, 3: heap, 4: modules, 5: components, 6: packets}`.
     /// Device is `{1: uptime_ms, 2: chip, 3: flash_size, 4: active_partition_label,
     /// 5: active_partition_address, 6: active_partition_size}`. Chip is an ESP chip model number;
     /// partition fields are omitted when the platform cannot identify its running partition.
     /// Wi-Fi, heap and modules reuse the Wi-Fi state, `heap_info` and `modules_info` records;
     /// unavailable Wi-Fi is an empty map and unavailable module enumeration is an empty array.
     /// Components is `{component: {method: {1: updated_ms, 2: status_map}}}`.
+    /// Packets is the global delivery queue/pool snapshot described by host.API.md; empty when unsupported.
     /// Times are milliseconds since boot. Built-in records are read during the call; contributed
     /// records are cached and may be stale. This call never invokes another module handler.
     /// No console module is needed. No partial record is returned on buffer overflow.
@@ -806,9 +795,35 @@ pub struct Host {
     ///
     /// `int` — the number of modules, or a negative error (`ERR_UNSUPPORTED` when the host has no loader).
     pub module_rescan: Option<unsafe extern "C" fn(user: *mut c_void) -> core::ffi::c_int>,
+    /// Shared physical packet pool geometry and current availability.
+    pub pkt_pool_info: Option<unsafe extern "C" fn(user: *mut c_void, out: *mut PacketPoolInfo) -> core::ffi::c_int>,
+    /// Allocate an owned packet, leaving `reserve` physical slots available.
+    pub pkt_acquire: Option<unsafe extern "C" fn(user: *mut c_void, reserve: u32, out: *mut u32) -> core::ffi::c_int>,
+    /// Transmit a slot range. BUSY retains the exact reference; all other outcomes
+    /// consume it. Accepted drivers release their reference after physical use.
+    /// Reserved prefix bytes may be framed synchronously; payload stays immutable.
+    pub pkt_tx: Option<unsafe extern "C" fn(user: *mut c_void, packet: u32, start: u32, len: u32, link: u32, peer: u64) -> core::ffi::c_int>,
+    /// Nonblocking datagram send on a runtime-owned UDP socket the caller received
+    /// on `call.from`, to a datagram source received on `call.src_ip/port/scope`.
+    /// The host copies; there is no send-by-reference. ERR_BUSY retries send from
+    /// the caller; no pool lease is blocked.
+    ///
+    /// # Returns
+    ///
+    /// `int` — bytes sent (equal to `len`), `ERR_BUSY` (the socket would block), `ERR_ARG`, `ERR_NOTFOUND`.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` (`uint32_t`): Socket handle as received in `call.from`.
+    /// * `ip` (`const uint8_t *`): Exactly 16 bytes of the destination address.
+    /// * `port` (`uint16_t`): Destination port, host byte order.
+    /// * `scope` (`uint32_t`): IPv6 interface scope.
+    /// * `data` (`const uint8_t *`): Bytes to send.
+    /// * `len` (`size_t`): Byte count.
+    pub udp_send: Option<unsafe extern "C" fn(user: *mut c_void, handle: u32, ip: *const u8, port: u16, scope: u32, data: *const u8, len: usize) -> core::ffi::c_int>,
 }
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<Host>() == 156);
+const _: () = assert!(core::mem::size_of::<Host>() == 172);
 
 /// Byte offset of each host call, for `Hw`'s check that an older host has the slot.
 pub mod slot {
@@ -839,6 +854,7 @@ pub mod slot {
     pub const SOCKET_WRITE: usize = core::mem::offset_of!(Host, socket_write);
     pub const SOCKET_CLOSE: usize = core::mem::offset_of!(Host, socket_close);
     pub const SOCKET_PEER: usize = core::mem::offset_of!(Host, socket_peer);
+    pub const UDP_SEND: usize = core::mem::offset_of!(Host, udp_send);
     pub const PKT_SPAN: usize = core::mem::offset_of!(Host, pkt_span);
     pub const SOCKET_WRITE_PKT: usize = core::mem::offset_of!(Host, socket_write_pkt);
     pub const FLASH_ERASE: usize = core::mem::offset_of!(Host, flash_erase);
@@ -849,3 +865,16 @@ pub mod slot {
     pub const GET_COMPONENT: usize = core::mem::offset_of!(Host, get_component);
     pub const MODULE_RESCAN: usize = core::mem::offset_of!(Host, module_rescan);
 }
+
+/// Geometry of the shared pool; no per-module allocation budget.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct PacketPoolInfo {
+    pub size: u32,
+    pub slot_bytes: u32,
+    pub headroom: u32,
+    pub max_packet: u32,
+    pub capacity: u32,
+    pub available: u32,
+}
+const _: () = assert!(core::mem::size_of::<PacketPoolInfo>() == 24);

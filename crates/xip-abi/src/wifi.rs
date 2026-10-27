@@ -317,7 +317,7 @@ pub struct WifiTuning {
     pub ampdu: u8,
     /// 802.11b rates; applied before the radio starts. Default: off (DMesh's tested baseline: the legacy basic-rate set is not negotiated).
     pub rates_11b: u8,
-    /// The firmware takes the received frames of the station before the network stack (raw RX). Rust host only.
+    /// Opt-in native STA Ethernet ingress for link-local UDP6 on the default QUIC port, with native Ethernet replies. Other traffic stays with lwIP.
     pub raw_rx: u8,
     /// Station egress through the driver's normal data path (`TUNE_OFF`: raw 802.11 injection). Rust host only.
     pub driver_tx: u8,

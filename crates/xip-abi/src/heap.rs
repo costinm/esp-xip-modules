@@ -166,7 +166,7 @@ mod tests {
 
     fn host() -> Host {
         let mut h: Host = unsafe { core::mem::zeroed() };
-        h.abi_version = 1;
+        h.abi_version = crate::ABI_VERSION;
         h.size = core::mem::size_of::<Host>() as u32;
         h.mem_alloc = Some(fake_alloc);
         h.mem_free = Some(fake_free);
