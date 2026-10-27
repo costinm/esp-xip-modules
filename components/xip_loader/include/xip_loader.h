@@ -119,3 +119,6 @@ void xip_loader_status(int slot, xip_slot_status_t *out);
 #ifdef __cplusplus
 }
 #endif
+
+/* Start the installed owner of a numeric wire component or datagram port. */
+int xip_loader_start_request(int32_t component, uint32_t port);

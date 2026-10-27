@@ -666,6 +666,34 @@ int xip_loader_start_hosting(const char *component)
     return rc;
 }
 
+/* Called only by serialized request dispatch, never by a radio/IO callback.
+ * Scan validated installed metadata before starting anything; duplicate owners
+ * are an error, not a choice based on module start order. */
+int xip_loader_start_request(int32_t component,uint32_t port)
+{
+    if(component<=0 && !port)return XIP_ERR_ARG;
+    uint8_t *m=malloc(4096);if(!m)return XIP_ERR_NOMEM;
+    int selected=-1,rc=XIP_ERR_NOTFOUND;
+    for(size_t i=0;i<xip_loader_slot_count();i++){
+        int n=xip_loader_manifest((int)i,m,4096);if(n<=0)continue;
+        xip_dmod_header h;if(xip_read_header((int)i,&h)!=ESP_OK)continue;
+        bool owns=component>0 && h.tag==component;
+        if(component>0){
+            int32_t ids[XIP_COMPONENTS_MAX]={0};
+            int err=manifest_envelopes((int)i,&h,ids);if(err<0){if(owns){rc=err;goto done;}continue;}
+            for(unsigned k=0;k<XIP_COMPONENTS_MAX;k++)owns|=ids[k]==component;
+        }else{int64_t p=0;owns=xip_cbor_get_int(m,(size_t)n,9,&p)==0 && p==(int64_t)port;}
+        if(!owns)continue;
+        if(selected>=0){rc=XIP_ERR_BUSY;goto done;}selected=(int)i;
+    }
+    if(selected>=0){
+        const char *name=em.slots_found[selected].name;
+        rc=xip_loader_start_named((const uint8_t *)name,strlen(name),NULL,0);
+        if(rc==XIP_LOADER_ERR_RUNNING)rc=0;
+    }
+done:free(m);return rc;
+}
+
 int xip_loader_manifest_named(const uint8_t *name, size_t n, uint8_t *out, size_t capacity)
 {
     int slot = find_named(name, n);

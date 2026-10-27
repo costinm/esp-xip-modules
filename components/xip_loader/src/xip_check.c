@@ -5,7 +5,7 @@
 xip_dmod_result_t xip_dmod_check(const xip_dmod_header *h, const xip_slot_rules_t *r)
 {
     if (h->magic != XIP_DMOD_MAGIC) return EMD_BAD_MAGIC;
-    if (h->abi_version == 0 || h->abi_version > XIP_ABI_VERSION) return EMD_BAD_VERSION;
+    if (h->abi_version != XIP_ABI_VERSION) return EMD_BAD_VERSION;
     if (h->header_size != XIP_DMOD_HEADER_SIZE || h->reserved0 != 0 || h->stack_bytes > r->max_stack_bytes ||
         h->state_bytes > 4096)
         return EMD_BAD_HEADER;
