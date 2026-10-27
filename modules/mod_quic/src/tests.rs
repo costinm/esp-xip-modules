@@ -4,14 +4,12 @@ use quic_lite::heap_packet_pool::HeapPacketPool;
 use std::{collections::BTreeMap, vec, vec::Vec};
 struct Slot {
     bytes: Box<[u8]>,
-    owned: bool,
+    refs: usize,
 }
 struct Physical {
-    slot: Slot,
+    handle: u32,
     start: usize,
     len: usize,
-    ticket: u32,
-    epoch: u32,
 }
 #[derive(Default)]
 struct Consumer {
@@ -23,8 +21,6 @@ struct Fake {
     next: u32,
     held: BTreeMap<u32, Slot>,
     physical: Vec<Physical>,
-    done: Vec<(QuicTxCompletion, Slot)>,
-    epoch: u32,
     attached: bool,
     busy: usize,
     attempts: Vec<(usize, Vec<u8>)>,
@@ -40,8 +36,6 @@ impl Default for Fake {
             next: 0,
             held: BTreeMap::new(),
             physical: Vec::new(),
-            done: Vec::new(),
-            epoch: 0,
             attached: false,
             busy: 0,
             attempts: Vec::new(),
@@ -57,13 +51,13 @@ unsafe fn f<'a>(p: *mut c_void) -> &'a mut Fake {
     &mut *p.cast()
 }
 impl Fake {
-    fn alloc(&mut self, owned: bool) -> u32 {
+    fn alloc(&mut self, _owned: bool) -> u32 {
         self.next += 1;
         self.held.insert(
             self.next,
             Slot {
                 bytes: vec![0; 1704].into_boxed_slice(),
-                owned,
+                refs: 1,
             },
         );
         self.next
@@ -71,23 +65,8 @@ impl Fake {
     fn complete_physical(&mut self) -> Vec<Vec<u8>> {
         let mut wire = Vec::new();
         for p in core::mem::take(&mut self.physical) {
-            wire.push(p.slot.bytes[p.start..p.start + p.len].to_vec());
-            if self.attached && p.epoch == self.epoch {
-                self.done.push((
-                    QuicTxCompletion {
-                        size: core::mem::size_of::<QuicTxCompletion>() as u32,
-                        ticket: p.ticket,
-                        start: p.start as u32,
-                        len: p.len as u32,
-                        link: ADDR_LINK + 1,
-                        peer: 1,
-                        outcome: 0,
-                        elapsed_us: 1,
-                        ..Default::default()
-                    },
-                    p.slot,
-                ));
-            }
+            wire.push(self.held[&p.handle].bytes[p.start..p.start+p.len].to_vec());
+            unsafe { free((self as *mut Fake).cast(),p.handle); }
         }
         wire
     }
@@ -103,15 +82,12 @@ unsafe extern "C" fn span(p: *mut c_void, h: u32, base: *mut *mut u8, cap: *mut 
     0
 }
 unsafe extern "C" fn keep(p: *mut c_void, h: u32) -> i32 {
-    let f = f(p);
-    if f.held.values().filter(|s| s.owned).count() >= 4 {
-        return ERR_BUSY;
-    }
-    f.held.get_mut(&h).unwrap().owned = true;
+    f(p).held.get_mut(&h).unwrap().refs+=1;
     0
 }
 unsafe extern "C" fn free(p: *mut c_void, h: u32) -> i32 {
-    assert!(f(p).held.remove(&h).is_some(), "double native release {h}");
+    let f=f(p);let slot=f.held.get_mut(&h).expect("double native release");
+    slot.refs-=1;if slot.refs==0 {f.held.remove(&h);}
     0
 }
 unsafe extern "C" fn now(p: *mut c_void) -> u64 {
@@ -137,34 +113,28 @@ unsafe extern "C" fn cancel(_: *mut c_void, _: i32) -> i32 {
 }
 unsafe extern "C" fn attach(p: *mut c_void, _: i32) -> i32 {
     let f = f(p);
-    f.epoch += 1;
     f.attached = true;
     0
 }
 unsafe extern "C" fn detach(p: *mut c_void) -> i32 {
     let f = f(p);
     f.attached = false;
-    f.done.clear();
     0
 }
-unsafe extern "C" fn pool_info(p: *mut c_void, out: *mut QuicPoolInfo) -> i32 {
+unsafe extern "C" fn pool_info(p: *mut c_void, out: *mut PacketPoolInfo) -> i32 {
     let f = f(p);
-    *out = QuicPoolInfo {
-        size: core::mem::size_of::<QuicPoolInfo>() as u32,
+    *out = PacketPoolInfo {
+        size: core::mem::size_of::<PacketPoolInfo>() as u32,
         slot_bytes: 1704,
         headroom: 144,
         max_packet: 1448,
-        capacity: 4,
-        available: 4u32
-            .saturating_sub(f.held.values().filter(|s| s.owned).count() as u32)
-            .min(8u32.saturating_sub(
-                f.held.len() as u32 + f.physical.len() as u32 + f.done.len() as u32,
-            )),
+        capacity: 32,
+        available: 32u32.saturating_sub(f.held.len() as u32),
     };
     0
 }
 unsafe extern "C" fn acquire(p: *mut c_void, reserve: u32, out: *mut u32) -> i32 {
-    let mut info = QuicPoolInfo::default();
+    let mut info = PacketPoolInfo::default();
     pool_info(p, &mut info);
     if info.available <= reserve {
         return ERR_BUSY;
@@ -179,7 +149,6 @@ unsafe extern "C" fn transmit(
     len: u32,
     _: u32,
     _: u64,
-    ticket: *mut u32,
 ) -> i32 {
     let f = f(p);
     let s = f.held.get(&h).unwrap();
@@ -191,42 +160,21 @@ unsafe extern "C" fn transmit(
         f.busy -= 1;
         return ERR_BUSY;
     }
-    let s = f.held.remove(&h).unwrap();
-    *ticket = h;
     f.physical.push(Physical {
-        slot: s,
+        handle: h,
         start: start as usize,
         len: len as usize,
-        ticket: h,
-        epoch: f.epoch,
     });
     0
-}
-unsafe extern "C" fn poll(p: *mut c_void, out: *mut QuicTxCompletion) -> i32 {
-    let f = f(p);
-    if f.done.is_empty() {
-        return 0;
-    }
-    if f.held.values().filter(|s| s.owned).count() >= 4 {
-        return ERR_BUSY;
-    }
-    let (mut done, mut slot) = f.done.remove(0);
-    slot.owned = true;
-    f.next += 1;
-    done.packet = f.next;
-    f.held.insert(f.next, slot);
-    *out = done;
-    1
 }
 static QUIC: Quic = Quic {
     version: QUIC_VERSION,
     size: core::mem::size_of::<Quic>() as u32,
     attach: Some(attach),
     detach: Some(detach),
-    pool_info: Some(pool_info),
-    acquire: Some(acquire),
-    try_send: Some(transmit),
-    poll_tx: Some(poll),
+    relay_set: None, relay_get: None, relay_remove: None,
+    relay_create: None, relay_stats: None, relay_expire: None, relay_idle: None,
+
 };
 unsafe extern "C" fn link_info(_: *mut c_void, _: u32, out: *mut LinkInfo) -> i32 {
     let mut info: LinkInfo = core::mem::zeroed();
@@ -341,6 +289,10 @@ fn host(fake: &mut Fake) -> Host {
     h.user = (fake as *mut Fake).cast();
     h.pkt_alloc = Some(alloc);
     h.pkt_span = Some(span);
+    h.pkt_buf=Some(buf);
+    h.pkt_pool_info=Some(pool_info);
+    h.pkt_acquire=Some(acquire);
+    h.pkt_tx=Some(transmit);
     h.pkt_keep = Some(keep);
     h.pkt_free = Some(free);
     h.now_us = Some(now);
@@ -367,11 +319,9 @@ fn receive(state: &mut State, hw: &Hw, fake: &mut Fake, bytes: &[u8]) {
         from: ADDR_LINK + 1,
         id: 1,
         request_id: None,
+        src: None,
     };
-    state.handle(hw, &call);
-    if fake.held.get(&h).is_some_and(|s| !s.owned) {
-        fake.held.remove(&h);
-    }
+    state.handle_owned(hw,&call,Some(unsafe {Packet::from_raw(*hw,h)}));
 }
 fn tick(state: &mut State, hw: &Hw) {
     let call = CallView {
@@ -385,8 +335,11 @@ fn tick(state: &mut State, hw: &Hw) {
         from: 0,
         id: 0,
         request_id: None,
+        src: None,
     };
     state.handle(hw, &call);
+    let ready=CallView {flags:CALL_LINK|CALL_LINK_EVENT|(LINK_EVENT_READY<<8),from:ADDR_LINK+1,..call};
+    state.handle(hw,&ready);
 }
 type ClientPool = HeapPacketPool<16, 1704>;
 struct ClientBearer {
@@ -425,10 +378,14 @@ impl PacketBearer<ClientPool> for ClientBearer {
 }
 #[test]
 fn opaque_stream_delivery_preserves_bytes_under_loss_backpressure_and_busy() {
-    echo_fixture(false);
-    echo_fixture(true);
+    echo_fixture(false,4096);
+    echo_fixture(true,4096);
 }
-fn echo_fixture(loss: bool) {
+#[test]
+fn large_owned_streams_release_all_holders() { echo_fixture(false,65536); }
+fn echo_fixture(loss: bool, size:usize) {
+    static SERIAL:std::sync::Mutex<()>=std::sync::Mutex::new(());
+    let _serial=SERIAL.lock().unwrap();
     static CLIENT: ClientPool = ClientPool::new();
     CLIENT.resize(16).unwrap();
     let mut fake = Fake::default();
@@ -442,6 +399,9 @@ fn echo_fixture(loss: bool) {
             .is_none(),
         "idle endpoint must not allocate QUIC"
     );
+    let cx = unsafe { &mut *(state.context as *mut Context) };
+    assert!(cx.stats.is_none(), "diagnostic recording must be opt-in");
+    if loss { cx.configure_stats(&[0xa1,1,0xf5]).unwrap(); }
     let context = Arc::new(Mutex::new(None));
     let wire = Arc::new(Mutex::new(Vec::new()));
     let mut client: NoStdRuntime<_, 1100> = NoStdRuntime::new(
@@ -465,7 +425,7 @@ fn echo_fixture(loss: bool) {
         )
         .unwrap();
     let mut streams = None;
-    let input = [vec![0x7e; 4096], vec![0x7d; 4096],vec![0x55;1537]];
+    let input = [vec![0x7e; size], vec![0x7d; size],vec![0x55;1537]];
     let header = [0xa4, 1, 0x18, 44, 2, 1, 3, 1, 5, 0xa0];
     let wire_input = input.each_ref().map(|body| {
         let mut bytes = header.to_vec();
@@ -565,6 +525,18 @@ fn echo_fixture(loss: bool) {
         tick(&mut state, &hw);
         fake.complete_physical();
     }
+    let cx = unsafe { &mut *(state.context as *mut Context) };
+    if loss {
+        assert!(cx.core.is_none());
+        let saved = cx.stats.as_deref().unwrap();
+        assert!(saved.received_packets > 0 && saved.sent_packets > 0);
+        let mut bytes = [0;256]; let mut w = Writer::new(&mut bytes);
+        cx.write_stats(&mut w); let bytes=w.finish().unwrap();
+        assert_eq!(cbor::get_int(bytes,3).unwrap(),Some(saved.received_packets as i64));
+        assert!(matches!(cbor::get(bytes,2).unwrap().unwrap().next(),Some(cbor::Item::Bool(false))));
+        cx.configure_stats(&[0xa1,1,0xf4]).unwrap();
+    }
+    assert!(cx.stats.is_none(), "disable must release the snapshot");
     let context_state = unsafe { &*(state.context as *const Context) };
     assert!(
         context_state.core.is_none(),
@@ -572,7 +544,6 @@ fn echo_fixture(loss: bool) {
     );
     assert_eq!(context_state.alarm, -1, "idle endpoint must stop its timer");
     assert!(fake.held.is_empty());
-    assert!(fake.done.is_empty());
     assert!(fake.physical.is_empty());
     assert_eq!(
         fake.allocations.len(),
@@ -582,7 +553,6 @@ fn echo_fixture(loss: bool) {
     state.stop(&hw);
     fake.complete_physical();
     assert!(fake.held.is_empty());
-    assert!(fake.done.is_empty());
     assert!(fake.allocations.is_empty());
     drop(client);
     drop(context);
@@ -612,37 +582,23 @@ fn stopping_disowns_physical_frames_and_restart_never_rebinds_old_epoch() {
     })
     .unwrap();
     let (buffer, range) = packet.into_parts();
-    let mut ticket = 0;
-    assert_eq!(
-        unsafe {
-            QUIC.try_send.unwrap()(
-                hw.ctx(),
-                buffer.handle(),
-                range.start as u32,
-                5,
-                ADDR_LINK + 1,
-                1,
-                &mut ticket,
-            )
-        },
-        0
-    );
-    buffer.moved();
+    assert_eq!(hw.pkt_keep(buffer.handle()),0);
+    assert_eq!(unsafe {transmit(hw.ctx(),buffer.handle(),range.start as u32,5,ADDR_LINK+1,1)},0);
+    drop(buffer); // only the driver reference survives protocol close
     state.stop(&hw);
     assert_eq!(state.context, 0);
     assert!(!fake.physical.is_empty());
     state.start(&hw).unwrap();
     assert_ne!(state.context, 0);
-    assert_ne!(fake.epoch, 1);
     let _ = ptr;
     fake.complete_physical();
-    assert!(
-        fake.done.is_empty(),
-        "old physical completion must not reach new endpoint"
-    );
-    drop(buffer);
     drop(pool);
     state.stop(&hw);
     assert!(fake.allocations.is_empty());
     assert!(fake.held.is_empty());
+}
+
+unsafe extern "C" fn buf(p:*mut c_void,h:u32,ptr:*mut *mut u8,max:*mut usize)->i32 {
+    let s=f(p).held.get_mut(&h).unwrap();if s.refs!=1 {return ERR_BUSY;}
+    *ptr=s.bytes.as_mut_ptr().add(144);*max=1500;0
 }

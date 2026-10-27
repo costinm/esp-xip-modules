@@ -18,6 +18,11 @@ const COMPONENT: i32 = 48;
 const RX: i32 = 100;
 const TICK: i32 = 101;
 pub const STATE_BYTES: usize = 8;
+// Credit and retention ceilings, not eagerly allocated packet/receive buffers.
+const RECEIVE_LIMITS: ConnectionLimits = ConnectionLimits::with_receive_profile(32*1024,16*1024,2);
+const HISTORY_PACKETS: usize = 6;
+const TRANSMISSION_RECORDS: usize = 12;
+const BUFFERED_STREAM_BYTES: usize = 32*1024;
 #[derive(Default)]
 pub struct State {
     context: usize,
@@ -41,13 +46,15 @@ impl Drop for Core {
     }
 }
 impl Core {
+    // Keep cold construction temporaries off the receive/dispatch stack.
+    #[inline(never)]
     fn new(native: Native) -> Result<Self, i32> {
         let pool = Box::new(Pool { native });
         // SAFETY: this boxed pointee never moves. No Rust callback or pool ref
         // is registered with SDK code or escapes Core. runtime + bridges drop
         // first; State detaches native RX/completions before dropping Core.
         let scoped_static = unsafe { &*(pool.as_ref() as *const Pool) };
-        let limits = ConnectionLimits::with_receive_profile(4096, 2048, 2);
+        let limits = RECEIVE_LIMITS;
         let mut runtime =
             NoStdRuntime::try_new_boxed(scoped_static, limits).map_err(|_| ERR_NOMEM)?;
         runtime
@@ -58,12 +65,12 @@ impl Core {
             })
             .map_err(|_| ERR_ARG)?;
         let mut limits = AssociationLimits::embedded();
-        limits.connection = ConnectionLimits::with_receive_profile(4096, 2048, 2);
-        limits.history_packets = 2;
-        limits.transmission_records = 4;
+        limits.connection = RECEIVE_LIMITS;
+        limits.history_packets = HISTORY_PACKETS;
+        limits.transmission_records = TRANSMISSION_RECORDS;
         limits.max_pending_streams = 2;
         limits.max_queued_chunks_per_stream = 1;
-        limits.max_buffered_stream_bytes = 4096;
+        limits.max_buffered_stream_bytes = BUFFERED_STREAM_BYTES;
         limits.duplication_budget_bytes = 1;
         runtime
             .set_default_association_limits(limits)
@@ -109,7 +116,6 @@ impl Core {
         let bridge = Arc::new(Mutex::new(Bridge {
             link,
             context: None,
-            pending: Vec::new(),
         }));
         let bearer = Bearer {
             native,
@@ -141,14 +147,10 @@ impl Core {
         self.bridges.push(bridge.clone());
         Ok(bridge)
     }
-    fn receive(&mut self, call: &CallView) -> Result<(), i32> {
+    fn receive(&mut self, call: &CallView, owned: xip_abi::Packet) -> Result<(), i32> {
         let bridge = self.bridge(call.from)?;
         let context = bridge.lock().context.clone().ok_or(ERR_IO)?;
-        let rc = self.pool.native.hw.pkt_keep(call.pkt);
-        if rc < 0 {
-            return Err(rc);
-        }
-        let buffer = Buffer::owned(self.pool.native, call.pkt)?;
+        let buffer=Buffer::owned(self.pool.native,owned.into_raw())?;
         let base = buffer.as_ref().as_ptr() as usize;
         let start = (call.data.as_ptr() as usize)
             .checked_sub(base)
@@ -170,45 +172,47 @@ impl Core {
         );
         Ok(())
     }
-    fn poll_completions(&mut self) -> Result<(), i32> {
-        let native = self.pool.native;
-        for _ in 0..4 {
-            let mut done = QuicTxCompletion {
-                size: core::mem::size_of::<QuicTxCompletion>() as u32,
-                ..Default::default()
-            };
-            let rc =
-                unsafe { native.table.poll_tx.ok_or(ERR_UNSUPPORTED)?(native.hw.ctx(), &mut done) };
-            if rc == 0 || rc == ERR_BUSY {
-                break;
-            }
-            if rc < 0 {
-                return Err(rc);
-            }
-            if let Some(b) = self.bridges.iter().find(|b| b.lock().link == done.link) {
-                b.lock().poll(native, done)?;
-            } else {
-                native.hw.pkt_free(done.packet);
-            }
-        }
-        for b in &self.bridges {
-            if let Some(c) = &b.lock().context {
-                c.send_ready();
-            }
-        }
-        Ok(())
-    }
-    // Keep timer/retirement scratch out of the live ingress call chain. The
-    // shared worker cannot retain both phase frames while admitting a peer.
-    #[inline(never)]
     fn advance_clock(&mut self, now: u64)->Result<(),i32> {
         match self.runtime.advance_time(now){Ok(_)=>Ok(()),Err(e) if e.is_retryable()=>Ok(()),Err(_)=>Err(ERR_IO)}
     }
     #[inline(never)]
     fn progress_ingress(&mut self)->Result<(),i32> {
+        let native = self.pool.native;
+        let table = self.streams.ok_or(ERR_UNSUPPORTED)?;
+        let sessions = &mut self.sessions;
+        // Retry refused suffixes even if receive credit has stopped the peer.
+        // The node owns retained bytes; the adapter never builds a chunk queue.
+        for session in sessions.iter_mut().filter(|s| s.input.needs_resume && !s.closed) {
+            let stream = &session.stream;
+            match self.runtime.resume_stream_with(stream, |_, _, fin, bytes| {
+                match session.input.feed(native, table, bytes, fin) {
+                    Ok(n) => Ok(n),
+                    Err(rc) => { session.input.input_error = Some(rc); Ok(0) }
+                }
+            }) {
+                Ok(_) => {},
+                Err(e) if e.is_retryable() => {},
+                Err(_) => return Err(ERR_IO),
+            }
+        }
         for _ in 0..4 {
-            match self.runtime.progress() {
-                Ok(true) => {}
+            let result = self.runtime.progress_with_stream(|stream, _, fin, bytes| {
+                let at = match sessions.iter().position(|s| s.stream.same_stream(&stream)) {
+                    Some(i) => i,
+                    None => {
+                        if sessions.len() >= 2 { return Err(Error::Invalid); }
+                        sessions.try_reserve(1).map_err(|_| Error::HistoryFull)?;
+                        sessions.push(Session::new(stream));
+                        sessions.len()-1
+                    }
+                };
+                match sessions[at].input.feed(native, table, bytes, fin) {
+                    Ok(n) => Ok(n),
+                    Err(rc) => { sessions[at].input.input_error = Some(rc); Ok(0) }
+                }
+            });
+            match result {
+                Ok(true) => {},
                 Ok(false)=>break,
                 Err(e) if e.is_retryable()=>break,
                 Err(_)=>return Err(ERR_IO),
@@ -217,51 +221,31 @@ impl Core {
         Ok(())
     }
     fn progress(&mut self, now: u64) -> Result<(), i32> {
-        self.poll_completions()?;
         self.advance_clock(now)?;
         self.progress_ingress()?;
+        self.progress_egress()
+    }
+    // Keep egress bookkeeping off the ingress call chain. StreamPacket is
+    // handle/range metadata; encoded wire bytes are written into a pool lease.
+    #[inline(never)]
+    fn progress_egress(&mut self) -> Result<(), i32> {
         while self.runtime.next_association().is_some() {}
         let table = self.streams.ok_or(ERR_UNSUPPORTED)?;
-        // The portable owned-chunk API bounds admission to one queued chunk per
-        // stream. Retain/move that allocation until its consumer accepts it;
-        // no read/copy through lwIP or a second body queue.
-        if self.sessions.iter().all(|s| s.input.is_none()) {
-            if let Some(chunk) = self.runtime.next_stream_chunk() {
-                let at = if let Some(i) = self
-                    .sessions
-                    .iter()
-                    .position(|s| s.stream.same_stream(&chunk.stream))
-                {
-                    i
-                } else {
-                    if self.sessions.len() >= 2 {
-                        return Err(ERR_BUSY);
-                    }
-                    self.sessions.try_reserve(1).map_err(|_| ERR_NOMEM)?;
-                    self.sessions.push(Session::new(chunk.stream));
-                    self.sessions.len() - 1
-                };
-                self.sessions[at].input = Some(streams::Input {
-                    bytes: chunk.bytes,
-                    fin: chunk.fin,
-                });
-            }
-        }
         for s in &mut self.sessions {
             if s.closed {
                 continue;
             }
-            if let Err(rc) = s.feed(self.pool.native, table) {
+            if let Some(rc) = s.input.input_error.take() {
                 s.close(self.pool.native, table);
                 let _ = self.runtime.finish_stream(&mut s.stream);
                 return Err(rc);
             }
-            if s.handle != 0 && s.output.is_none() && self.pool.native.info()?.available > 2 {
+            if s.input.handle != 0 && s.output.is_none() && self.pool.native.info()?.available > 2 {
                 let mut out = StreamPacket::default();
                 let rc = unsafe {
                     table.take.ok_or(ERR_UNSUPPORTED)?(
                         self.pool.native.hw.ctx(),
-                        s.handle,
+                        s.input.handle,
                         &mut out,
                     )
                 };
@@ -298,8 +282,10 @@ impl Core {
                 } else if count == 0 {
                     continue;
                 } else {
-                    // Split immutable ranges of the SAME pool lease. Reliable
-                    // history owns each accepted range; no payload clone.
+                    // Reliable history retains ranges of this source lease,
+                    // avoiding a separate retransmission-payload heap copy.
+                    // quic-lite still copies each range into its encoded wire
+                    // packet; the socket API also copies on submission.
                     let (buffer, range) = packet.clone_shared().into_parts();
                     let start = range.start + s.output_at;
                     let part =
@@ -322,7 +308,7 @@ impl Core {
                         unsafe {
                             table.written.ok_or(ERR_UNSUPPORTED)?(
                                 self.pool.native.hw.ctx(),
-                                s.handle,
+                                s.input.handle,
                             );
                         }
                         if s.output_fin {
@@ -343,9 +329,7 @@ impl Core {
         self.sessions.retain(|s|!s.closed);
         Ok(())
     }
-    fn in_flight(&self) -> bool {
-        self.bridges.iter().any(|b| !b.lock().pending.is_empty())
-    }
+
 }
 struct Context {
     native: Native,
@@ -355,14 +339,51 @@ struct Context {
     errors: u64,
     last_error: i32,
     last_rx_us: u64,
+    stats: Option<Box<NodeTelemetry>>,
 }
 impl Context {
+    fn configure_stats(&mut self, fields: &[u8]) -> Result<(), i32> {
+        match cbor::get(fields, 1).map_err(|_| ERR_ARG)? {
+            None => {},
+            Some(mut r) => match r.next() {
+                Some(cbor::Item::Bool(true)) => self.stats = Some(Box::new(NodeTelemetry::default())),
+                Some(cbor::Item::Bool(false)) => self.stats = None,
+                _ => return Err(ERR_ARG),
+            },
+        }
+        Ok(())
+    }
+    fn sample_stats(&mut self) {
+        if let (Some(saved), Some(core)) = (&mut self.stats, &self.core) {
+            let current = core.runtime.telemetry();
+            if current.live_associations != 0 { **saved = current; }
+        }
+    }
+    fn write_stats(&self, w: &mut Writer) {
+        let current = self.core.as_ref().map(|c| c.runtime.telemetry()).unwrap_or_default();
+        let t = if current.live_associations != 0 { current }
+            else { self.stats.as_deref().copied().unwrap_or_default() };
+        w.map(15).uint(1).boolean(self.stats.is_some())
+            .uint(2).boolean(current.live_associations != 0)
+            .uint(3).uint(t.received_packets).uint(4).uint(t.sent_packets)
+            .uint(5).uint(t.duplicate_packets).uint(6).uint(t.out_of_order_packets)
+            .uint(7).uint(t.inferred_missing_packets).uint(8).uint(t.retransmitted_packets)
+            .uint(9).uint(t.loss_events).uint(10).uint(t.submission_failures)
+            .uint(11).uint(t.received_stream_packets).uint(12).uint(t.received_control_packets)
+            .uint(13).uint(t.sent_stream_packets).uint(14).uint(t.sent_control_packets)
+            .uint(15).boolean(t.live_associations != 0);
+    }
     fn tick(&mut self) {
         let now = self.native.hw.now_us().unwrap_or(0);
+        self.sample_stats();
         if let Some(c) = self.core.as_mut() {
             if let Err(rc) = c.progress(now) {
                 self.errors += 1;
                 self.last_error = rc;
+            }
+            if let Some(saved) = &mut self.stats {
+                let current = c.runtime.telemetry();
+                if current.live_associations != 0 { **saved = current; }
             }
             if c.runtime.telemetry().live_associations == 0 {
                 if let Some(t) = c.streams {
@@ -372,7 +393,7 @@ impl Context {
                 }
                 c.sessions.clear();
             }
-            if c.runtime.telemetry().live_associations == 0 && !c.in_flight() {
+            if c.runtime.telemetry().live_associations == 0 {
                 self.core = None;
             }
         }
@@ -451,6 +472,7 @@ impl State {
                 errors: 0,
                 last_error: 0,
                 last_rx_us: 0,
+                stats: None,
             });
         }
         self.context = ptr as usize;
@@ -478,18 +500,9 @@ impl State {
     }
 }
 impl Module for State {
-    fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
-        if call.is_host(HOST_START) {
-            return self.start(hw).map_or_else(|e| e, |_| RET_CONTINUE as i32);
-        }
-        if call.is_host(HOST_STOP) {
-            self.stop(hw);
-            return RET_CONTINUE as i32;
-        }
-        if self.context == 0 {
-            return RET_CONTINUE as i32;
-        }
-        let cx = unsafe { &mut *(self.context as *mut Context) };
+    fn handle_owned(&mut self,hw:&Hw,call:&CallView,packet:Option<xip_abi::Packet>)->i32 {
+        if call.pkt!=0 && call.flags & CALL_LINK_EVENT==0 && self.context!=0 {
+            let cx=unsafe {&mut *(self.context as *mut Context)};
         if call.component == COMPONENT && call.method == RX && call.flags & CALL_LINK != 0 {
             cx.received += 1;
             cx.last_rx_us = hw.now_us().unwrap_or(0);
@@ -503,12 +516,35 @@ impl Module for State {
                     }
                 }
             }
-            if let Err(rc) = cx.core.as_mut().unwrap().receive(call) {
+            if let Err(rc) = cx.core.as_mut().unwrap().receive(call,packet.unwrap()) {
                 cx.errors += 1;
                 cx.last_error = rc;
             }
             cx.tick();
             return RET_CONTINUE as i32;
+        }
+        }
+        self.handle(hw,call)
+    }
+    fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
+        if call.is_host(HOST_START) {
+            return self.start(hw).map_or_else(|e| e, |_| RET_CONTINUE as i32);
+        }
+        if call.is_host(HOST_STOP) {
+            self.stop(hw);
+            return RET_CONTINUE as i32;
+        }
+        if self.context == 0 {
+            return RET_CONTINUE as i32;
+        }
+        let cx = unsafe { &mut *(self.context as *mut Context) };
+        if call.flags & CALL_LINK_EVENT != 0 {
+            if let Some(c)=&cx.core {
+                for b in &c.bridges { let b=b.lock();if b.link==call.from {
+                    if let Some(context)=&b.context { context.send_ready(); }
+                }}
+            }
+            cx.tick();return RET_CONTINUE as i32;
         }
         if call.component == COMPONENT && call.method == TICK && call.flags & CALL_LINK == 0 {
             cx.alarm = -1;
@@ -542,6 +578,11 @@ impl Module for State {
                 .boolean(false)
                 .uint(7)
                 .uint(2);
+        } else if method == 3 {
+            match cx.configure_stats(call.data) {
+                Ok(()) => cx.write_stats(&mut w),
+                Err(rc) => { w.int(rc as i64); },
+            }
         } else if method == 2 {
             match cx.reset() {
                 Ok(()) => {

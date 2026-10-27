@@ -13,7 +13,21 @@ Start it on a device with an enabled network link:
 
 ```sh
 dmesh-cli console "$PORT" console.start --name=quic
-dmesh-cli console "$PORT" quic.status --port 244
+dmesh-cli console "$PORT" quic.status
 ```
 
-See [API.md](API.md) for control methods and [the upload commands](../../notes/docs/quic_flash.md) for UART/USB and UDP flashing.
+Enable optional transport counters before a test, then read the last snapshot:
+
+```sh
+dmesh-cli "$PORT" quic.stats --enabled=true
+dmesh-cli "$PORT" quic.stats
+dmesh-cli "$PORT" quic.stats --enabled=false
+```
+
+See [API.md](API.md) for control methods and [the upload commands](../../notes/ai/quic/quic_flash.md) for UART/USB and UDP flashing.
+
+The endpoint uses the runtime's shared packet pool through generic Host ABI 4.
+It owns received packets and retained protocol history until consumption or
+close. Accepted TX holds a separate driver reference until physical use ends.
+There are no endpoint packet quotas, ticket tables or return-packet completion
+queues; TX BUSY keeps the prepared packet for another path or retry.

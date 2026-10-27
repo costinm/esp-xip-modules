@@ -16,7 +16,7 @@ quic-lite = { git = "https://github.com/costinm/dmesh", rev = "ab109bf1836bbe1be
 
 [package.metadata]
 # Options for tools/mkmod.py (scripts/build.sh). 
-mkmod = "--stack 4096 --state 512 --port 3 --stream 3"
+mkmod = "--stack 4096 --state 512 --port 3 --stream 3 --envelopes 8"
 
 [features]
 flat-image = ["xip-abi/global-alloc"]

@@ -71,4 +71,3 @@ Only the opening nan.report request is sent. The CLI half-closes its sending
 side and reads report bodies; no further commands or response envelopes travel
 on this feed. Slow readers lose observations. NAN uses the common Stream API,
 with no TCP listener, socket handling or input buffer.
-The virtual IP interface is independent; NAN may enable it, while the runtime owns its packet handling.

@@ -47,4 +47,4 @@ See [the flashing guide](../../notes/docs/flashing.md) for package preparation
 and upload steps, and [module troubleshooting](../../notes/ai/modules/TROUBLESHOOTING.md)
 for placement, inspection and recovery.
 
-QUIC upload commands: [UART, UDP and NOW relay](../../notes/docs/quic_flash.md).
+QUIC upload commands: [UART, UDP and NOW relay](../../notes/ai/quic/quic_flash.md).

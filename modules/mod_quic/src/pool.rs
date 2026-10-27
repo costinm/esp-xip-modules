@@ -1,7 +1,6 @@
 //! Native leases, not a second packet pool. Only the serialized module owner
 //! calls these adapters; no SDK task receives a Rust pointer or vtable.
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU32, Ordering};
 use quic_lite::{OwnedPacket, PacketBuffer, PacketPool, PacketWriter};
 use xip_abi::*;
 #[derive(Clone, Copy)]
@@ -25,12 +24,12 @@ impl Native {
         }
         Ok(Self { hw, table })
     }
-    pub fn info(&self) -> Result<QuicPoolInfo, i32> {
-        let mut out = QuicPoolInfo {
-            size: core::mem::size_of::<QuicPoolInfo>() as u32,
+    pub fn info(&self) -> Result<PacketPoolInfo, i32> {
+        let mut out = PacketPoolInfo {
+            size: core::mem::size_of::<PacketPoolInfo>() as u32,
             ..Default::default()
         };
-        let rc = unsafe { self.table.pool_info.ok_or(ERR_UNSUPPORTED)?(self.hw.ctx(), &mut out) };
+        let rc = unsafe { (*self.hw.as_ptr()).pkt_pool_info.ok_or(ERR_UNSUPPORTED)?(self.hw.ctx(), &mut out) };
         if rc < 0 {
             Err(rc)
         } else {
@@ -40,7 +39,7 @@ impl Native {
 }
 struct Lease {
     native: Native,
-    handle: AtomicU32,
+    handle: u32,
     base: *mut u8,
     len: usize,
 }
@@ -48,10 +47,7 @@ unsafe impl Send for Lease {}
 unsafe impl Sync for Lease {}
 impl Drop for Lease {
     fn drop(&mut self) {
-        let h = self.handle.swap(0, Ordering::AcqRel);
-        if h != 0 {
-            self.native.hw.pkt_free(h);
-        }
+        self.native.hw.pkt_free(self.handle);
     }
 }
 #[derive(Clone)]
@@ -61,7 +57,7 @@ impl Buffer {
         match native.hw.pkt_span(handle) {
             Ok((base, len)) => Ok(Self(Arc::new(Lease {
                 native,
-                handle: AtomicU32::new(handle),
+                handle,
                 base,
                 len,
             }))),
@@ -72,32 +68,23 @@ impl Buffer {
         }
     }
     pub fn handle(&self) -> u32 {
-        self.0.handle.load(Ordering::Acquire)
+        self.0.handle
     }
-    pub fn moved(&self) {
-        self.0.handle.store(0, Ordering::Release);
-    }
-    pub fn restored(&self, handle: u32) -> Result<(), i32> {
-        let (base, len) = self.0.native.hw.pkt_span(handle)?;
-        if base != self.0.base || len != self.0.len || self.handle() != 0 {
-            return Err(ERR_ARG);
-        }
-        self.0.handle.store(handle, Ordering::Release);
-        Ok(())
-    }
+
 }
 impl AsRef<[u8]> for Buffer {
     fn as_ref(&self) -> &[u8] {
-        assert_ne!(self.handle(), 0, "physical driver owns this lease");
         unsafe { core::slice::from_raw_parts(self.0.base, self.0.len) }
     }
 }
 impl PacketBuffer for Buffer {
     fn as_mut_unique(&mut self) -> Option<&mut [u8]> {
-        if Arc::strong_count(&self.0) != 1 || self.handle() == 0 {
+        if Arc::strong_count(&self.0) != 1 {
             return None;
         }
-        let (p, n) = self.0.native.hw.pkt_span(self.handle()).ok()?;
+        // Native async TX may still hold a read reference after admission.
+        self.0.native.hw.pkt_buf(self.handle()).ok()?;
+        let (p,n)=self.0.native.hw.pkt_span(self.handle()).ok()?;
         Some(unsafe { core::slice::from_raw_parts_mut(p, n) })
     }
 }
@@ -133,7 +120,7 @@ impl PacketPool for Pool {
         let cap = room.min(info.max_packet as usize);
         let mut handle = 0;
         let rc = unsafe {
-            self.native.table.acquire?(
+            (*self.native.hw.as_ptr()).pkt_acquire?(
                 self.native.hw.ctx(),
                 u32::try_from(reserved).ok()?,
                 &mut handle,

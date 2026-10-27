@@ -14,7 +14,7 @@
 #define QUIC_CONSOLE_COMPONENT 20
 #define portENTER_CRITICAL(p) ((void)(p))
 #define portEXIT_CRITICAL(p) ((void)(p))
-struct xip_instance {uint32_t id;int component,stream,port;xip_held held;
+struct xip_instance {uint32_t id;int component,stream,port;
     int envelope_components[XIP_COMPONENTS_MAX];struct {char name[16];} comps[XIP_COMPONENTS_MAX];};
 static struct xip_instance provider={.id=1,.component=48},consumer={.id=2,.component=44,.stream=2,.envelope_components={1}};
 static struct xip_instance console={.id=4,.component=20};
@@ -33,6 +33,7 @@ static struct xip_instance *by_component(int c,const struct xip_instance *except
     return NULL;
 }
 #include "envelope_target.inc"
+static struct xip_instance *request_target(int c,uint32_t port,int *error){(void)port;struct xip_instance *t=envelope_target(c);if(!t)t=by_component(20,NULL);*error=t?0:XIP_ERR_NOTFOUND;return t;}
 static void drop_slot(int s){xip_pool_release(pool,s);}
 static int dispatch_x(struct xip_instance *in,const xip_call *call){
     assert(in==&consumer && (((call->component==44 || call->component==1) && call->method==1) || (call->component==8 && call->method==2)));
@@ -45,15 +46,16 @@ static int dispatch_x(struct xip_instance *in,const xip_call *call){
     default:abort();
     }
 }
+static xip_packet_ref packet_take(uint32_t p){return *xip_packet_get(pool,p);}
 #include "stream_hal.inc"
 static uint32_t packet(struct xip_instance *in){
     int slot=xip_pool_acquire(pool,0);assert(slot>=0);
     memcpy(xip_pool_slot(pool,slot)+144,"body",4);
-    uint32_t h=xip_held_add(&in->held,slot,144,4,XIP_HELD_OWNED);assert(h);return h;
+    (void)in;uint32_t h=xip_packet_handle(pool,slot,144,4);assert(h);return h;
 }
-static void release(struct xip_instance *in,uint32_t h){xip_held_entry e=xip_held_take(&in->held,h);drop_slot(e.slot);}
+static void release(struct xip_instance *in,uint32_t h){(void)in;xip_packet_ref e=packet_take(h);drop_slot(e.slot);}
 int main(void){
-    pool=xip_pool_create(12,1704);assert(pool);xip_held_init(&provider.held,4);xip_held_init(&consumer.held,4);
+    pool=xip_pool_create(12,1704);assert(pool);
     uint8_t env[]={0xa4,1,0x18,44,2,1,3,17,5,0xa0};
     int id=c_stream_open(&provider,env,sizeof(env));assert(id>0 && opens==1);
     uint8_t body[]={1,2,3,4};expected=body;
@@ -61,19 +63,19 @@ int main(void){
     expected=body+2;assert(c_stream_feed(&provider,id,body+2,2,0)==2);
     assert(c_stream_feed(&provider,id,NULL,0,1)==0 && ends==1);
     assert(c_stream_feed(&provider,id,NULL,0,1)==XIP_ERR_ARG);
-    uint32_t h=packet(&consumer);int slot=xip_held_get(&consumer.held,h)->slot;
+    uint32_t h=packet(&consumer);int slot=xip_packet_get(pool,h)->slot;
     uint8_t *pointer=xip_pool_slot(pool,slot);
     assert(c_stream_write(&provider,id,h,4,1)==XIP_ERR_NOTFOUND);
-    assert(xip_held_get(&consumer.held,h));
+    assert(xip_packet_get(pool,h));
     assert(c_stream_write(&consumer,id,h,4,1)==0);
-    assert(!xip_held_get(&consumer.held,h));
+    assert(xip_packet_get(pool,h));
     uint32_t other=packet(&consumer);
-    assert(c_stream_write(&consumer,id,other,4,1)==XIP_ERR_BUSY && xip_held_get(&consumer.held,other));
+    assert(c_stream_write(&consumer,id,other,4,1)==XIP_ERR_BUSY && xip_packet_get(pool,other));
     uint32_t pressure[2]={packet(&provider),packet(&provider)};
-    xip_stream_packet out={0};assert(c_stream_take(&provider,id,&out)==XIP_ERR_BUSY);
+    xip_stream_packet out={0};
     release(&provider,pressure[0]);release(&provider,pressure[1]);
     assert(c_stream_take(&provider,id,&out)==1 && out.len==4 && out.fin==1);
-    assert(xip_held_get(&provider.held,out.packet)->slot==slot);
+    assert(xip_packet_get(pool,out.packet)->slot==slot);
     assert(pointer==xip_pool_slot(pool,slot) && xip_pool_refs(pool,slot)==1);
     assert(c_stream_take(&provider,id,&out)==0);
     release(&provider,out.packet);release(&consumer,other);

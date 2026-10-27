@@ -1,7 +1,7 @@
 //! `mod_rtest`: the device test of the ABI in Rust, the device test module (component 2, the `test` slot). The tests (`tests/device_test.py`, the console) drive it. It calls every entry of the host table and reports one event per check; on top of the C module it uses `alloc` through
 //! both allocators of `xip-abi` (the global one and an explicit one) and checks that a failed allocation is an error, not an abort.
 //!
-//! The start request picks the mode: empty or `selftest` (every check that needs no wiring; finishes with 0 when all pass),
+//! The start request picks the mode: `selftest` (every check that needs no wiring; finishes with 0 when all pass),
 //! `serve`, `alarm`, `async` (owned event/datagram echo), `async-alarm`,
 //! `async-yield`, `async-pause` (device overflow bench), `gpio A B`, `spi SCK MISO MOSI CS [BUS]`. Events: `0x7e00 + n` per check, text `"<name> ok"` or
 //! `"<name> FAIL <code>"`; `0x7eff` the summary.
@@ -260,7 +260,7 @@ impl State {
         self.check(hw, "pkt-stale-buf", hw.pkt_buf(p) == Err(ERR_ARG), 0);
         self.check(hw, "pkt-zero", hw.pkt_free(0) == ERR_ARG && hw.pkt_keep(0) == ERR_ARG, 0);
 
-        // the quota: a Vec of handles, in the module's own heap
+        // Allocation is limited only by the physical pool.
         let mut held: Vec<u32> = Vec::new();
         while held.len() < 16 {
             match hw.pkt_alloc() {
@@ -269,7 +269,7 @@ impl State {
             }
         }
         let over = if held.len() < 16 { hw.pkt_alloc().err() } else { None };
-        self.check(hw, "pkt-quota", !held.is_empty() && held.len() < 16 && matches!(over, Some(ERR_BUSY) | Some(ERR_NOMEM)), held.len() as i32);
+        self.check(hw,"pkt-pool", !held.is_empty() && (held.len()==16 || over==Some(ERR_NOMEM)),held.len() as i32);
         for h in held.drain(..) { hw.pkt_free(h); }
 
         // send gives the handle up whether it works or not
@@ -338,7 +338,7 @@ impl State {
         self.alloc_checks(hw);
 
         // not a request: nothing to answer; connectivity is a plain query
-        let plain = CallView { component: C_TEST, method: 0, value: 0, flags: 0, time_us: 0, data: &[], pkt: 0, from: 0, id: 0, request_id: None };
+        let plain = CallView { component: C_TEST, method: 0, value: 0, flags: 0, time_us: 0, data: &[], pkt: 0, from: 0, id: 0, request_id: None, src: None };
         self.check(hw, "reply-no-request", hw.reply(&plain, b"x") == ERR_ARG, 0);
 
         // settings: own namespace, round trip, overwrite, erase, size error
@@ -581,7 +581,8 @@ impl State {
             if call.flags & xip_abi::CALL_LINK_EVENT == 0 && call.pkt != 0 {
                 // a link takes only a packet the module owns: keep the lent one, then pass it on (the zero copy path of a relay)
                 if hw.pkt_keep(call.pkt) == 0 {
-                    let _ = hw.send(call.pkt, call.data.len(), call.from, 0, 0, call.id);
+                    let rc=hw.send(call.pkt,call.data.len(),call.from,0,0,call.id);
+                    if rc==ERR_BUSY {hw.pkt_free(call.pkt);}
                 }
             }
             return CONTINUE;
@@ -921,7 +922,6 @@ impl State {
         let mut a3 = [0u8; 6];
         if len >= 22 { a3.copy_from_slice(&call.data[16..22]); }
         let rssi = xip_abi::rssi(call.value) as i64;
-        let _ = hw.pkt_free(call.pkt);
         if action || self.now_printed < BENCH_PRINT {
             self.now_printed += 1;
             let mut l = Line::new("mon: frame type ");
@@ -964,13 +964,14 @@ impl Module for State {
             if call.is_host(HOST_STOP){unsafe{(*p).stop(*hw);p.drop_in_place();}hw.mem_free(p.cast());self.probe=0;return 0;}
             return unsafe{(*p).handle(*hw,call)};
         }
-        if call.is_host(HOST_START) && call.data==b"probe" {
+        if (call.is_host(HOST_START) && call.data==b"probe") || (call.component==8 && call.flags & xip_abi::CALL_STREAM!=0) {
             let p=hw.mem_alloc(core::mem::size_of::<probe::Driver>()).cast::<probe::Driver>();
             if p.is_null(){return ERR_NOMEM;}
             unsafe{p.write(probe::Driver::default());}
             let rc=unsafe{(*p).start(*hw)};
             if rc<0{unsafe{p.drop_in_place();}hw.mem_free(p.cast());return rc;}
-            self.probe=p as usize;return 0;
+            self.probe=p as usize;
+            return if call.is_host(HOST_START){0}else{unsafe{(*p).handle(*hw,call)}};
         }
         self.calls += 1;
         if self.mode == MODE_ASYNC {
@@ -978,6 +979,7 @@ impl Module for State {
         }
         if call.component == 0 {
             if call.is_host(HOST_STOP) {
+                if self.kept!=0 {hw.pkt_free(self.kept);self.kept=0;}
                 if self.mode == MODE_MON { let _ = self.monitor(hw, false); }
                 if self.mode == MODE_NOW || self.mode == MODE_MON { let _ = self.wifi_set_intent(hw, &self.orig); }
                 hw.event(C_TEST, EV_SUMMARY, b"stopped");
@@ -991,6 +993,7 @@ impl Module for State {
             }
             if !call.is_host(HOST_START) { return xip_abi::RET_CONTINUE as i32; } // NETWORK, WAKE: not used
             let d = call.data;
+            if d.is_empty(){self.mode=MODE_SERVE;return xip_abi::RET_CONTINUE as i32;}
             if d.starts_with(b"now") { self.mode = MODE_NOW; return self.now_start(hw, d); }
             if d.starts_with(b"mon") { self.mode = MODE_MON; return self.mon_start(hw, d); }
             if d.starts_with(b"async") {
@@ -1134,7 +1137,10 @@ impl Module for State {
                         // SAFETY: the packet is lent to this call and `data` is its first `len` bytes
                         if !call.data.is_empty() { unsafe { *ptr = !*ptr; } }
                     }
-                    let _ = hw.send(call.pkt, call.data.len(), call.from, C_TEST, M_PKT_REPLY, call.id);
+                    if hw.pkt_keep(call.pkt)==0 {
+                        let rc=hw.send(call.pkt,call.data.len(),call.from,C_TEST,M_PKT_REPLY,call.id);
+                        if rc==ERR_BUSY {hw.pkt_free(call.pkt);}
+                    }
                 }
                 xip_abi::RET_CONTINUE as i32
             }

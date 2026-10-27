@@ -1916,7 +1916,7 @@ mod packet_lifetime_tests {
     }
     fn companion_call(value:i32,data:&[u8])->CallView<'_>{
         CallView{component:46,method:12,value,flags:CALL_STREAM,
-            data,time_us:0,pkt:0,from:48,id:77,request_id:Some(11)}
+            data,time_us:0,pkt:0,from:48,id:77,request_id:Some(11), src: None}
     }
     #[test]
     fn report_stream_sends_bodies_and_keeps_output_after_peer_fin(){
@@ -2056,7 +2056,7 @@ mod packet_lifetime_tests {
         let mut state=State::default();
         for (method,data) in [(14,&[0xa3,1,0x19,1,0xf4,2,2,3,10][..]),(13,&[0xa0][..]),(15,&[0xa0][..])] {
             let call=CallView {component:C_SELF,method,value:0,flags:1|CALL_ENVELOPE,data,
-                time_us:0,pkt:0,from:ADDR_LINK,id:12,request_id:Some(99)};
+                time_us:0,pkt:0,from:ADDR_LINK,id:12,request_id:Some(99), src: None};
             assert_eq!(state.handle(&hw,&call),CONTINUE);
             let reply=f.sent.last().unwrap();
             if method==13 {
@@ -2095,7 +2095,7 @@ mod packet_lifetime_tests {
             (1,&[0xa0][..],ERR_UNSUPPORTED),
         ] {
             let call=CallView {component:1,method,value:0,flags:1|CALL_ENVELOPE,data:fields,
-                time_us:0,pkt:0,from:ADDR_LINK,id:12,request_id:Some(99)};
+                time_us:0,pkt:0,from:ADDR_LINK,id:12,request_id:Some(99), src: None};
             state.handle(&hw,&call);
             let reply=f.sent.last().unwrap();
             if error==0 {assert_eq!(reply,&[0xa0]);}
@@ -2194,7 +2194,7 @@ mod packet_lifetime_tests {
         ] {
             // an envelope {1: 46, 2: 11, 3: id, 5: fields} as the runtime hands it over; it wraps the answer
             let call = CallView { component: C_SELF, method: 11, value: 0, flags: 1 | CALL_ENVELOPE,
-                data: fields, time_us: 0, pkt: 0, from: ADDR_LINK, id: 9, request_id: None };
+                data: fields, time_us: 0, pkt: 0, from: ADDR_LINK, id: 9, request_id: None, src: None };
             state.handle(&hw, &call);
             let reply = f.sent.last().unwrap();
             if expected == 0 { assert_eq!(reply, &[0xa0]); }
@@ -2209,7 +2209,7 @@ mod packet_lifetime_tests {
         // A direct module call uses the same method, then an empty value clears.
         let fields = [0xa1,1,0x40];
         let call = CallView { component:C_SELF, method:11, value:0, flags:1, data:&fields,
-            time_us:0,pkt:0,from:52,id:19, request_id: None };
+            time_us:0,pkt:0,from:52,id:19, request_id: None, src: None };
         state.handle(&hw,&call); assert_eq!(f.sent.last().unwrap(), &[0xa0]);
         assert_eq!(unsafe { &*ptr }.engine.info_len,0);
         assert!(unsafe { &*ptr }.engine.info.iter().all(|b|*b==0));
@@ -2222,7 +2222,7 @@ mod packet_lifetime_tests {
         let ptr=std::boxed::Box::into_raw(std::boxed::Box::new(context()));
         let mut state=State {context:ptr as usize,..Default::default()};
         let call=CallView {component:HOST_COMPONENT as i32,method:HOST_TABLE as i32,value:0,
-            flags:1,data:b"nan",time_us:0,pkt:0,from:ADDR_MAIN,id:1,request_id:None};
+            flags:1,data:b"nan",time_us:0,pkt:0,from:ADDR_MAIN,id:1,request_id:None, src: None};
         assert_eq!(state.handle(&hw,&call),CONTINUE);
         let table=&state.hosted.table;
         let ctx=core::ptr::addr_of!(state.hosted.ctx) as *mut core::ffi::c_void;
@@ -2250,7 +2250,7 @@ mod packet_lifetime_tests {
         // {1: 46, 2: 6, 3: 42, 5: {1: false}} as the runtime hands it over: method 6, the fields; it wraps the answer in the envelope
         let data = &[0xa1, 1, 0xf4];
         let call = CallView { component: C_SELF, method: 6, value: 0,
-            flags: 1 | CALL_ENVELOPE, data, time_us: 0, pkt: 0, from: ADDR_LINK, id: 9, request_id: None };
+            flags: 1 | CALL_ENVELOPE, data, time_us: 0, pkt: 0, from: ADDR_LINK, id: 9, request_id: None, src: None };
         assert_eq!(state.handle(&hw, &call), CONTINUE);
         assert_eq!(f.sent.len(), 1);
         assert_eq!(f.sent[0], [0xa0]);

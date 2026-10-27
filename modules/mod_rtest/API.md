@@ -1,7 +1,8 @@
 # `test` API (2)
 
-The device test module (`mod_rtest`, the `test` slot). Activate a mode through
-`console.start`; call its binary handlers with `dmesh-cli`. See the
+The device test module (`mod_rtest`, the `test` slot). Ordinary requests activate
+the serving mode automatically; select diagnostic modes through `console.start`.
+Call its binary handlers with `dmesh-cli`. See the
 [README](README.md) for the TCP/QUIC probe.
 
 
@@ -76,7 +77,8 @@ current pool permits 1,500-byte payloads; the link may impose a smaller limit. S
 
 ## Stream probe mode
 
-Start `test` with the ASCII request `probe` (`hex:70726f6265`). It serves the
+A probe stream request activates `test` and its probe driver automatically.
+Explicit `probe` start parameters remain available for diagnostics. It serves the
 canonical DMesh `probe.handler` (component 8, method 2) over TCP 5228 and through
 `mod_quic`. `probe.start` is the CLI's initiating operation; `mod_rtest` validates
 uploads and generates downloads. Duplex uses two independent streams.

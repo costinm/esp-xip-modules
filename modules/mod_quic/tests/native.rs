@@ -7,9 +7,13 @@ fn native_endpoint_owns_exact_packets_and_rejects_stale_epochs() {
     fs::create_dir_all(&dir).unwrap();
     let runtime =
         fs::read_to_string(root.join("components/xip_runtime/src/xip_runtime.c")).unwrap();
+    fs::write(dir.join("runtime_delivery_config.inc"),if runtime.contains("static packet_delivery_queue packet_queue;") {"#define TEST_GLOBAL_PACKET_QUEUE 1\n"} else {""}).unwrap();
     let a = runtime.find("static int deliver_checked(").unwrap();
     let b = runtime[a..].find("\nstatic int deliver(").unwrap() + a;
     fs::write(dir.join("runtime_deliver.inc"), &runtime[a..b]).unwrap();
+    let header = fs::read_to_string(root.join("components/xip_runtime/include/xip_runtime.h")).unwrap();
+    let address = header.lines().find(|line| line.ends_with("} xip_udp_address;")).unwrap();
+    fs::write(dir.join("runtime_source_address.inc"), address).unwrap();
     let bin = dir.join("endpoint");
     let output = Command::new("cc")
         .args([
@@ -32,6 +36,7 @@ fn native_endpoint_owns_exact_packets_and_rejects_stale_epochs() {
         ))
         .arg(module.join("tests/native_endpoint.c"))
         .arg(root.join("components/xip_runtime/src/xip_pool.c"))
+        .arg(root.join("components/xip_runtime/src/xip_quic.c"))
         .arg("-o")
         .arg(&bin)
         .output()
