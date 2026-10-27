@@ -79,10 +79,10 @@ fn packets(name: &str) {
     // keep: the packet stays out of the pool until it is dropped
     assert_eq!(a.send(2, 22, 0, &msg), 0);
     rt.run(1);
-    assert!(rt.pool_available() == avail - 1 && a.held_count() == 1);
+    assert!(rt.pool_available() == avail - 1);
     assert_eq!(a.send(2, 23, 0, &[]), 0);
     rt.run(1);
-    assert!(rt.pool_available() == avail && a.held_count() == 0);
+    assert!(rt.pool_available() == avail);
 
     // a module that ends with a kept packet gives it back, and it is counted
     assert_eq!(b.send(2, 22, 0, &msg), 0);
@@ -90,7 +90,7 @@ fn packets(name: &str) {
     assert_eq!(rt.pool_available(), avail - 1);
     b.stop();
     rt.run(0);
-    assert!(b.ended() && rt.pool_available() == avail && b.leaked() == 1);
+    assert!(b.ended() && rt.pool_available() == avail && b.leaked() == 0);
     assert_ne!(b.send(2, 20, 0, &msg), 0, "nobody home");
     assert_eq!(rt.pool_available(), avail);
 

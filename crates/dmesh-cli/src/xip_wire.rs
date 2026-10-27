@@ -242,7 +242,7 @@ impl XipPort {
             }
             let text=reader.take_text();
             if crate::client::is_fatal_diagnostic(&String::from_utf8_lossy(&text)) {
-                return Err("device reported a fatal diagnostic while waking".into());
+                return Err(format!("device reported a fatal diagnostic while waking: {}", String::from_utf8_lossy(&text)));
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }

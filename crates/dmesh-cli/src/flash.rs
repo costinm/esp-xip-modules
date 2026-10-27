@@ -59,7 +59,7 @@ fn unsigned_module(image: &[u8], name: &str, cpu: u8, dry: bool) -> Result<Vec<u
     Ok(out)
 }
 pub(crate) fn run(a: &[String]) -> Result<(), String> {
-    let usage = "dmesh-cli flash SERIAL|udp://HOST:3339 PACKAGE [--via-now MAC] [--baud N] [--timeout-secs N]\nUnsigned module: ... IMAGE.dmod --unsigned --module NAME --chip esp32|esp32c6|esp32s3 [--dry]";
+    let usage = "dmesh-cli flash SERIAL|udp://HOST:3339 PACKAGE [--via FIRST_HOP:DCID] [--baud N] [--timeout-secs N]\nUnsigned module: ... IMAGE.dmod --unsigned --module NAME --chip esp32|esp32c6|esp32s3 [--dry]";
     if a.get(1).is_some_and(|s| s == "--help") {
         println!("{usage}");
         return Ok(());
@@ -70,6 +70,9 @@ pub(crate) fn run(a: &[String]) -> Result<(), String> {
         (None, None, 120u64, false, None, 13u8, false);
     let mut i = 3;
     while i < a.len() {
+        if let Some(value) = a[i].strip_prefix("--via=") {
+            via = Some(crate::via::Via::parse(value)?); i += 1; continue;
+        }
         let key = &a[i];
         if key == "--unsigned" {
             unsigned = true;
@@ -90,21 +93,7 @@ pub(crate) fn run(a: &[String]) -> Result<(), String> {
                         _ => return Err("unsupported chip".into()),
                     }
                 }
-                "--via-now" => {
-                    let hex = v.replace(':', "");
-                    if hex.len() != 12 || !hex.is_ascii() {
-                        return Err("--via-now requires a six-byte MAC".into());
-                    }
-                    let mut mac = [0; 6];
-                    for j in 0..6 {
-                        mac[j] = u8::from_str_radix(&hex[j * 2..j * 2 + 2], 16)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    if mac == [0; 6] || mac[0] & 1 != 0 {
-                        return Err("NOW peer must be unicast".into());
-                    }
-                    via = Some(mac);
-                }
+                "--via" => { via=Some(crate::via::Via::parse(v)?); }
                 _ => return Err(format!("unknown flash option {key}")),
             }
         }

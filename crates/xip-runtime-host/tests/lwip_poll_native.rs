@@ -1,7 +1,7 @@
-//! Production polling must admit direct lwIP virtual interfaces without esp_netif.
+//! Production socket polling waits for a physical network interface.
 use std::{fs, path::PathBuf, process::Command};
 #[test]
-fn native_polling_runs_for_virtual_ip_without_an_esp_netif_entry() {
+fn native_polling_waits_for_a_physical_network_interface() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = root.join("target/lwip-poll-native-tests");
     fs::create_dir_all(&out).unwrap();

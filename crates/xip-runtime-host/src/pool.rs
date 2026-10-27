@@ -1,7 +1,5 @@
-//! The packet pool, the table of packets one module holds, and the balance of the memory it took with `mem_alloc`.
-//! Pure Rust, with the semantics of the C code of the device runtime (`components/xip_runtime/src/xip_pool.c`): slots with
-//! reference counts and a reserve kept for the application, storage allocated when a slot is first used and given back when
-//! more than `keep` idle slots hold some, handles that carry a generation, a quota of owned packets, a byte quota.
+//! Shared physical slots with allocation generations and reference counts.
+//! Modules own their references; managed heap accounting is separate.
 use std::alloc::{alloc, dealloc, Layout};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -16,6 +14,8 @@ pub struct Pool {
     buffers: Cell<u32>,
     refs: RefCell<Vec<u32>>,
     mem: RefCell<Vec<Option<Box<[u8]>>>>,
+    generations: RefCell<Vec<u16>>,
+    packets: RefCell<Vec<PacketRef>>,
 }
 
 impl Pool {
@@ -25,6 +25,8 @@ impl Pool {
     pub fn with_slot_size(slots: u16, slot_size: u16) -> Pool {
         assert!(slots > 0 && slot_size > 0);
         Pool {
+            generations: RefCell::new(vec![0;slots as usize]),
+            packets: RefCell::new(vec![PacketRef {slot:0,start:0,len:0};slots as usize]),
             slots,
             slot_size,
             keep: Cell::new(2),
@@ -76,6 +78,7 @@ impl Pool {
                     continue;
                 }
                 refs[i] = 1;
+                let mut g=self.generations.borrow_mut();g[i]=g[i].wrapping_add(1);
                 if mem[i].is_none() {
                     mem[i] = Some(vec![0u8; self.slot_size as usize].into_boxed_slice());
                     self.buffers.set(self.buffers.get() + 1);
@@ -128,83 +131,21 @@ impl Pool {
     }
 }
 
-pub const HELD_MAX: usize = 8;
-pub const HELD_FREE: u8 = 0;
-pub const HELD_OWNED: u32 = 1;
-pub const HELD_BORROWED: u32 = 2;
-
-#[derive(Clone, Copy, Debug)]
-pub struct HeldEntry {
-    pub slot: i16,
-    /// The payload inside the slot: the range belongs to the holder.
-    pub start: u16,
-    pub len: u16,
-    pub gen: u8,
-    pub state: u8,
-}
-
-/// What one module holds: owned packets (up to a quota) and the one borrowed for the current call.
-pub struct Held {
-    pub e: [HeldEntry; HELD_MAX],
-    pub quota: u8,
-}
-
-impl Held {
-    pub fn new(quota: u8) -> Box<Held> {
-        Box::new(Held { e: [HeldEntry { slot: 0, start: 0, len: 0, gen: 0, state: HELD_FREE }; HELD_MAX], quota: quota.min(HELD_MAX as u8) })
+#[derive(Clone,Copy,Debug)]
+pub struct PacketRef { pub slot:i16, pub start:u16, pub len:u16 }
+impl Pool {
+    pub fn handle(&self,slot:i32,start:u16,len:u16)->u32 {
+        if self.refs(slot)==0 {return 0;}
+        self.packets.borrow_mut()[slot as usize]=PacketRef{slot:slot as i16,start,len};
+        ((self.generations.borrow()[slot as usize] as u32)<<16)|(slot as u32+1)
     }
-    fn handle(&self, i: usize) -> u32 {
-        (self.e[i].gen as u32) << 8 | (i as u32 + 1)
+    pub fn get(&self,handle:u32)->Option<PacketRef> {
+        let i=(handle&0xffff).checked_sub(1)? as usize;
+        if i>=self.slots as usize || self.refs(i as i32)==0 || self.generations.borrow()[i] as u32 != handle>>16 {return None;}
+        Some(self.packets.borrow()[i])
     }
-    pub fn count(&self, state: u32) -> u32 {
-        self.e.iter().filter(|e| e.state as u32 == state).count() as u32
-    }
-    /// A handle (never 0) for a slot the table now owns a reference of; 0 when the table is full or, for an owned packet,
-    /// at its quota.
-    pub fn add(&mut self, slot: i32, start: u16, len: u16, state: u32) -> u32 {
-        if state == HELD_OWNED && self.count(HELD_OWNED) >= self.quota as u32 {
-            return 0;
-        }
-        let Some(i) = self.e.iter().position(|e| e.state == HELD_FREE) else { return 0 };
-        let e = &mut self.e[i];
-        e.slot = slot as i16;
-        e.start = start;
-        e.len = len;
-        e.state = state as u8;
-        e.gen = e.gen.wrapping_add(1);
-        if e.gen == 0 {
-            e.gen = 1; // 0 would make the handle 0x00NN
-        }
-        self.handle(i)
-    }
-    fn index(&self, handle: u32) -> Option<usize> {
-        let i = (handle & 0xff) as usize;
-        if i == 0 || i > HELD_MAX {
-            return None;
-        }
-        (self.e[i - 1].state != HELD_FREE && handle == self.handle(i - 1)).then_some(i - 1)
-    }
-    pub fn get(&mut self, handle: u32) -> Option<HeldEntry> {
-        self.index(handle).map(|i| self.e[i])
-    }
-    /// Borrowed -> owned. 0, or -1 for a bad handle, -2 at the quota.
-    pub fn keep(&mut self, handle: u32) -> i32 {
-        let Some(i) = self.index(handle) else { return -1 };
-        if self.e[i].state as u32 == HELD_OWNED {
-            return 0;
-        }
-        if self.count(HELD_OWNED) >= self.quota as u32 {
-            return -2;
-        }
-        self.e[i].state = HELD_OWNED as u8;
-        0
-    }
-    /// The entry leaves the table; the caller releases or hands on the slot reference.
-    pub fn take(&mut self, handle: u32) -> Option<HeldEntry> {
-        let i = self.index(handle)?;
-        let copy = self.e[i];
-        self.e[i].state = HELD_FREE; // gen stays: the old handle no longer matches the next use
-        Some(copy)
+    pub fn keep(&self,handle:u32)->i32 {
+        let Some(p)=self.get(handle) else {return -1;}; self.retain(p.slot as i32);0
     }
 }
 
@@ -305,27 +246,6 @@ mod tests {
         p.set_keep(0);
         p.trim();
         assert_eq!(p.allocated(), 0, "keep 0: everything goes back");
-    }
-
-    #[test]
-    fn handles_generations_and_quota() {
-        let mut h = Held::new(2);
-        let x = h.add(3, 144, 10, HELD_OWNED);
-        let y = h.add(4, 144, 0, HELD_OWNED);
-        assert!(x != 0 && y != 0 && x != y && h.add(5, 144, 0, HELD_OWNED) == 0, "quota 2");
-        let c = h.add(6, 144, 5, HELD_BORROWED); // borrowed ones are not counted
-        assert!(c != 0 && h.get(c).unwrap().slot == 6 && h.get(x).unwrap().len == 10);
-        assert_eq!(h.keep(c), -2, "keeping would pass the quota");
-        assert_eq!(h.take(x).unwrap().slot, 3);
-        assert!(h.get(x).is_none(), "the handle is gone");
-        assert!(h.take(x).is_none(), "taking twice finds nothing");
-        assert!(h.keep(c) == 0 && h.get(c).unwrap().state as u32 == HELD_OWNED);
-        assert_eq!(h.add(7, 144, 0, HELD_OWNED), 0, "y and c are the two");
-        h.take(y);
-        let z = h.add(7, 144, 0, HELD_OWNED);
-        assert!(z != 0 && z != x && z != y && h.get(y).is_none() && h.get(x).is_none());
-        assert!(h.get(0).is_none() && h.get(0xff).is_none() && h.get(0xffffff).is_none());
-        assert_eq!(h.count(HELD_OWNED), 2);
     }
 
     #[test]

@@ -60,9 +60,11 @@ unsafe fn message(h: &Host, dst: u32, component: i32, method: i32, token: u64, d
 
 /// state: the i32 the module's context points at (its "private data")
 unsafe extern "C" fn provider(host: *const Host, state: *mut u8, call: *const Call) -> i32 {
+    let _packet=((*call).pkt!=0).then(|| xip_abi::Packet::from_raw(xip_abi::Hw::new(host).unwrap(),(*call).pkt));
     provide_with(host, state, call, &TABLE)
 }
 unsafe extern "C" fn provider_b(host: *const Host, state: *mut u8, call: *const Call) -> i32 {
+    let _packet=((*call).pkt!=0).then(|| xip_abi::Packet::from_raw(xip_abi::Hw::new(host).unwrap(),(*call).pkt));
     provide_with(host, state, call, &TABLE_B)
 }
 /// A module whose HOST_START refuses.

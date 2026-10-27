@@ -73,6 +73,7 @@ async fn repeated_stop_and_reload_reuses_udp_links() {
 fn copying_message_releases_internal_packet_when_link_is_busy() {
     use xip_abi::*;
     unsafe extern "C" fn handle(host: *const Host, _: *mut u8, call: *const Call) -> i32 {
+    let _packet=((*call).pkt!=0).then(|| xip_abi::Packet::from_raw(xip_abi::Hw::new(host).unwrap(),(*call).pkt));
         if (*call).component == 0 && (*call).method == HOST_START as i32 {
             let hw = Hw::new(host).unwrap();
             assert_eq!(hw.message(ADDR_LINK, 1, 2, 3, b"retryable"), ERR_BUSY);
@@ -85,7 +86,6 @@ fn copying_message_releases_internal_packet_when_link_is_busy() {
     let available = rt.pool_available();
     m.start(b"");
     rt.run(0);
-    assert_eq!(m.held_count(), 0);
     assert_eq!(rt.pool_available(), available);
     m.stop();
     rt.run(0);
@@ -150,7 +150,7 @@ unsafe extern "C" fn socket_probe(
             );
             assert!(hw.pkt_span(pkt).is_ok(), "error retains exact lease");
             assert_eq!(hw.socket_write_pkt(id, pkt, PKT_HEADROOM, 12), 0);
-            assert!(hw.pkt_span(pkt).is_err(), "accepted packet is transferred");
+            // Ownership transferred: the caller must never use pkt again.
             let other = hw.pkt_alloc().unwrap();
             assert_eq!(hw.socket_write_pkt(id, other, PKT_HEADROOM, 1), ERR_BUSY);
             assert!(hw.pkt_span(other).is_ok());
@@ -208,7 +208,6 @@ async fn socket_backpressure_packet_ownership_peer_and_eof() {
     }
     m.stop();
     rt.run(0);
-    assert_eq!(m.held_count(), 0);
     assert_eq!(m.leaked(), 0);
     assert_eq!(rt.pool_available(), available);
 }

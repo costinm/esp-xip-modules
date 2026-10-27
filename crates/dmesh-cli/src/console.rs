@@ -11,7 +11,6 @@ fn schema() -> Result<TaggedSchema, String> {
         include_str!("../../../api/generated/schemas/xip-system/tools.json"),
         include_str!("../../../api/generated/schemas/xip-wifi/tools.json"),
         include_str!("../../../api/generated/schemas/xip-transport/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-ip/tools.json"),
         include_str!("../../../api/generated/schemas/xip-ble/tools.json"),
         include_str!("../../../api/generated/schemas/xip-nan/tools.json"),
         include_str!("../../../api/generated/schemas/xip-disc/tools.json"),
@@ -60,6 +59,11 @@ fn request(words: &[String], id: u64) -> Result<Request, String> {
     } else {
         format!("console.{method}")
     };
+    if method.starts_with("disc.relay_") {
+        let bytes=crate::relay_cli::encode(&method,words.get(1..).unwrap_or_default(),id)?;
+        let decoded=decode(&bytes)?;
+        return Ok(Request {component:47,method:decoded["2"].as_u64().unwrap(),id,bytes});
+    }
     if method == "transport.set" {
         // The shared argv parser tolerates unknown fields. For transport
         // patches, dropping an old selector would acknowledge the wrong intent.
@@ -219,7 +223,7 @@ fn native_words(words: &[String]) -> Result<Vec<String>,String> {
         _=>Ok(words.to_vec()),
     }
 }
-fn report(bytes: &[u8]) -> Result<Value,String> {
+pub(crate) fn report(bytes: &[u8]) -> Result<Value,String> {
     use std::sync::OnceLock;
     static FIELDS: OnceLock<Result<Vec<(u64,String)>,String>>=OnceLock::new();
     let fields=FIELDS.get_or_init(|| {
@@ -255,6 +259,21 @@ fn watch(owner: &mut XipPort) -> Result<(),String> {
     }
 }
 pub(crate) fn run_native(arguments: &[String]) -> Result<(),String> {
+    if arguments.iter().any(|a|a=="--via" || a.starts_with("--via=")) {
+        let mut words=Vec::new();let mut via=None;let mut baud=None;let mut i=1;
+        while i<arguments.len() {
+            let a=&arguments[i];
+            if a=="--via" {i+=1;via=Some(crate::via::Via::parse(arguments.get(i).ok_or("missing --via")?)?);}
+            else if let Some(v)=a.strip_prefix("--via=") {via=Some(crate::via::Via::parse(v)?);}
+            else if a=="--baud" {i+=1;baud=Some(arguments.get(i).ok_or("missing baud")?.parse::<u32>().map_err(|e|e.to_string())?);}
+            else {words.push(a.clone());} i+=1;
+        }
+        let req=request(&native_words(&words)?,crate::client::fresh_request_id()&i64::MAX as u64)?;
+        let bytes=via.unwrap().exchange(baud,&wrap_request(&req.bytes))?;
+        let framed=encode_record(PORT_QUIC,&bytes);
+        let result=response(&mut Reader::default(),&framed,PORT_QUIC,&req)?.ok_or("uncorrelated circuit response")?;
+        println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?);return Ok(());
+    }
     let target=arguments.first().ok_or("missing device")?;
     if target.starts_with("udp://") {
         let words=native_words(&arguments[1..])?;
@@ -531,5 +550,5 @@ mod tests {
     }
 }
 
-/// Canonical native envelope for the bidirectional NAN companion connection.
+/// Opening request for the runtime-dispatched NAN report stream.
 pub(crate) fn stream_request(words:&[String],id:u64)->Result<Vec<u8>,String>{request(words,id).map(|r|r.bytes)}

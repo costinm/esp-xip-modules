@@ -266,10 +266,12 @@ fn envelopes_get_the_runtimes_answer_and_error_shape() {
     CALLS.with(|c| c.borrow_mut().refuse = ERR_BUSY);
     let busy = envelope(&q, 82, 11, &enc(|w| { w.map(1).uint(2).uint(1000); }));
     assert_eq!(cbor::get_int(&busy, 7).unwrap(), Some(ERR_BUSY as i64));
-    // another component's envelope is not this module's: nobody serves it here, so nothing answers
+    // A missing owner is reported by shared dispatch; BLE must not receive it.
     let mut other = enc(|w| { w.map(4).uint(1).uint(105).uint(2).uint(83).uint(3).uint(10).uint(5); });
     other.extend_from_slice(&[0xa0]);
-    assert!(q.send(&other).is_empty());
+    let missing=q.send(&other);assert_eq!(missing.len(),1);
+    assert_eq!(cbor::get_int(&missing[0],7).unwrap(),Some(ERR_NOTFOUND as i64));
+    assert_eq!(cbor::get_int(&missing[0],3).unwrap(),Some(10));
 }
 
 unsafe extern "C" fn idle(_: *const Host, _: *mut u8, _: *const Call) -> i32 { 0 }

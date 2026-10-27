@@ -167,7 +167,7 @@ fn additional_component_routes_without_console_and_preserves_wire_identity() {
     assert_eq!(other.serve_envelope_component(47),Err(ERR_ARG));
     assert_eq!(other.serve_envelope_component(0),Err(ERR_ARG));
     m.stop();q.rt.run(0);
-    assert!(q.send(&request).is_empty(),"stopped ownership must not keep routing");
+    let missing=q.send(&request);assert_eq!(missing.len(),1);assert_eq!(cbor::get_int(&missing[0],7).unwrap(),Some(ERR_NOTFOUND as i64),"stopped owner is unavailable without a loader hook");
     assert_eq!(other.serve_envelope_component(1),Ok(()));
 }
 
@@ -185,8 +185,9 @@ fn a_bare_error_becomes_the_one_error_shape() {
 #[test]
 fn a_component_nobody_hosts_goes_to_the_module_of_component_20() {
     let b = Bench::new();
-    // no module of component 61 and no console: dropped and counted, never delivered to the wrong module
-    assert!(b.send(&enc(|w| { w.map(3).uint(1).uint(61).uint(2).uint(1).uint(3).uint(5); })).is_empty());
+    // No owner/loader/console: a correlated NOTFOUND, never a wrong-module dispatch.
+    let missing=b.send(&enc(|w| { w.map(3).uint(1).uint(61).uint(2).uint(1).uint(3).uint(5); }));
+    assert_eq!(missing.len(),1);assert_eq!(cbor::get_int(&missing[0],7).unwrap(),Some(ERR_NOTFOUND as i64));
     assert!(b.seen().is_empty());
     let console = b.q.rt.add_handler("con", fallback, 16);
     console.set_component(20);

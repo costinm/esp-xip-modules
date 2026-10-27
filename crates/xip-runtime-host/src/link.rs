@@ -1,20 +1,18 @@
 //! The `link` component of the host-runtime. The same rules as the device runtimes (`xip_runtime.c`): named links with a provider
 //! (a native one the test plays, or a module) and subscribers; frames delivered as packets with `CALL_LINK`, or forwarded by a
-//! route before anyone sees them; `send` to a link address, with the packet coming back as a `TX_DONE` event when the sender asked;
-//! `READY` and `STATE` events. Up to 12 links, 6 subscribers and 16 routes each, and 16 sends waiting for completion.
+//! route before anyone sees them; accepted TX transfers ownership to its provider;
+//! READY/STATE events remain; no sender or completion ledger is kept.
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::rc::Rc;
 use xip_abi::*;
 
 use crate::hostcalls::ctx;
 use crate::quic::{self, QuicClass, QuicInfo, QuicKind, QuicPacket};
-use crate::pool::HELD_OWNED;
 use crate::runtime::{deliver, route, Inst, QItem, Runtime, Shared};
 
 const LINKS_MAX: usize = 12;
 const SUBS_MAX: usize = 6;
 const ROUTES_MAX: usize = 16;
-const PENDING_MAX: usize = 16;
 
 /// How a native link takes a frame, for tests: the answer of the driver's transmit function.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -63,22 +61,9 @@ pub(crate) struct Entry {
     inflight: std::collections::VecDeque<i32>,
 }
 
-struct Pending {
-    addr: u32,
-    slot: i32,
-    start: u16,
-    len: u16,
-    sender: i32,
-    component: i32,
-    method: i32,
-    token: u64,
-    t0_ms: u64,
-}
-
 #[derive(Default)]
 pub(crate) struct Links {
     list: Vec<Entry>,
-    pending: Vec<Pending>,
     /// The common QUIC receive function (`Runtime::set_quic_rx`): frames of port-less links are offered to it first.
     quic_rx: Option<QuicRx>,
     /// The classifier in front of it: local callback, relay table, counters, reply notes (`quic.rs`).
@@ -218,33 +203,36 @@ fn event(sh: &Shared, addr: u32, kind: u32, value: i32, id: u64) {
     }
 }
 
-/// The provider is done with the frame in `slot`: the reference the runtime kept goes back to the sender (TX_DONE) or is released.
+/// The provider releases its accepted reference after physical use.
 fn complete(sh: &Shared, slot: i32, outcome: i32) {
-    let taken = {
-        let mut links = sh.links.borrow_mut();
-        links.pending.iter().position(|p| p.slot == slot).map(|at| links.pending.remove(at))
-    };
-    let Some(p) = taken else {
-        sh.pool.release(slot);
-        return;
-    };
-    let elapsed = (sh.st.borrow().now.saturating_sub(p.t0_ms) * 1000) as u32;
-    let sent = route(sh, p.sender).is_some_and(|t| {
-        deliver(sh, &t, slot, p.start, p.len, p.component, p.method, p.addr, p.token, outcome, CALL_LINK | CALL_LINK_EVENT | (LINK_EVENT_TX_DONE << 8), elapsed) == 0
-    });
-    if !sent {
-        sh.pool.release(slot);
-    }
-}
-
-/// A provider module's handler returned without keeping a frame it was given: sent.
-pub(crate) fn tx_returned(sh: &Shared, slot: i32) {
-    complete(sh, slot, 0);
+    let _=outcome;sh.pool.release(slot);
 }
 
 /// Send the frame in `slot` (one reference is the caller's) to the link: on 0 the runtime owns the reference, otherwise the caller
-/// keeps it. `component` / `method` (with `sender`): where the packet returns when done; both 0: nowhere.
-fn link_tx(sh: &Shared, dst: u32, slot: i32, start: u16, len: u16, token: u64, sender: i32, component: i32, method: i32) -> i32 {
+/// keeps it. Legacy completion routing arguments do not retain sender state.
+pub(crate) fn link_tx(sh: &Shared, dst: u32, slot: i32, start: u16, len: u16, token: u64, sender: i32, component: i32, method: i32) -> i32 {
+    let circuit = {
+        let mut links=sh.links.borrow_mut();
+        if links.at(dst).is_some_and(|l|l.name=="relay" && l.provider==LINK_NATIVE) {
+            let cid=token.to_le_bytes();let n=quic::cid_class_len(cid[0]);
+            Some(relay_select(&mut links,&cid[..n],sh.st.borrow().now*1000))
+        } else {None}
+    };
+    if let Some(entry)=circuit {
+        let Some(e)=entry else {return ERR_NOTFOUND};
+        if !e.managed.as_ref().is_some_and(|(_,r,_)|r.endpoint!=0) {return ERR_NOTFOUND;}
+        let prefix=e.out_cid.len()+2;
+        if prefix>start as usize || len as usize+prefix>quic::MAX_PACKET {return ERR_SIZE;}
+        unsafe {
+            let p=sh.pool.slot(slot).add(start as usize-prefix);*p=0x40;
+            std::ptr::copy_nonoverlapping(e.out_cid.as_ptr(),p.add(1),e.out_cid.len());*p.add(prefix-1)=0;
+        }
+        if !e.address.is_empty() {
+            let bytes=unsafe {std::slice::from_raw_parts(sh.pool.slot(slot).add(start as usize-prefix),len as usize+prefix)};
+            if let Some(rc)=crate::network::udp_tx_address(sh,e.egress,bytes,&e.address) {if rc==0 {sh.pool.release(slot);}return rc;}
+        }
+        return link_tx(sh,e.egress,slot,start-prefix as u16,len+prefix as u16,e.token,sender,component,method);
+    }
     enum Target {
         None,
         Native(NativeTx),
@@ -258,29 +246,15 @@ fn link_tx(sh: &Shared, dst: u32, slot: i32, start: u16, len: u16, token: u64, s
     if matches!(target, Target::None) {
         return ERR_NOTFOUND;
     }
-    let completion = component != 0 || method != 0;
-    if completion {
-        let mut links = sh.links.borrow_mut();
-        if links.pending.len() >= PENDING_MAX {
-            return ERR_BUSY;
-        }
-        let t0_ms = sh.st.borrow().now;
-        links.pending.push(Pending { addr: dst, slot, start, len, sender, component, method, token, t0_ms });
-    }
-    let unpend = |sh: &Shared| {
-        if completion {
-            sh.links.borrow_mut().pending.retain(|p| p.slot != slot);
-        }
-    };
+    let _=(component,method);
     let rc = match target {
         Target::Native(NativeTx::Busy) => {
-            unpend(sh);
             ERR_BUSY
         }
         Target::Native(mode) => {
             let bytes = unsafe { std::slice::from_raw_parts(sh.pool.slot(slot).add(start as usize), len as usize) };
             if let Some(rc) = crate::network::udp_tx(sh, dst, bytes, token) {
-                if rc == 0 { complete(sh, slot, 0); } else { unpend(sh); }
+                if rc == 0 { complete(sh, slot, 0); }
                 return rc;
             }
             let frame = bytes.to_vec();
@@ -299,17 +273,10 @@ fn link_tx(sh: &Shared, dst: u32, slot: i32, start: u16, len: u16, token: u64, s
             0
         }
         Target::Module(owner, tx_component, tx_method) => {
-            sh.pool.retain(slot); // the provider's inbox gets its own reference
             let rc = match route(sh, owner) {
-                Some(t) => deliver(sh, &t, slot, start, len, tx_component, tx_method, sender as u32, token, 0, CALL_LINK, 0),
+                Some(t) => deliver(sh, &t, slot, start, len, tx_component, tx_method, sender as u32, token, 0, CALL_LINK, 0, None),
                 None => ERR_NOTFOUND,
             };
-            if rc != 0 {
-                sh.pool.release(slot);
-                unpend(sh);
-            } else if !completion {
-                sh.pool.release(slot); // nothing to give back: the provider's reference is the last
-            }
             rc
         }
         Target::None => unreachable!(),
@@ -325,27 +292,38 @@ fn link_tx(sh: &Shared, dst: u32, slot: i32, start: u16, len: u16, token: u64, s
 }
 
 /// Additional manifest component ownership takes priority, then the component
-/// module with a datagram port/hosted table, then the debug console fallback.
-pub(crate) fn envelope_target(sh: &Shared, component: i32) -> Option<Rc<Inst>> {
-    let owner = sh.insts.borrow().iter().find(|i| {
-        let st = i.st.borrow();
-        !st.ended && st.envelope_components.contains(&component)
+/// module with a datagram/stream port or hosted table, then the console fallback.
+pub(crate) fn request_target(sh:&Shared,component:i32)->Result<Rc<Inst>,i32>{
+    let find=||sh.insts.borrow().iter().find(|i|{
+        let st=i.st.borrow();!st.ended && (st.envelope_components.contains(&component) || st.component==Some(component))
     }).cloned();
-    owner.or_else(|| route(sh, component)
-        .filter(|t| xip_abi::cbor::get_int(&t.manifest, 9).ok().flatten().is_some_and(|p| p != 0) || !t.st.borrow().hosted.is_empty())
-    ).or_else(|| route(sh, QUIC_CONSOLE_COMPONENT))
+    let mut owner=find();
+    if owner.is_none(){
+        let starter=sh.request_starter.borrow().clone();
+        if let Some(start)=starter {
+            match start(component) {
+                Ok(inst)=>{crate::runtime::drain(sh,&inst.me);if inst.me.st.borrow().ended{let rc=inst.me.st.borrow().result;return Err(if rc<0{rc}else{ERR_NOTFOUND});}owner=find();},
+                Err(ERR_NOTFOUND)=>{},Err(error)=>return Err(error),
+            }
+        }
+    }
+    let owner=owner.or_else(||route(sh,QUIC_CONSOLE_COMPONENT)).ok_or(ERR_NOTFOUND)?;
+    if !owner.st.borrow().start_done {
+        if !owner.st.borrow().queue.iter().any(|c|c.component==HOST_COMPONENT as i32 && c.method==HOST_START as i32){crate::runtime::enqueue(&owner,HOST_COMPONENT as i32,HOST_START as i32,0);}
+        crate::runtime::drain(sh,&owner);
+    }
+    let state=owner.st.borrow();if state.ended{return Err(if state.result<0{state.result}else{ERR_NOTFOUND});}drop(state);
+    Ok(owner)
 }
 
 /// `send(dst = link address)`. `ERR_BUSY` is the one failure that leaves the packet with the sender.
 pub(crate) fn send(sh: &Shared, me: &Rc<Inst>, pkt: u32, len: usize, dst: u32, component: i32, method: i32, token: u64) -> i32 {
-    let held = me.st.borrow_mut().held.get(pkt);
-    let Some(e) = held.filter(|e| e.state as u32 == HELD_OWNED) else {
-        me.st.borrow_mut().held.take(pkt); // a borrowed or unknown handle: consumed, as for any send
+    let held = sh.pool.get(pkt);
+    let Some(e) = held else {
         return ERR_ARG;
     };
     let slot = e.slot as i32;
     if len > PKT_MAX as usize {
-        me.st.borrow_mut().held.take(pkt);
         sh.pool.release(slot);
         return ERR_SIZE;
     }
@@ -364,7 +342,6 @@ pub(crate) fn send(sh: &Shared, me: &Rc<Inst>, pkt: u32, len: usize, dst: u32, c
                 if !more {
                     me.st.borrow_mut().env.done(&p);
                 }
-                me.st.borrow_mut().held.take(pkt);
                 sh.pool.release(slot);
                 return ERR_SIZE;
             }
@@ -381,7 +358,6 @@ pub(crate) fn send(sh: &Shared, me: &Rc<Inst>, pkt: u32, len: usize, dst: u32, c
         Ok(Some(w)) => w,
         Ok(None) => (e.start, len as u16, 0),
         Err(rc) => {
-            me.st.borrow_mut().held.take(pkt);
             sh.pool.release(slot);
             return rc;
         }
@@ -404,7 +380,6 @@ pub(crate) fn send(sh: &Shared, me: &Rc<Inst>, pkt: u32, len: usize, dst: u32, c
     if let Some(p) = env.filter(|_| !more) {
         me.st.borrow_mut().env.done(&p);
     }
-    me.st.borrow_mut().held.take(pkt);
     if rc != 0 {
         sh.pool.release(slot);
     }
@@ -417,8 +392,7 @@ unsafe extern "C" fn tx_done(user: *mut c_void, addr: u32, pkt: u32, outcome: c_
     if !sh.links.borrow_mut().at(addr).is_some_and(|l| l.provider == LINK_MODULE && l.owner == owner) {
         return ERR_ARG;
     }
-    let Some(e) = me.st.borrow_mut().held.take(pkt) else { return ERR_ARG };
-    sh.pool.release(e.slot as i32); // the provider's own reference
+    let Some(e) = sh.pool.get(pkt) else { return ERR_ARG };
     complete(sh, e.slot as i32, outcome); // the runtime's: back to the sender, or released
     0
 }
@@ -529,7 +503,16 @@ fn quic_common_rx(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, sourc
     let info = QuicInfo { link: name, source, signal, header: h.clone() };
     let give = |local: &quic::QuicLocal| (local.borrow_mut())(&info, QuicPacket { slot, start, len });
     if class == QuicClass::Short {
-        let entry = sh.links.borrow().quic.table.get(&h.dcid).cloned();
+        let entry = relay_select(&mut sh.links.borrow_mut(),&h.dcid,sh.st.borrow().now*1000);
+        if entry.as_ref().is_some_and(|e|e.managed.as_ref().is_some_and(|(_,r,_)|r.endpoint!=0)) {
+            let relay=sh.links.borrow().find("relay").map(addr_of);
+            let prefix=h.dcid.len()+2;
+            if let Some(relay)=relay.filter(|relay|*relay!=addr && h.first&3==0 && len as usize>prefix) {
+                let mut cid=[0u8;8];cid[..h.dcid.len()].copy_from_slice(&h.dcid);
+                if !quic_common_rx(sh,relay,slot,start+prefix as u16,len-prefix as u16,u64::from_le_bytes(cid),signal,time_us) {sh.pool.release(slot);}
+            } else {sh.pool.release(slot);}
+            return true;
+        }
         match (entry, &local) {
             (None, _) => stat(|s| &mut s.short_unknown),
             (Some(e), _) if e.kind == QuicKind::Relay => {
@@ -537,7 +520,14 @@ fn quic_common_rx(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, sourc
                 let at = unsafe { sh.pool.slot(slot).add(start as usize) };
                 let shift = unsafe { quic::short_rewrite(at, len as usize, &h, &e.out_cid, start as usize) };
                 let rc = match shift {
-                    Ok(d) => link_tx(sh, e.egress, slot, (start as isize + d) as u16, (len as isize - d) as u16, e.token, 0, 0, 0),
+                    Ok(d) => {
+                        let start=(start as isize+d) as u16;let len=(len as isize-d) as u16;
+                        let result=if !e.address.is_empty() {
+                            let bytes=unsafe {std::slice::from_raw_parts(sh.pool.slot(slot).add(start as usize),len as usize)};
+                            crate::network::udp_tx_address(sh,e.egress,bytes,&e.address)
+                        } else {None};
+                        match result {Some(rc)=>{if rc==0 {sh.pool.release(slot);}rc},None=>link_tx(sh,e.egress,slot,start,len,e.token,0,0,0)}
+                    },
                     Err(rc) => rc,
                 };
                 if rc == 0 {
@@ -586,15 +576,26 @@ fn quic_common_rx(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, sourc
         return true;
     }
     // a module that has a datagram port in its manifest (key 9) gets its envelopes like the ones that arrive on that port
-    let Some(t) = envelope_target(sh, component) else {
-        stat(|s| &mut s.long_cbor_no_target);
-        sh.pool.release(slot);
-        return true;
+    let t=match request_target(sh,component) {
+        Ok(t)=>t,
+        Err(error)=>{
+            stat(|s|&mut s.long_cbor_no_target);
+            if let Some(id)=_id {
+                if let Some(mut reply)=quic::long_build(quic::VERSION_CBOR,&h.scid,&h.dcid){
+                    reply.extend(crate::envelope::head(component,_method,id,error));
+                    if reply.len()<=PKT_MAX as usize {
+                        unsafe{std::ptr::copy_nonoverlapping(reply.as_ptr(),sh.pool.slot(slot).add(start as usize),reply.len());}
+                        if link_tx(sh,addr,slot,start,reply.len() as u16,source,0,0,0)==0{return true;}
+                    }
+                }
+            }
+            sh.pool.release(slot);return true;
+        }
     };
     let now_ms = sh.st.borrow().now;
     sh.links.borrow_mut().quic.note_reply(addr, source, _id.unwrap_or(0), &h, now_ms);
     let target = component_of(&t);
-    if deliver(sh, &t, slot, start + h.body as u16, (len as usize - h.body) as u16, target, 0, addr, source, signal, CALL_LINK | CALL_ENVELOPE, time_us) != 0 {
+    if deliver(sh, &t, slot, start + h.body as u16, (len as usize - h.body) as u16, target, 0, addr, source, signal, CALL_LINK | CALL_ENVELOPE, time_us, None) != 0 {
         let mut links = sh.links.borrow_mut();
         links.quic.stats.long_cbor_no_target += 1; // its inbox is full
         links.quic.done_reply(addr, source, _id.unwrap_or(0));
@@ -666,7 +667,7 @@ fn fanout(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, source: u64, 
         if k + 1 < subs.len() {
             sh.pool.retain(slot);
         }
-        let ok = route(sh, *owner).is_some_and(|t| deliver(sh, &t, slot, start, len, *component, *method, addr, source, signal, CALL_LINK, time_us) == 0);
+        let ok = route(sh, *owner).is_some_and(|t| deliver(sh, &t, slot, start, len, *component, *method, addr, source, signal, CALL_LINK, time_us, None) == 0);
         if !ok {
             sh.pool.release(slot);
             lost += 1;
@@ -682,7 +683,7 @@ fn fanout(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, source: u64, 
 unsafe extern "C" fn rx(user: *mut c_void, addr: u32, pkt: u32, len: usize, source: u64, signal: i32, time_us: u32) -> c_int {
     let (sh, me) = unsafe { ctx(user) };
     let owner = component_of(&me);
-    let Some(e) = me.st.borrow_mut().held.take(pkt) else { return ERR_ARG };
+    let Some(e) = sh.pool.get(pkt) else { return ERR_ARG };
     if !sh.links.borrow_mut().at(addr).is_some_and(|l| l.provider == LINK_MODULE && l.owner == owner) {
         sh.pool.release(e.slot as i32);
         return ERR_ARG;
@@ -779,6 +780,8 @@ pub(crate) fn release(sh: &Shared, component: i32) {
     let mut down = Vec::new();
     {
         let mut links = sh.links.borrow_mut();
+        links.quic.table.retain(|_,e| !e.managed.as_ref().is_some_and(|(owner,_,_)| *owner==component as usize));
+        relay_gc(&mut links);
         for (i, l) in links.list.iter_mut().enumerate() {
             l.subs.retain(|s| s.0 != component);
             if l.provider == LINK_MODULE && l.owner == component {
@@ -791,11 +794,6 @@ pub(crate) fn release(sh: &Shared, component: i32) {
         }
     }
     for addr in down {
-        loop {
-            let slot = sh.links.borrow().pending.iter().find(|p| p.addr == addr).map(|p| p.slot);
-            let Some(slot) = slot else { break };
-            complete(sh, slot, ERR_IO);
-        }
         event(sh, addr, LINK_EVENT_STATE, LINK_DOWN as i32, 0);
     }
     for l in &mut sh.links.borrow_mut().list {
@@ -932,7 +930,7 @@ impl Runtime {
         if kind == QuicKind::Relay && (out_cid.is_empty() || out_cid.len() > quic::CID_MAX) {
             return ERR_ARG;
         }
-        t.insert(cid.to_vec(), quic::QuicEntry { kind, egress, token, out_cid: out_cid.to_vec() });
+        t.insert(cid.to_vec(), quic::QuicEntry { last_used_us:0,idle_ms:0,address: Vec::new(), managed: None, kind, egress, token, out_cid: out_cid.to_vec() });
         0
     }
     /// The runtime issues the IDs: the lowest free quic-lite connection ID (1 byte for the first 127 entries), added and returned. Freed IDs are reused.
@@ -1021,4 +1019,122 @@ pub(crate) fn remove_datagram_link(sh: &Shared, addr: u32) {
         if l.subs.is_empty() { *l = Entry::default(); }
     }
     for l in &mut links.list { l.routes.retain(|r| r.egress != addr); }
+}
+
+unsafe extern "C" fn relay_set(user:*mut c_void,r:*const RelayRoute,mode:u32)->i32 {
+    let (sh,me)=ctx(user);
+    if r.is_null() || mode>1 {return ERR_ARG;}
+    let r=*r;
+    if r.dcid_len==0 || r.dcid_len>20 || r.hop_count==0 || r.hop_count>4 || r.reserved!=0 || r.endpoint>1 {return ERR_ARG;}
+    let mut total=0u32;
+    for h in &r.hops[..r.hop_count as usize] {
+        if h.link==0 || h.cid_len==0 || h.cid_len>20 || (h.address_len!=0 && h.address_len!=22) || h.padding!=[0;4] {return ERR_ARG;}
+        if h.address_len==22 && ((h.address[16]==0 && h.address[17]==0) || h.address[22..]!=[0,0]) {return ERR_ARG;}
+        total+=h.weight as u32;
+    }
+    if total==0 {return ERR_ARG;}
+    if r.endpoint!=0 && (r.dcid_len>8 || (r.dcid_len==1 && r.dcid[0]==0) || quic::cid_class_len(r.dcid[0])!=r.dcid_len as usize) {return ERR_ARG;}
+    let mut links=sh.links.borrow_mut();let cid=&r.dcid[..r.dcid_len as usize];
+    let t=&mut links.quic.table;
+    if let Some(old)=t.get(cid) {
+        if mode==0 || !old.managed.as_ref().is_some_and(|(owner,_,_)|*owner==component_of(&me) as usize) {return ERR_BUSY;}
+    } else if mode==1 {return ERR_NOTFOUND;} else if t.len()>=quic::TABLE_MAX {return ERR_NOMEM;}
+    if r.endpoint!=0 {
+        let Some(at)=links.named("relay") else {return ERR_NOMEM;};
+        if links.list[at].provider==LINK_MODULE {return ERR_BUSY;}
+        let link=&mut links.list[at];link.provider=LINK_NATIVE;link.state=LINK_UP;link.mtu=(quic::MAX_PACKET-22) as u32;
+    }
+    let t=&mut links.quic.table;
+    let h=&r.hops[0];
+    let (last_used_us,idle_ms)=t.get(cid).map_or((0,0),|e|(e.last_used_us,e.idle_ms));
+    t.insert(cid.to_vec(),quic::QuicEntry {last_used_us,idle_ms,address:Vec::new(),managed:Some((component_of(&me) as usize,r,0)),kind:QuicKind::Relay,
+        egress:h.link,token:h.token,out_cid:h.rewritten_dcid[..h.cid_len as usize].to_vec()});
+    links.quic.classifier=true;relay_gc(&mut links);0
+}
+unsafe extern "C" fn relay_get(user:*mut c_void,index:u32,out:*mut RelayRoute)->i32 {
+    let (sh,me)=ctx(user);if out.is_null(){return ERR_ARG;}
+    let links=sh.links.borrow();
+    let route=links.quic.table.values().filter_map(|e| e.managed.as_ref())
+        .filter(|(owner,_,_)|*owner==component_of(&me) as usize).nth(index as usize);
+    if let Some((_,r,_))=route {*out=*r;0} else {ERR_NOTFOUND}
+}
+unsafe extern "C" fn relay_remove(user:*mut c_void,cid:*const u8,len:usize)->i32 {
+    let (sh,me)=ctx(user);if cid.is_null() || len==0 || len>20 {return ERR_ARG;}
+    let cid=std::slice::from_raw_parts(cid,len);let mut links=sh.links.borrow_mut();
+    let Some(e)=links.quic.table.get(cid) else {return ERR_NOTFOUND;};
+    if !e.managed.as_ref().is_some_and(|(owner,_,_)|*owner==component_of(&me) as usize) {return ERR_BUSY;}
+    links.quic.table.remove(cid);relay_gc(&mut links);0
+}
+static QUIC_COMPONENT:Quic=Quic {version:QUIC_VERSION,size:std::mem::size_of::<Quic>() as u32,
+    attach:None,detach:None,relay_set:Some(relay_set),relay_get:Some(relay_get),relay_remove:Some(relay_remove),
+    relay_create:Some(relay_create),relay_stats:Some(relay_stats),relay_expire:Some(relay_expire),relay_idle:Some(relay_idle)};
+pub(crate) fn quic_component()->*const Quic {&QUIC_COMPONENT}
+
+fn relay_select(links:&mut Links,cid:&[u8],now:u64)->Option<quic::QuicEntry> {
+    links.quic.table.get_mut(cid).filter(|e|e.managed.is_none() || e.idle_ms==0 || now.saturating_sub(e.last_used_us)<e.idle_ms as u64*1000).map(|entry| {
+        if entry.managed.is_some(){entry.last_used_us=now;}
+        if let Some((_,route,cursor))=&mut entry.managed {
+            let total:u32=route.hops[..route.hop_count as usize].iter().map(|h|h.weight as u32).sum();
+            let mut at=*cursor%total;*cursor=cursor.wrapping_add(1);
+            for hop in &route.hops[..route.hop_count as usize] {
+                if at<hop.weight as u32 {entry.egress=hop.link;entry.token=hop.token;
+                    entry.out_cid=hop.rewritten_dcid[..hop.cid_len as usize].to_vec();
+                    entry.address=hop.address[..hop.address_len as usize].to_vec();break;}
+                at-=hop.weight as u32;
+            }
+        }
+        entry.clone()
+    })
+}
+
+fn relay_gc(links:&mut Links) {
+    if !links.quic.table.values().any(|e|e.managed.as_ref().is_some_and(|(_,r,_)|r.endpoint!=0)) {
+        if let Some(at)=links.find("relay") {
+            let l=&mut links.list[at];l.provider=LINK_NONE;l.state=LINK_DOWN;
+            if l.subs.is_empty(){*l=Entry::default();}
+        }
+    }
+}
+
+unsafe extern "C" fn relay_create(user:*mut c_void,out:*mut RelayRoute,idle_ms:u32,reuse:u32)->i32 {
+    let (sh,me)=ctx(user);if out.is_null() || reuse>1 {return ERR_ARG;}
+    let mut r=*out;if r.dcid_len!=0 || r.hop_count!=1 {return ERR_ARG;}
+    relay_expire(user);let now=sh.st.borrow().now*1000;let owner=component_of(&me) as usize;
+    if reuse!=0 {
+        let mut links=sh.links.borrow_mut();
+        for e in links.quic.table.values_mut(){
+            if let Some((old_owner,old,_))=&e.managed {
+                if *old_owner==owner && e.idle_ms==idle_ms && old.endpoint==r.endpoint && old.hop_count==1 && old.hops[0]==r.hops[0] {
+                    *out=*old;e.last_used_us=now;return 1;
+                }
+            }
+        }
+    }
+    for _ in 0..=quic::TABLE_MAX {
+        let cid={let mut links=sh.links.borrow_mut();let state=&mut links.quic;
+            if state.next_relay_cid>=(1u64<<60)-1 {return ERR_NOMEM;}
+            state.next_relay_cid+=1;quic::cid_encode((1u64<<60)|state.next_relay_cid).unwrap()};
+        if sh.links.borrow().quic.table.contains_key(&cid){continue;}
+        r.dcid[..cid.len()].copy_from_slice(&cid);r.dcid_len=cid.len() as u8;
+        let rc=relay_set(user,&r,0);if rc<0{return rc;}
+        let mut links=sh.links.borrow_mut();let e=links.quic.table.get_mut(&cid).unwrap();e.last_used_us=now;e.idle_ms=idle_ms;*out=r;return 0;
+    }
+    ERR_NOMEM
+}
+unsafe extern "C" fn relay_stats(user:*mut c_void,cid:*const u8,len:usize,out:*mut RelayStats)->i32 {
+    let (sh,me)=ctx(user);if cid.is_null() || len==0 || len>20 || out.is_null(){return ERR_ARG;}
+    let links=sh.links.borrow();let Some(e)=links.quic.table.get(std::slice::from_raw_parts(cid,len)) else{return ERR_NOTFOUND;};
+    if !e.managed.as_ref().is_some_and(|(owner,_,_)|*owner==component_of(&me) as usize){return ERR_NOTFOUND;}
+    *out=RelayStats {last_used_us:e.last_used_us,idle_ms:e.idle_ms,reserved:0};0
+}
+unsafe extern "C" fn relay_expire(user:*mut c_void)->i32 {
+    let (sh,me)=ctx(user);let now=sh.st.borrow().now*1000;let mut links=sh.links.borrow_mut();let before=links.quic.table.len();
+    links.quic.table.retain(|_,e| !e.managed.as_ref().is_some_and(|(owner,_,_)|*owner==component_of(&me) as usize && e.idle_ms!=0 && now.saturating_sub(e.last_used_us)>=e.idle_ms as u64*1000));
+    let removed=before-links.quic.table.len();relay_gc(&mut links);removed as i32
+}
+unsafe extern "C" fn relay_idle(user:*mut c_void,cid:*const u8,len:usize,idle_ms:u32)->i32 {
+    let (sh,me)=ctx(user);if cid.is_null() || len==0 || len>20 {return ERR_ARG;}
+    let mut links=sh.links.borrow_mut();let Some(e)=links.quic.table.get_mut(std::slice::from_raw_parts(cid,len)) else{return ERR_NOTFOUND;};
+    if !e.managed.as_ref().is_some_and(|(owner,_,_)|*owner==component_of(&me) as usize){return ERR_NOTFOUND;}
+    e.idle_ms=idle_ms;0
 }

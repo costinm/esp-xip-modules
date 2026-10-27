@@ -68,7 +68,7 @@ pub(crate) fn mac_encode(value: &[u8]) -> String {
 
 fn native_control_command(arguments: &[String]) -> bool {
     arguments.first().is_some_and(|target|(!target.contains("://") || target.starts_with("udp://")) && lmesh_socket_target(target).is_none())
-        && arguments.get(1).is_some_and(|method|crate::console::is_native(method))
+        && arguments.get(1).is_some_and(|method|crate::console::is_native(method) || (method.contains('.') && arguments.iter().any(|a|a=="--via" || a.starts_with("--via="))))
 }
 
 /// Run the standalone DMesh client using process arguments.
@@ -81,6 +81,7 @@ pub fn run_dmesh_cli() -> Result<(), String> {
 /// gateway keep one L2/session implementation.
 pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     let mut arguments: Vec<String> = args.into_iter().collect();
+    if arguments.iter().any(|a|a=="--via-now" || a.starts_with("--via-now=")) {return Err("--via-now was removed; install explicit disc relay routes and use --via FIRST_HOP:DCID".into());}
     if arguments
         .first()
         .is_some_and(|target| target.starts_with("http://"))
@@ -1012,7 +1013,7 @@ fn probe_request_timeout(bytes: u64) -> Duration {
 /// Source port of `dmesh-cli` itself (override with `DMESH_UDP_SOURCE_PORT`).
 pub(crate) const DMESH_CLI_UDP_PORT: u16 = 3338;
 
-fn udp_bind_for_peer(peer: SocketAddr) -> SocketAddr {
+pub(crate) fn udp_bind_for_peer(peer: SocketAddr) -> SocketAddr {
     let port = env::var("DMESH_UDP_SOURCE_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())

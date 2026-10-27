@@ -126,10 +126,14 @@ pub enum QuicKind {
 }
 #[derive(Clone, Debug)]
 pub struct QuicEntry {
+    pub last_used_us: u64,
+    pub idle_ms: u32,
+    pub managed: Option<(usize, xip_abi::RelayRoute, u32)>,
     pub kind: QuicKind,
     pub egress: u32,
     pub token: u64,
     pub out_cid: Vec<u8>,
+    pub address: Vec<u8>,
 }
 
 /// quic-lite's connection ID for `value`: 1 byte up to 0x7f, 2 bytes (tag 100, 13 bits) up to 0x1fff, 4 bytes (tag 101, 29 bits), 8 bytes (tag 110).
@@ -215,6 +219,7 @@ pub(crate) type QuicLocal = std::rc::Rc<std::cell::RefCell<dyn FnMut(&QuicInfo, 
 
 #[derive(Default)]
 pub(crate) struct QuicState {
+    pub next_relay_cid: u64,
     pub classifier: bool,
     pub local: Option<QuicLocal>,
     pub table: BTreeMap<Vec<u8>, QuicEntry>,
@@ -227,7 +232,7 @@ pub(crate) struct QuicState {
 
 impl QuicState {
     pub fn is_quic_link(&self, name: &str) -> bool {
-        name == "ble" || name == "udp" || name == "espnow" || self.names.iter().any(|n| n == name)
+        name == "relay" || name == "ble" || name == "udp" || name == "espnow" || self.names.iter().any(|n| n == name)
     }
     pub fn note_reply(&mut self, link: u32, source: u64, id: u64, request: &QuicHeader, now_ms: u64) {
         let r = Reply { link, source, id, at_ms: now_ms, dcid: request.scid.clone(), scid: request.dcid.clone() };

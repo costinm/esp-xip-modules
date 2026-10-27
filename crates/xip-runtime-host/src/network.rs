@@ -1,5 +1,4 @@
 //! Native host sockets. Readiness only queues module events; handlers remain serialized.
-use crate::pool::HELD_OWNED;
 use crate::runtime::{deliver, Inst, QItem, Shared};
 use std::{
     collections::HashMap,
@@ -254,6 +253,10 @@ impl Network {
                 let insts = sh.insts.borrow();
                 let me = &insts[d.owner];
                 let component = me.st.borrow().component.unwrap_or(0);
+                let src = match peer {
+                    SocketAddr::V4(a) => (a.ip().to_ipv6_mapped().octets(), a.port(), 0),
+                    SocketAddr::V6(a) => (a.ip().octets(), a.port(), a.scope_id()),
+                };
                 if deliver(
                     sh,
                     me,
@@ -267,6 +270,7 @@ impl Network {
                     0,
                     CALL_LINK, // the full raw datagram of a module's UDP port: only PPP ports and 0x444d0002 datagrams are parsed as envelopes
                     0,
+                    Some(src),
                 ) != 0
                 {
                     sh.pool.release(slot);
@@ -402,6 +406,19 @@ impl crate::Instance {
         Ok(ports)
     }
 }
+pub(crate) fn udp_tx_address(sh:&Shared,dst:u32,data:&[u8],address:&[u8])->Option<i32> {
+    if address.len()!=22 {return Some(ERR_ARG);}
+    let net=sh.network.borrow();let d=net.udp.iter().find(|d|d.link==dst)?;
+    let ip=std::net::Ipv6Addr::from(<[u8;16]>::try_from(&address[..16]).unwrap());
+    let port=u16::from_be_bytes(address[16..18].try_into().unwrap());
+    let scope=u32::from_be_bytes(address[18..22].try_into().unwrap());
+    let peer=match ip.to_ipv4_mapped() {
+        Some(ip)=>std::net::SocketAddr::new(ip.into(),port),
+        None=>std::net::SocketAddr::V6(std::net::SocketAddrV6::new(ip,port,0,scope)),
+    };
+    Some(match d.socket.try_send_to(data,peer) {Ok(n) if n==data.len()=>0,Ok(_)=>ERR_IO,
+        Err(e) if e.kind()==io::ErrorKind::WouldBlock=>ERR_BUSY,Err(_)=>ERR_IO})
+}
 pub(crate) fn udp_tx(sh: &Shared, dst: u32, data: &[u8], token: u64) -> Option<i32> {
     let mut net = sh.network.borrow_mut();
     let d = net.udp.iter_mut().find(|d| d.link == dst)?;
@@ -496,6 +513,44 @@ pub(crate) unsafe extern "C" fn close(user: *mut c_void, handle: u32) -> c_int {
     sh.notify.notify_one();
     0
 }
+pub(crate) unsafe extern "C" fn udp_send(
+    user: *mut c_void,
+    handle: u32,
+    ip: *const u8,
+    port: u16,
+    scope: u32,
+    data: *const u8,
+    len: usize,
+) -> c_int {
+    if ip.is_null() || (data.is_null() && len != 0) {
+        return ERR_ARG;
+    }
+    let (sh, me) = context(user);
+    let net = sh.network.borrow_mut();
+    let Some(pos) = net.udp.iter().position(|d| d.link == handle && d.owner == me.id) else {
+        return ERR_ARG;
+    };
+    let bytes = std::slice::from_raw_parts(data, len);
+    let ip6 = std::slice::from_raw_parts(ip, 16);
+    let mut dest = SocketAddr::new(
+        IpAddr::V6(std::net::Ipv6Addr::from([
+            ip6[0], ip6[1], ip6[2], ip6[3], ip6[4], ip6[5], ip6[6], ip6[7], ip6[8], ip6[9],
+            ip6[10], ip6[11], ip6[12], ip6[13], ip6[14], ip6[15],
+        ])),
+        port,
+    );
+    if scope != 0 {
+        if let SocketAddr::V6(ref mut a) = dest {
+            a.set_scope_id(scope);
+        }
+    }
+    sh.notify.notify_one();
+    match net.udp[pos].socket.try_send(bytes) {
+        Ok(n) => n as i32,
+        Err(e) => err(e),
+    }
+}
+
 pub(crate) unsafe extern "C" fn peer(
     user: *mut c_void,
     handle: u32,
@@ -531,15 +586,7 @@ pub(crate) unsafe extern "C" fn write_pkt(
     len: u32,
 ) -> c_int {
     let (sh, me) = context(user);
-    let Some(e) = me
-        .st
-        .borrow_mut()
-        .held
-        .get(pkt)
-        .filter(|e| e.state as u32 == HELD_OWNED)
-    else {
-        return ERR_ARG;
-    };
+    let Some(e)=sh.pool.get(pkt) else {return ERR_ARG;};
     if sh.pool.refs(e.slot as i32) != 1 {
         return ERR_BUSY;
     }
@@ -556,7 +603,7 @@ pub(crate) unsafe extern "C" fn write_pkt(
     if s.packet.is_some() {
         return ERR_BUSY;
     }
-    let e = me.st.borrow_mut().held.take(pkt).unwrap();
+    let e = sh.pool.get(pkt).unwrap();
     s.packet = Some(WritePacket {
         slot: e.slot as i32,
         start: start as usize,

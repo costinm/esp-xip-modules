@@ -10,8 +10,8 @@ use quic_lite::{
 
 const POOL_SLOTS: usize = 16;
 const SLOT_SIZE: usize = quic_lite::DEFAULT_PACKET_POOL_SLOT_SIZE;
-type Pool = PacketPool<POOL_SLOTS, SLOT_SIZE>;
-type Node = QuicNode<Pool>;
+pub(crate) type Pool = PacketPool<POOL_SLOTS, SLOT_SIZE>;
+pub(crate) type Node = QuicNode<Pool>;
 
 static CLIENT_POOL: Pool = Pool::new();
 static UDP_POOL: Pool = Pool::new();
@@ -64,9 +64,9 @@ where
 }
 
 #[derive(Clone, Copy)]
-struct ClientPath {
-    bearer: quic_lite::BearerId,
-    peer_l2_address: PeerL2Address,
+pub(crate) struct ClientPath {
+    pub(crate) bearer: quic_lite::BearerId,
+    pub(crate) peer_l2_address: PeerL2Address,
 }
 
 async fn associate_paths(
@@ -271,7 +271,7 @@ pub(crate) async fn probe_udp_with_uart(
             .collect::<Vec<_>>();
         run_node(node, |client| async move {
             let association = associate_paths(&client, primary, &additional).await?;
-            exchange_probe(association, payload, request).await
+            exchange_probe(association, payload, request, None).await
         })
         .await
     };
@@ -296,7 +296,7 @@ pub(crate) async fn probe_uart(
     run_node(node, |client| async move {
         let attempt = async {
             let association = associate_paths(&client, primary, &[]).await?;
-            exchange_probe(association, payload, request).await
+            exchange_probe(association, payload, request, None).await
         };
         monitor_uart_probe(attempt, timeout, linger).await
     })
@@ -325,10 +325,22 @@ async fn exchange_probe(
     association: TokioAssociation,
     payload: &[u8],
     request: dmesh_server::probe::ProbeServiceRequest,
+    stats: Option<&quic_lite::tokio::TokioNode>,
 ) -> Result<dmesh_server::stream_client::ProbeResult, String> {
     let result = dmesh_server::stream_client::probe_quic(&association, payload, request)
         .await
         .map_err(|error| format!("probe stream exchange: {error}"))?;
+    if let Some(client) = stats {
+        let t = client.telemetry().await.ok_or("QUIC telemetry unavailable")?;
+        println!("{}", serde_json::json!({"kind":"quic.stats","side":"host",
+            "live_associations":t.live_associations,"received_packets":t.received_packets,
+            "sent_packets":t.sent_packets,"duplicate_packets":t.duplicate_packets,
+            "out_of_order_packets":t.out_of_order_packets,"inferred_missing_packets":t.inferred_missing_packets,
+            "retransmitted_packets":t.retransmitted_packets,"loss_events":t.loss_events,
+            "submission_failures":t.submission_failures,"received_stream_packets":t.received_stream_packets,
+            "received_control_packets":t.received_control_packets,"sent_stream_packets":t.sent_stream_packets,
+            "sent_control_packets":t.sent_control_packets}));
+    }
     association
         .finish()
         .await
@@ -709,17 +721,17 @@ mod tests {
     }
 }
 
-/// Upload on one native module stream, optionally through a bounded NOW relay.
-pub(crate) async fn upload(target:&str,baud:Option<u32>,package:&[u8],via:Option<[u8;6]>,timeout:Duration)->Result<Vec<u8>,String>{
+/// Upload on one native module stream, optionally through an explicit circuit.
+pub(crate) async fn upload(target:&str,baud:Option<u32>,package:&[u8],via:Option<crate::via::Via>,timeout:Duration)->Result<Vec<u8>,String>{
     use tokio::io::{AsyncReadExt,AsyncWriteExt};
     let operation=async {
         let mut node=new_node();
-        let primary=if target.starts_with("udp://") {
+        let primary=if let Some(via)=&via {via.attach(&mut node,baud)?} else if target.starts_with("udp://") {
             let peer=crate::client::parse_udp_peer(target)?;
             attach_udp(&mut node,quic_lite::bearer_udp::wildcard_bind(peer,0),peer).await?
         }else{attach_uart(&mut node,target,baud)?};
         run_node(node,|client|async move{
-            let association=associate_native(&client,primary,via).await?;
+            let association=associate_paths(&client,primary,&[]).await?;
             association.wait_established().await.map_err(node_error("establish upload"))?;
             let stream=association.open_stream().await.map_err(node_error("upload stream"))?;
             let(mut rx,mut tx)=tokio::io::split(stream);
@@ -740,21 +752,12 @@ pub(crate) async fn upload(target:&str,baud:Option<u32>,package:&[u8],via:Option
     tokio::time::timeout(timeout,operation).await.map_err(|_|format!("QUIC upload timed out after {timeout:?}"))?
 }
 
-async fn associate_native(client:&quic_lite::tokio::TokioNode,primary:ClientPath,via:Option<[u8;6]>)->Result<TokioAssociation,String>{
-    if let Some(mac)=via {
-        let hop=quic_lite::RelayHop::new(1,&mac,120_000_000,1_000_000).map_err(node_error("NOW hop"))?;
-        let association=client.associate_relayed(PacketMeta{bearer:primary.bearer,peer_l2_address:primary.peer_l2_address,received_at_us:0},None,vec![hop],0).await.map_err(node_error("relay setup"))?;
-        association.wait_established().await.map_err(node_error("relay establishment"))?;
-        Ok(association)
-    }else{associate_paths(client,primary,&[]).await}
-}
-pub(crate) async fn native_probe(target:&str,baud:Option<u32>,via:Option<[u8;6]>,request:dmesh_server::probe::ProbeServiceRequest,timeout:Duration)->Result<dmesh_server::stream_client::ProbeResult,String>{
+pub(crate) async fn native_probe(target:&str,baud:Option<u32>,via:Option<crate::via::Via>,request:dmesh_server::probe::ProbeServiceRequest,timeout:Duration,stats:bool)->Result<dmesh_server::stream_client::ProbeResult,String>{
     let mut header=[0;dmesh_server::probe::PROBE_REQUEST_MAX];
     let id=crate::client::fresh_request_id()&i64::MAX as u64;
     let used=dmesh_server::probe::encode_probe_handler_request(request,id,&mut header).ok_or("probe header too large")?;
     let operation=async {
-        if target.starts_with("tcp://") {
-            if via.is_some(){return Err("TCP first hop cannot carry a NOW relay circuit".into())}
+        if target.starts_with("tcp://") && via.is_none() {
             let peer=crate::client::parse_udp_peer(target.trim_start_matches("tcp://"))?;
             let mut socket=tokio::net::TcpStream::connect(peer).await.map_err(|e|e.to_string())?;
             socket.set_nodelay(true).map_err(|e|e.to_string())?;
@@ -764,60 +767,39 @@ pub(crate) async fn native_probe(target:&str,baud:Option<u32>,via:Option<[u8;6]>
             }else{dmesh_server::stream_client::probe(&mut socket,&header[..used],request).await}.map_err(|e|e.to_string());
         }
         let mut node=new_node();
-        let primary=if target.starts_with("udp://") {
+        let primary=if let Some(via)=&via {via.attach(&mut node,baud)?} else if target.starts_with("udp://") {
             let peer=crate::client::parse_udp_peer(target)?;attach_udp(&mut node,quic_lite::bearer_udp::wildcard_bind(peer,0),peer).await?
         }else{attach_uart(&mut node,target,baud)?};
-        run_node(node,|client|async move{let association=associate_native(&client,primary,via).await?;exchange_probe(association,&header[..used],request).await}).await
+        run_node(node,|client|async move{let association=associate_paths(&client,primary,&[]).await?;exchange_probe(association,&header[..used],request,if stats {Some(&client)} else {None}).await}).await
     };
     tokio::time::timeout(timeout,operation).await.map_err(|_|format!("probe timed out after {timeout:?}"))?
 }
 
-/// Keep the accepted NAN companion stream open for live CBOR response records.
-pub(crate) async fn nan_stream(target:&str,baud:Option<u32>,via:Option<[u8;6]>,request:&[u8],duration:Duration)->Result<(),String>{
-    use tokio::io::AsyncWriteExt;
-    let expected=nan_request_ids(request)?;
-    if target.starts_with("tcp://") {
-        if via.is_some(){return Err("TCP first hop cannot select a NOW relay".into())}
-        let peer=crate::client::parse_udp_peer(target.trim_start_matches("tcp://"))?;
-        let mut socket=tokio::net::TcpStream::connect(peer).await.map_err(|e|e.to_string())?;
-        socket.set_nodelay(true).map_err(|e|e.to_string())?;
-        write_nan_requests(&mut socket,request).await?;
-        let result=read_nan_stream(&mut socket,duration,&expected).await;
-        let _=socket.shutdown().await;
-        return result;
-    }
+/// Read report bodies over the same module stream interface used by flash/probes.
+pub(crate) async fn nan_stream(target:&str,baud:Option<u32>,via:Option<crate::via::Via>,request:&[u8],duration:Duration)->Result<(),String>{
+    if target.starts_with("tcp://") && via.is_none() {return Err("NAN has no direct TCP listener; use a QUIC bearer".into());}
     let mut node=new_node();
-    let primary=if target.starts_with("udp://") {let peer=crate::client::parse_udp_peer(target)?;attach_udp(&mut node,quic_lite::bearer_udp::wildcard_bind(peer,0),peer).await?}else{attach_uart(&mut node,target,baud)?};
+    let primary=if let Some(via)=&via {via.attach(&mut node,baud)?} else if target.starts_with("udp://") {let peer=crate::client::parse_udp_peer(target)?;attach_udp(&mut node,quic_lite::bearer_udp::wildcard_bind(peer,0),peer).await?}else{attach_uart(&mut node,target,baud)?};
     run_node(node,|client|async move{
-        let association=associate_native(&client,primary,via).await?;
+        let association=associate_paths(&client,primary,&[]).await?;
         association.wait_established().await.map_err(node_error("establish NAN stream"))?;
         let mut stream=association.open_stream().await.map_err(node_error("open NAN stream"))?;
-        write_nan_requests(&mut stream,request).await?;
-        let result=read_nan_stream(&mut stream,duration,&expected).await;
-        let _=stream.shutdown().await;
+        write_nan_watch(&mut stream,request).await?;
+        let result=read_nan_stream(&mut stream,duration).await;
         association.finish().await.map_err(node_error("close NAN stream"))?;
         result
     }).await
 }
-// Flush short buffered QUIC writes without sending FIN: the feed remains duplex.
-async fn write_nan_requests(stream:&mut (impl tokio::io::AsyncWrite+Unpin),request:&[u8])->Result<(),String>{
+// The watch has no body: flush the opening request and half-close TX, retaining RX.
+async fn write_nan_watch(stream:&mut (impl tokio::io::AsyncWrite+Unpin),request:&[u8])->Result<(),String>{
     use tokio::io::AsyncWriteExt;
     stream.write_all(request).await.map_err(|e|e.to_string())?;
-    stream.flush().await.map_err(|e|e.to_string())
+    stream.shutdown().await.map_err(|e|e.to_string())
 }
-fn nan_request_ids(request:&[u8])->Result<Vec<u64>,String>{
-    let mut ids=Vec::new();let mut rest=request;
-    while !rest.is_empty(){
-        let mut d=minicbor::Decoder::new(rest);d.skip().map_err(|e|e.to_string())?;let n=d.position();
-        let record=crate::console::decode(&rest[..n])?;
-        ids.push(record["3"].as_u64().ok_or("NAN request has no ID")?);rest=&rest[n..];
-    }
-    Ok(ids)
-}
-async fn read_nan_stream(stream:&mut (impl tokio::io::AsyncRead+Unpin),duration:Duration,expected:&[u64])->Result<(),String>{
+async fn read_nan_stream(stream:&mut (impl tokio::io::AsyncRead+Unpin),duration:Duration)->Result<(),String>{
     use tokio::io::AsyncReadExt;
     let deadline=tokio::time::Instant::now()+duration;
-    let mut pending=Vec::new();let mut chunk=[0u8;1500];let mut records=0;let mut awaiting=expected.to_vec();
+    let mut pending=Vec::new();let mut chunk=[0u8;1500];let mut records=0;
     loop {
         let n=match tokio::time::timeout_at(deadline,stream.read(&mut chunk)).await {
             Err(_)=>break,Ok(Err(e))=>return Err(e.to_string()),Ok(Ok(n))=>n,
@@ -826,61 +808,56 @@ async fn read_nan_stream(stream:&mut (impl tokio::io::AsyncRead+Unpin),duration:
         pending.extend_from_slice(&chunk[..n]);
         loop {
             let mut decoder=minicbor::Decoder::new(&pending);
-            if decoder.skip().is_err(){break}
+            match decoder.skip() {
+                Ok(())=>{},
+                Err(e) if e.is_end_of_input()=>break,
+                Err(e)=>return Err(format!("invalid NAN report CBOR: {e}")),
+            }
             let n=decoder.position();
             if n==0{return Err("empty NAN record".into())}
-            let record=crate::console::decode(&pending[..n])?;
-            if !record["6"].is_object() || !matches!(record["1"].as_u64(),Some(1|46)) {
-                return Err(format!("NAN stream error or invalid response: {record}"));
-            }
-            if let Some(id)=record["3"].as_u64(){awaiting.retain(|expected|*expected!=id);}
+            let record=crate::console::report(&pending[..n])?;
             println!("{record}");records+=1;pending.drain(..n);
         }
         if pending.len()>1500{return Err("NAN stream record exceeds one packet".into())}
     }
     if records==0 {Err("NAN stream returned no records".into())}
-    else if !awaiting.is_empty(){Err(format!("NAN stream missing responses for {awaiting:?}"))}
+    else if !pending.is_empty(){Err("NAN stream ended in a partial CBOR record".into())}
     else{Ok(())}
 }
 
 #[cfg(test)]
 mod nan_stream_tests {
     use super::*;
-    fn response(id:u64,error:bool)->Vec<u8>{
-        let mut e=minicbor::Encoder::new(Vec::new());
-        e.map(4).unwrap().u8(1).unwrap().u8(46).unwrap().u8(2).unwrap().u8(12).unwrap().u8(3).unwrap().u64(id).unwrap();
-        if error{e.u8(7).unwrap().i32(-1).unwrap();}else{e.u8(6).unwrap().map(1).unwrap().u8(1).unwrap().u8(0).unwrap();}
-        e.into_writer()
-    }
     #[test]
-    fn nan_opening_flushes_buffered_transport_without_closing_write_half(){
+    fn watch_half_closes_only_the_sending_direction(){
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            use tokio::io::AsyncReadExt;
+            use tokio::io::{AsyncReadExt,AsyncWriteExt};
             let(client,mut peer)=tokio::io::duplex(64);
             let mut client=tokio::io::BufWriter::new(client);
-            write_nan_requests(&mut client,b"open").await.unwrap();
-            let mut bytes=[0;4];
-            tokio::time::timeout(Duration::from_secs(1),peer.read_exact(&mut bytes)).await.unwrap().unwrap();
-            assert_eq!(&bytes,b"open");
-            write_nan_requests(&mut client,b"next").await.unwrap();
-            tokio::time::timeout(Duration::from_secs(1),peer.read_exact(&mut bytes)).await.unwrap().unwrap();
-            assert_eq!(&bytes,b"next");
+            write_nan_watch(&mut client,b"open").await.unwrap();
+            let mut bytes=Vec::new();peer.read_to_end(&mut bytes).await.unwrap();assert_eq!(bytes,b"open");
+            peer.write_all(b"report").await.unwrap();let mut received=[0;6];
+            client.read_exact(&mut received).await.unwrap();assert_eq!(&received,b"report");
         });
     }
     #[test]
-    fn nan_stream_decodes_fragmented_records_and_requires_command_response(){
+    fn report_reader_accepts_fragmented_bodies_and_rejects_envelopes_or_truncation(){
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             use tokio::io::AsyncWriteExt;
             let(mut client,mut peer)=tokio::io::duplex(16);
-            let mut bytes=response(17,false);bytes.extend(response(18,false));
-            tokio::spawn(async move{for part in bytes.chunks(3){peer.write_all(part).await.unwrap();tokio::task::yield_now().await;}peer.shutdown().await.unwrap();});
-            read_nan_stream(&mut client,Duration::from_secs(1),&[17,18]).await.unwrap();
-            let(mut client,mut peer)=tokio::io::duplex(64);
-            peer.write_all(&response(17,false)).await.unwrap();peer.shutdown().await.unwrap();
-            assert!(read_nan_stream(&mut client,Duration::from_secs(1),&[17,18]).await.unwrap_err().contains("missing responses"));
-            let(mut client,mut peer)=tokio::io::duplex(64);
-            peer.write_all(&response(17,true)).await.unwrap();peer.shutdown().await.unwrap();
-            assert!(read_nan_stream(&mut client,Duration::from_secs(1),&[17]).await.is_err());
+            tokio::spawn(async move {
+                // Two concatenated report bodies fragmented across arbitrary read boundaries.
+                for part in [0xa2,1,0,3,9,0xa2,1,0,3,10].chunks(3) {
+                    peer.write_all(part).await.unwrap();tokio::task::yield_now().await;
+                }
+                peer.shutdown().await.unwrap();
+            });
+            read_nan_stream(&mut client,Duration::from_secs(1)).await.unwrap();
+            for data in [&[0xa1,1,46][..],&[0xa1,1][..],&[0xa1,1,0,0xa1][..],&[0xff][..]] {
+                let(mut client,mut peer)=tokio::io::duplex(64);
+                peer.write_all(data).await.unwrap();peer.shutdown().await.unwrap();
+                assert!(read_nan_stream(&mut client,Duration::from_secs(1)).await.is_err());
+            }
         });
     }
 }

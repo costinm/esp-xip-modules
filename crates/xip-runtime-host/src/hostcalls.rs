@@ -1,6 +1,5 @@
 //! The host table: every call of the host table (`include/xip.h`) the host-runtime implements. `user` is the `Ctx` of the calling instance.
 use crate::fixtures::Loopback;
-use crate::pool::{HELD_BORROWED, HELD_OWNED};
 use crate::runtime::*;
 use std::ffi::{c_char, c_void, CStr};
 use std::rc::Rc;
@@ -365,11 +364,11 @@ unsafe extern "C" fn h_nv(user: *mut c_void, key: *const u8, kn: usize, value: *
 unsafe extern "C" fn h_device_info(user: *mut c_void, out: *mut u8, cap: usize) -> i32 {
     let (sh, _me) = cx!(user, "device_info");
     let mut v = cbor(|w| {
-        w.map(5).uint(1).map(1).uint(4).text("main").uint(2).map(0).uint(3).map(0).uint(4);
+        w.map(6).uint(1).map(1).uint(4).text("main").uint(2).map(0).uint(3).map(0).uint(4);
     });
     v.extend_from_slice(&module_info(sh));
     v.extend_from_slice(&cbor(|w| {
-        w.uint(5).map(0);
+        w.uint(5).map(0).uint(6).map(0);
     }));
     put(out, cap, &v)
 }
@@ -451,23 +450,19 @@ unsafe extern "C" fn h_reset(user: *mut c_void) -> i32 {
 // ---- packets ----
 
 unsafe extern "C" fn h_pkt_alloc(user: *mut c_void, out: *mut u32) -> i32 {
-    let (sh, me) = cx!(user, "pkt_alloc");
+    let (sh, _me) = cx!(user, "pkt_alloc");
     if out.is_null() {
         return ERR_ARG;
     }
     *out = 0;
-    let mut st = me.st.borrow_mut();
-    if st.held.count(HELD_OWNED) >= st.held.quota as u32 {
-        return ERR_BUSY;
-    }
-    let Some(slot) = sh.pool.acquire(2) else { return ERR_NOMEM };
-    *out = st.held.add(slot, PKT_HEADROOM as u16, 0, HELD_OWNED);
+    let Some(slot)=sh.pool.acquire(0) else {return ERR_NOMEM;};
+    *out=sh.pool.handle(slot,PKT_HEADROOM as u16,0);
     0
 }
 
 unsafe extern "C" fn h_pkt_buf(user: *mut c_void, pkt: u32, ptr: *mut *mut u8, max: *mut usize) -> i32 {
-    let (sh, me) = cx!(user, "pkt_buf");
-    let e = me.st.borrow_mut().held.get(pkt);
+    let (sh, _me) = cx!(user, "pkt_buf");
+    let e = sh.pool.get(pkt);
     let (Some(e), false, false) = (e, ptr.is_null(), max.is_null()) else { return ERR_ARG };
     if sh.pool.refs(e.slot as i32) != 1 {
         return ERR_BUSY;
@@ -478,30 +473,22 @@ unsafe extern "C" fn h_pkt_buf(user: *mut c_void, pkt: u32, ptr: *mut *mut u8, m
 }
 
 unsafe extern "C" fn h_pkt_span(user: *mut c_void, pkt: u32, base: *mut *mut u8, cap: *mut usize) -> i32 {
-    let (sh, me) = cx!(user, "pkt_span");
-    let e = me.st.borrow_mut().held.get(pkt);
+    let (sh, _me) = cx!(user, "pkt_span");
+    let e = sh.pool.get(pkt);
     let (Some(e), false, false) = (e, base.is_null(), cap.is_null()) else { return ERR_ARG };
-    if sh.pool.refs(e.slot as i32) != 1 {
-        return ERR_BUSY;
-    }
     *base = sh.pool.slot(e.slot as i32);
     *cap = xip_abi::PKT_SLOT_MIN as usize;
     0
 }
 
 unsafe extern "C" fn h_pkt_keep(user: *mut c_void, pkt: u32) -> i32 {
-    let (_sh, me) = cx!(user, "pkt_keep");
-    let rc = me.st.borrow_mut().held.keep(pkt);
-    match rc {
-        0 => 0,
-        -2 => ERR_BUSY,
-        _ => ERR_ARG,
-    }
+    let (sh, _me)=cx!(user,"pkt_keep");
+    if sh.pool.keep(pkt)==0 {0} else {ERR_ARG}
 }
 
 unsafe extern "C" fn h_pkt_free(user: *mut c_void, pkt: u32) -> i32 {
-    let (sh, me) = cx!(user, "pkt_free");
-    let e = me.st.borrow_mut().held.take(pkt);
+    let (sh, _me) = cx!(user, "pkt_free");
+    let e = sh.pool.get(pkt);
     match e {
         Some(e) => {
             sh.pool.release(e.slot as i32);
@@ -523,7 +510,7 @@ unsafe extern "C" fn h_send(user: *mut c_void, pkt: u32, len: usize, dst: u32, c
     if dst >= ADDR_LINK {
         return crate::link::send(sh, &me, pkt, len, dst, component, method, id);     // ERR_BUSY keeps the packet
     }
-    let Some(e) = me.st.borrow_mut().held.take(pkt) else { return ERR_ARG };
+    let Some(e) = sh.pool.get(pkt) else { return ERR_ARG };
     let slot = e.slot as i32;
     let from = me.st.borrow().component.unwrap_or(0);
     let rc = if len > PKT_MAX as usize {
@@ -541,14 +528,14 @@ unsafe extern "C" fn h_send(user: *mut c_void, pkt: u32, len: usize, dst: u32, c
         if kind != crate::envelope::Kind::Request {
             ERR_ARG
         } else {
-            let target = crate::link::envelope_target(sh, env.component);
+            let target = crate::link::request_target(sh, env.component);
             match target {
-                Some(t) if !Rc::ptr_eq(&t, &me) => {
+                Ok(t) if !Rc::ptr_eq(&t, &me) => {
                     let component = t.st.borrow().component.unwrap_or(0);
-                    deliver(sh, &t, slot, e.start, len as u16, component, 0, from as u32, id, 0, CALL_LINK | CALL_ENVELOPE, 0)
+                    deliver(sh, &t, slot, e.start, len as u16, component, 0, from as u32, id, 0, CALL_LINK | CALL_ENVELOPE, 0, None)
                 }
-                Some(_) => ERR_ARG,
-                None => ERR_NOTFOUND,
+                Ok(_) => ERR_ARG,
+                Err(error) => error,
             }
         }
     } else {
@@ -557,7 +544,9 @@ unsafe extern "C" fn h_send(user: *mut c_void, pkt: u32, len: usize, dst: u32, c
         let mut len = len;
         let more = method & SEND_MORE != 0;
         method &= !SEND_MORE;
-        let target = route(sh, dst as i32);
+        let target=if component==dst as i32 && method>0 {
+            match crate::link::request_target(sh,component){Ok(t)=>Some(t),Err(error)=>{sh.pool.release(slot);return error;}}
+        }else{route(sh,dst as i32)};
         // the answer to an envelope request that came from a module (ADDR_ENVELOPE): wrapped as for a datagram, in front of the payload
         let pending = if target.is_some() { me.st.borrow().env.find(dst, id, component, method) } else { None };
         if let Some(p) = pending {
@@ -576,7 +565,7 @@ unsafe extern "C" fn h_send(user: *mut c_void, pkt: u32, len: usize, dst: u32, c
         }
         let _ = (&mut component, &mut method);
         match target {
-            Some(t) => deliver(sh, &t, slot, e.start, len as u16, component, method, from as u32, id, 0, 0, 0),
+            Some(t) => deliver(sh, &t, slot, e.start, len as u16, component, method, from as u32, id, 0, 0, 0, None),
             None => ERR_NOTFOUND,
         }
     };
@@ -612,6 +601,10 @@ unsafe extern "C" fn h_get_component(user: *mut c_void, name: *const c_char) -> 
     }
     if name == "power" {
         return crate::power::component().cast();
+    }
+    if name == "quic" {
+        if let Some(p)=sh.st.borrow().components.get(&name) {return *p as *const c_void;}
+        return crate::link::quic_component().cast();
     }
     if name == "link" {
         return crate::link::component().cast();
@@ -658,6 +651,7 @@ pub(crate) fn fill(t: &mut Host, user: *mut c_void) {
     t.socket_write = Some(crate::network::write);
     t.socket_close = Some(crate::network::close);
     t.socket_peer = Some(crate::network::peer);
+    t.udp_send = Some(crate::network::udp_send);
     t.socket_write_pkt = Some(crate::network::write_pkt);
     t.now_ms = Some(h_now);
     t.now_us = Some(h_now_us);
@@ -672,6 +666,9 @@ pub(crate) fn fill(t: &mut Host, user: *mut c_void) {
     t.module_rescan = Some(h_module_rescan);
     t.reset = Some(h_reset);
     t.pkt_alloc = Some(h_pkt_alloc);
+    t.pkt_pool_info=Some(h_pkt_pool_info);
+    t.pkt_acquire=Some(h_pkt_acquire);
+    t.pkt_tx=Some(h_pkt_tx);
     t.pkt_buf = Some(h_pkt_buf);
     t.pkt_span = Some(h_pkt_span);
     t.pkt_keep = Some(h_pkt_keep);
@@ -685,5 +682,23 @@ pub(crate) fn fill(t: &mut Host, user: *mut c_void) {
     t.nv = Some(h_nv);
     t.device_info = Some(h_device_info);
     t.get_component = Some(h_get_component);
-    let _ = HELD_BORROWED;
+}
+
+unsafe extern "C" fn h_pkt_pool_info(user:*mut c_void,out:*mut PacketPoolInfo)->i32 {
+    let (sh,_)=cx!(user,"pkt_pool_info");
+    if out.is_null() || (*out).size<core::mem::size_of::<PacketPoolInfo>() as u32 {return ERR_ARG;}
+    *out=PacketPoolInfo {size:core::mem::size_of::<PacketPoolInfo>() as u32,slot_bytes:sh.pool.slot_size() as u32,
+        headroom:PKT_HEADROOM,max_packet:PKT_MAX,capacity:sh.pool.slots() as u32,available:sh.pool.available() as u32};0
+}
+unsafe extern "C" fn h_pkt_acquire(user:*mut c_void,reserve:u32,out:*mut u32)->i32 {
+    let (sh,_)=cx!(user,"pkt_acquire");
+    if out.is_null() || reserve>u16::MAX as u32 {return ERR_ARG;} *out=0;
+    let Some(slot)=sh.pool.acquire(reserve as u16) else {return ERR_NOMEM;};
+    *out=sh.pool.handle(slot,PKT_HEADROOM as u16,0);0
+}
+unsafe extern "C" fn h_pkt_tx(user:*mut c_void,pkt:u32,start:u32,len:u32,link:u32,peer:u64)->i32 {
+    let (sh,_)=cx!(user,"pkt_tx");let Some(p)=sh.pool.get(pkt) else {return ERR_ARG;};
+    if len==0 || start>sh.pool.slot_size() as u32 || len>sh.pool.slot_size() as u32-start {sh.pool.release(p.slot as i32);return ERR_ARG;}
+    let rc=crate::link::link_tx(sh,link,p.slot as i32,start as u16,len as u16,peer,0,0,0);
+    if rc<0 && rc!=ERR_BUSY {sh.pool.release(p.slot as i32);}rc
 }

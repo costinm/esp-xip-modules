@@ -121,15 +121,9 @@ fn async_inbox_overflow_replies_busy_and_keeps_running() {
     assert_eq!(m.send(2, 1, 123, &[0xa1, 1, 0x61, b'y']), 0);
     rt.run(0);
     assert!(!m.ended());
-    assert!(
-        rt.state()
-            .main
-            .iter()
-            .any(|m| m.id == 123 && m.data == [0x24]),
-        "overflow replies CBOR ERR_BUSY using original correlation"
-    );
+    assert!(rt.state().main.iter().any(|m|m.id==123 && m.data==[0x24]),"overflow preserves correlation");
     rt.run(25);
-    assert_eq!(m.events().iter().filter(|e| e.id == 0x7e10).count(), 5);
+    assert_eq!(m.events().iter().filter(|e|e.id==0x7e10).count(),5);
     assert!(!m.ended());
     m.stop();
     rt.run(0);
@@ -138,7 +132,7 @@ fn async_inbox_overflow_replies_busy_and_keeps_running() {
 }
 
 #[test]
-fn held_packet_quota_refusal_uses_borrowed_packet_to_reply_busy() {
+fn async_packets_are_not_limited_by_a_module_quota() {
     let (rt, m) = started("mod_rtest", "async");
     m.set_component(2);
     rt.run(0);
@@ -148,15 +142,7 @@ fn held_packet_quota_refusal_uses_borrowed_packet_to_reply_busy() {
         rt.run(0);
     }
     assert!(!m.ended());
-    assert_eq!(m.held_count(), 4);
-    assert_eq!(rt.pool_available(), available - 4);
-    assert!(
-        rt.state()
-            .main
-            .iter()
-            .any(|c| c.id == 5 && c.data == [0x24]),
-        "quota refusal replies from incoming packet without allocating another held lease"
-    );
+    assert_eq!(rt.pool_available(), available - 5);
     m.stop();
     rt.run(0);
     assert_eq!(m.mem_leaked(), 0);

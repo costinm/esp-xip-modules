@@ -1,6 +1,6 @@
 //! The runtime: instances, the event loop with virtual time, alarms, pins and the application side.
 use crate::fixtures::SpiDevice;
-use crate::pool::{Held, Mem, Pool, HELD_BORROWED, HELD_FREE, HELD_OWNED};
+use crate::pool::{Mem,Pool};
 use crate::{hostcalls, HandlerFn, Loaded};
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, VecDeque};
@@ -18,8 +18,6 @@ pub(crate) const INBOX_DATA: usize = 1024;
 pub struct Config {
     /// Slots of the shared packet pool.
     pub pool_slots: u16,
-    /// Packets one module may own at a time.
-    pub held_quota: u8,
     /// Packets waiting for one module before senders get `ERR_BUSY`.
     pub inbox: usize,
     /// Cap of `mem_alloc` bytes per module (0: none).
@@ -31,7 +29,7 @@ pub struct Config {
 }
 impl Default for Config {
     fn default() -> Self {
-        Config { pool_slots: 8, held_quota: 4, inbox: 4, mem_quota: 8192, udp_peer_capacity: 64, udp_peer_idle_ms: 60000 }
+        Config { pool_slots: 8, inbox: 4, mem_quota: 8192, udp_peer_capacity: 64, udp_peer_idle_ms: 60000 }
     }
 }
 
@@ -149,6 +147,8 @@ pub(crate) struct QItem {
     /// `CALL_LINK*` flags and kind (frames and events of a link), and the time stamp of the call.
     pub lflags: u32,
     pub time_us: u32,
+    /// Source of a datagram received on a runtime-owned UDP socket.
+    pub src: Option<([u8; 16], u16, u32)>,
     pub data: Vec<u8>,
 }
 
@@ -159,7 +159,6 @@ pub(crate) struct InstState {
     pub settings: HashMap<Vec<u8>, Vec<u8>>,
     pub spi_open: [Option<i32>; 4],
     pub spi_transfers: u32,
-    pub held: Box<Held>,
     pub mem: Box<Mem>,
     pub component: Option<i32>,
     /// Envelope requests handed to the module whose answer the runtime still wraps.
@@ -168,6 +167,7 @@ pub(crate) struct InstState {
     pub hosted: Vec<crate::hosted::Hosted>,
     /// Additional request component IDs declared by manifest key 12.
     pub envelope_components: Vec<i32>,
+    pub start_done: bool,
     pub ended: bool,
     pub result: i32,
     pub calls: u32,
@@ -208,6 +208,7 @@ pub(crate) struct Shared {
     pub thunk_tables: RefCell<Vec<(String, Box<[usize]>)>>,
     /// Starts the installed module that hosts a component on demand (`Runtime::on_demand`).
     pub starter: RefCell<Option<Rc<dyn Fn(&str) -> Option<Instance>>>>,
+    pub request_starter: RefCell<Option<Rc<dyn Fn(i32) -> Result<Instance,i32>>>>,
 }
 
 /// The runtime. Single threaded and deterministic: the application calls [`Runtime::run`] and the modules' handlers run
@@ -257,7 +258,7 @@ impl Runtime {
         crate::wifi::FIX.with(|f| *f.borrow_mut() = crate::wifi::Fixture::new());
         crate::wifi::TUNING.with(|t| *t.borrow_mut() = xip_abi::WifiTuning::default());
         crate::power::FIX.with(|f| f.borrow_mut().requests.clear());
-        let sh = Rc::new(Shared { pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None), thunk_tables: RefCell::new(Vec::new()), starter: RefCell::new(None) });
+        let sh = Rc::new(Shared { pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None), thunk_tables: RefCell::new(Vec::new()), starter: RefCell::new(None), request_starter: RefCell::new(None) });
         Runtime { sh }
     }
 
@@ -344,12 +345,12 @@ impl Runtime {
                 settings: HashMap::new(),
                 spi_open: [None; 4],
                 spi_transfers: 0,
-                held: Held::new(sh.cfg.held_quota),
                 mem: Mem::new(sh.cfg.mem_quota),
                 component: None,
                 env: Default::default(),
                 hosted: Vec::new(),
                 envelope_components: Vec::new(),
+                start_done: false,
                 ended: false,
                 result: 0,
                 calls: 0,
@@ -389,6 +390,13 @@ impl Runtime {
     /// runs the instance's start inline, so its table exists before `get_component` answers.
     pub fn on_demand(&self, f: impl Fn(&str) -> Option<Instance> + 'static) {
         *self.sh.starter.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Loader hook for a numeric wire component, including manifest aliases.
+    /// The callback creates the owner and queues HOST_START; dispatch initializes
+    /// it before delivering the original request and preserves startup errors.
+    pub fn on_request(&self,f:impl Fn(i32)->Result<Instance,i32>+'static){
+        *self.sh.request_starter.borrow_mut()=Some(Rc::new(f));
     }
 
     /// Attach a device to the SPI chip-select `cs` (the default is a loopback).
@@ -632,6 +640,9 @@ fn dispatch(sh: &Shared, me: &Rc<Inst>, component: i32, method: i32, value: i32,
             request_id: 0,
             request_has_id: 0,
             request_reserved: 0,
+            src_ip: [0; 16],
+            src_port: 0,
+            src_scope: 0,
     };
     me.st.borrow_mut().calls += 1;
     let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
@@ -665,17 +676,6 @@ fn release_all(sh: &Shared, me: &Rc<Inst>) {
     let mut st = me.st.borrow_mut();
     for alarm in &mut st.alarms { alarm.used = false; alarm.waiting_net = false; alarm.seq = alarm.seq.wrapping_add(1); }
     st.mem_leaked = st.mem.used;
-    for i in 0..st.held.e.len() {
-        let e = st.held.e[i];
-        if e.state == HELD_FREE {
-            continue;
-        }
-        if e.state as u32 == HELD_OWNED {
-            st.leaked += 1;
-        }
-        sh.pool.release(e.slot as i32);
-        st.held.e[i].state = HELD_FREE;
-    }
     for q in st.queue.iter_mut().filter(|q| q.request == 3) {
         sh.pool.release(q.pslot);
         q.request = 0;
@@ -684,6 +684,9 @@ fn release_all(sh: &Shared, me: &Rc<Inst>) {
 }
 
 fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
+    if c.component==HOST_COMPONENT as i32 && c.method==HOST_START as i32 && c.request!=3 {
+        if me.st.borrow().start_done{return;}me.st.borrow_mut().start_done=true;
+    }
     if c.request == 3 {
         let mut c = c;
         let raw = unsafe { std::slice::from_raw_parts(sh.pool.slot(c.pslot).add(c.pstart as usize), c.plen as usize) };
@@ -705,7 +708,7 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
                 me.st.borrow_mut().env.add(p);
             }
         }
-        let handle = me.st.borrow_mut().held.add(c.pslot, c.pstart, c.plen, HELD_BORROWED);
+        let handle = sh.pool.handle(c.pslot,c.pstart,c.plen);
         if handle == 0 {
             sh.pool.release(c.pslot);
             return;
@@ -730,20 +733,12 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
             request_id: request.0,
             request_has_id: request.1,
             request_reserved: 0,
+            src_ip: c.src.as_ref().map_or([0; 16], |s| s.0),
+            src_port: c.src.as_ref().map_or(0, |s| s.1),
+            src_scope: c.src.as_ref().map_or(0, |s| s.2),
         };
         let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
         finish_call(sh, me, c.component, c.method, rc);
-        let mut st = me.st.borrow_mut();
-        // a packet still borrowed (not kept, not sent) goes back to the pool
-        if matches!(st.held.get(handle), Some(e) if e.state as u32 == HELD_BORROWED) {
-            st.held.take(handle);
-            sh.pool.release(c.pslot);
-            drop(st);
-            // a frame handed to a provider that did not keep it is sent, as far as the sender is concerned
-            if c.lflags & CALL_LINK != 0 && c.lflags & CALL_LINK_EVENT == 0 && c.from < ADDR_LINK {
-                crate::link::tx_returned(sh, c.pslot);
-            }
-        }
         return;
     }
     if c.request == 4 {
@@ -763,6 +758,9 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
             request_id: 0,
             request_has_id: 0,
             request_reserved: 0,
+            src_ip: [0; 16],
+            src_port: 0,
+            src_scope: 0,
         };
         me.st.borrow_mut().calls += 1;
         let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
@@ -864,8 +862,8 @@ pub(crate) fn route(sh: &Shared, component: i32) -> Option<Rc<Inst>> {
     }).cloned()
 }
 
-/// Queue a pool packet for `t`. The caller keeps the slot reference when this fails.
-pub(crate) fn deliver(sh: &Shared, t: &Rc<Inst>, slot: i32, start: u16, len: u16, component: i32, method: i32, from: u32, id: u64, value: i32, lflags: u32, time_us: u32) -> i32 {
+/// Queue a pool packet for `t`. The caller keeps the slot reference when this fails. `src` is a datagram's source on a runtime-owned UDP socket.
+pub(crate) fn deliver(sh: &Shared, t: &Rc<Inst>, slot: i32, start: u16, len: u16, component: i32, method: i32, from: u32, id: u64, value: i32, lflags: u32, time_us: u32, src: Option<([u8; 16], u16, u32)>) -> i32 {
     let mut st = t.st.borrow_mut();
     if st.ended {
         return ERR_NOTFOUND;
@@ -874,7 +872,7 @@ pub(crate) fn deliver(sh: &Shared, t: &Rc<Inst>, slot: i32, start: u16, len: u16
     if waiting >= sh.cfg.inbox || st.queue.len() >= QUEUE {
         return ERR_BUSY;
     }
-    st.queue.push_back(QItem { component, method, request: 3, pslot: slot, pstart: start, plen: len, from, id, value, lflags, time_us, ..Default::default() });
+    st.queue.push_back(QItem { component, method, request: 3, pslot: slot, pstart: start, plen: len, from, id, value, lflags, time_us, src, ..Default::default() });
     sh.notify.notify_one();
     0
 }
@@ -985,7 +983,7 @@ impl Instance {
         }
         let Some(slot) = sh.pool.acquire(0) else { return ERR_NOMEM };
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), sh.pool.slot(slot).add(PKT_HEADROOM as usize), data.len()) };
-        let rc = deliver(sh, &self.me, slot, PKT_HEADROOM as u16, data.len() as u16, component, method, from, id, 0, 0, 0);
+        let rc = deliver(sh, &self.me, slot, PKT_HEADROOM as u16, data.len() as u16, component, method, from, id, 0, 0, 0, None);
         if rc != 0 {
             sh.pool.release(slot);
         }
@@ -1023,10 +1021,6 @@ impl Instance {
     }
     pub fn spi_transfers(&self) -> u32 {
         self.me.st.borrow().spi_transfers
-    }
-    /// Packets this module owns.
-    pub fn held_count(&self) -> u32 {
-        self.me.st.borrow().held.count(HELD_OWNED)
     }
     /// Packets it still owned when it ended.
     pub fn leaked(&self) -> u32 {

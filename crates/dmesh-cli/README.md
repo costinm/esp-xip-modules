@@ -211,7 +211,13 @@ only for controlled radio diagnostics. Firmware updates are described in `docs/f
 ## Firmware updates
 
 Use `dmesh-cli flash TARGET PACKAGE` for module uploads over QUIC, with UART/USB,
-STA UDP, or a NOW relay. See [commands](../../notes/docs/quic_flash.md).
+STA UDP, or an explicitly installed relay circuit selected by
+`--via FIRST_HOP:DCID`. The same option works for native
+commands, probes and NAN streams. Create/edit/list/remove routes with
+`disc.relay_create`, `disc.relay_add`, `disc.relay_remove_hop`,
+`disc.relay_list` and `disc.relay_remove`. Create takes one destination and
+returns its incoming DCID. Commands activate their module automatically; routes
+expire after 60 seconds of inactivity by default. See [relay commands](../../notes/docs/relay.md).
 Firmware/recovery updates use the existing TCP `mod_flash` protocol or the
 [serial flasher](../../scripts/flash-serial.sh).
 
@@ -271,3 +277,8 @@ UART companion first and submits a targeted NOW wake for the remote device.
 No `console`, port selection or duration parameter is needed. The old native
 `console` command remains a compatibility alias. See
 [the sleep/wake guide](../../notes/docs/sleep_wakeup.md) for policy and USB behavior.
+
+For QUIC probe counters, add `--stats`; the host emits a structured snapshot
+before closing the association. Optional ESP recording is controlled through
+`quic.stats --enabled=true`, read with `quic.stats`, and freed with
+`quic.stats --enabled=false`. See [probe commands](../../notes/docs/probes.md).

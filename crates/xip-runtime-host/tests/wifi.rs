@@ -7,6 +7,7 @@ use xip_runtime_host::Runtime;
 
 /// START: set an AP+STA intent. HOST_WIFI: emit the generation (event 1) and what `state` says (event 2: sta, ap, channel).
 unsafe extern "C" fn module(host: *const Host, _state: *mut u8, call: *const Call) -> i32 {
+    let _packet=((*call).pkt!=0).then(|| xip_abi::Packet::from_raw(xip_abi::Hw::new(host).unwrap(),(*call).pkt));
     let h = &*host;
     let call = &*call;
     let wifi = &*(h.get_component.unwrap()(h.user, c"wifi".as_ptr()) as *const Wifi);
@@ -71,6 +72,7 @@ fn a_scripted_state_is_what_modules_read() {
 
 /// START: read the tuning, set A-MPDU off and a buffer size; an out-of-range value is refused.
 unsafe extern "C" fn tuning_module(host: *const Host, _state: *mut u8, call: *const Call) -> i32 {
+    let _packet=((*call).pkt!=0).then(|| xip_abi::Packet::from_raw(xip_abi::Hw::new(host).unwrap(),(*call).pkt));
     let h = &*host;
     let call = &*call;
     if call.component != HOST_COMPONENT as i32 || call.method != HOST_START as i32 { return RET_CONTINUE as i32; }

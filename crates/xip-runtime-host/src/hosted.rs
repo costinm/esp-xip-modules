@@ -105,6 +105,9 @@ pub(crate) fn publish(sh: &Shared, me: &Rc<Inst>) {
             request_id: 0,
             request_has_id: 0,
             request_reserved: 0,
+            src_ip: [0; 16],
+            src_port: 0,
+            src_scope: 0,
         };
         me.st.borrow_mut().calls += 1;
         unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
