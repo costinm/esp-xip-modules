@@ -566,8 +566,21 @@ static int wifi_up(const xip_wifi_intent *p, const xip_wifi_tuning *tuning)
     /* ESP-NOW cannot run against a sleeping modem, so the states with it keep the radio awake for the whole epoch
      * (ESPNOW.md "Radio states"); the plain station instead anchors on the BSS beacons and runs the modem power
      * save (MIN_MODEM: the modem wakes at every DTIM window). With the AP alone the mode is moot, so it stays off.
-     * A sleep owner suspends the radio around a light sleep instead (xip_power.c). */
-    (void)esp_wifi_set_ps(now ? WIFI_PS_NONE : (sta ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE));
+     * The tuning's `power` overrides the derivation (POWER_NONE / POWER_MIN), except that a state with ESP-NOW
+     * still forces NONE — the override cannot break the NOW link. A sleep owner suspends the radio around a light
+     * sleep instead (xip_power.c). The tuning survives sleep and resume: power_resume re-applies it from the
+     * stored static (xip_wifi_intent.c), never from NVS. */
+    wifi_ps_type_t ps = now ? WIFI_PS_NONE
+                            : (sta ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
+    if (tuning->power == XIP_POWER_NONE) ps = WIFI_PS_NONE;
+    else if (tuning->power == XIP_POWER_MIN && !now) ps = sta ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE;
+    (void)esp_wifi_set_ps(ps);
+    {
+        wifi_ps_type_t got = (wifi_ps_type_t)-1;
+        if (esp_wifi_get_ps(&got) == ESP_OK)
+            esp_rom_printf("[xip_wifi] ps set=%d got=%d tuning=%d now=%d sta=%d\n",
+                           (int)ps, (int)got, (int)tuning->power, (int)now, (int)sta);
+    }
     want_sta = sta; ap_enabled = ap;
     if (sta) {
         memset(active_ssid, 0, sizeof(active_ssid));

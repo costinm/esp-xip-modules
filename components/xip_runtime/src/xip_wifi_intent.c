@@ -59,6 +59,9 @@ static int tuning_valid(const xip_wifi_tuning *t)
     /* C supports the raw UDP6 ingress for the QUIC port and the discovery
      * multicast (xip_quic_udp_raw_rx); `off`/default stays on lwIP sockets. */
     if (t->raw_rx > XIP_TUNE_ON) return XIP_ERR_ARG;
+    /* Modem power save override: 0 derives it, 1 forces none, 2 requests min
+     * (xip_wifi.c applies it; ESP-NOW still forces none). */
+    if (t->power > XIP_POWER_MIN) return XIP_ERR_ARG;
     if (t->driver_tx || t->raw_tx_rate) return XIP_ERR_UNSUPPORTED;
     if ((t->rx_static && (t->rx_static < 2 || t->rx_static > 64)) || (t->rx_dynamic && (t->rx_dynamic < 2 || t->rx_dynamic > 128)) ||
         (t->tx_dynamic && (t->tx_dynamic < 4 || t->tx_dynamic > 128)) || (t->rx_ba && (t->rx_ba < 2 || t->rx_ba > 64)))
