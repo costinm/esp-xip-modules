@@ -39,6 +39,7 @@ This call never invokes another module. No console module is needed. No partial 
 | 3 | `heap` | `Heap` | As `heap_info`. |
 | 4 | `modules` | `Slot[]` | Every module slot; an empty array when the host cannot enumerate them. |
 | 5 | `components` | `map` | `{component: {method: {1: updated_ms, 2: status_map}}}`, milliseconds since boot. |
+| 6 | `packets` | `map` | Global packet queue and pool snapshot below; empty when unsupported. |
 
 `Device` fields:
 
@@ -128,3 +129,31 @@ public key, message signing, and SEC1 signature verification. Private key bytes
 never enter module or console responses. This is a native component, with no
 remote console signing method; announcement wire format and caching policy
 belong to its module caller.
+
+
+`packets` fields (native C runtime):
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `depth` | `u32` | Pool references currently queued for modules. |
+| 2 | `capacity` | `u32` | Allocated global queue descriptors; starts at 32, grows under memory budget. |
+| 3 | `high_water` | `u32` | Maximum queued references since runtime initialization. |
+| 4 | `accepted` | `u32` | Packet references accepted into the FIFO. |
+| 5 | `dispatched` | `u32` | References handed to a live target for dispatch. |
+| 6 | `queue_full` | `u32` | Refused because no queue descriptor was available. |
+| 7 | `owner_stopped` | `u32` | Queued references cancelled when their instance ended. |
+| 8 | `rx_pool_empty` | `u32` | Native receive refusals because no packet storage was available. |
+| 9 | `pool_slots` | `u32` | Physical slot ceiling; native default 64, storage allocated lazily. |
+| 10 | `pool_allocated` | `u32` | Physical slots with storage, including in-use and cached slots. |
+| 11 | `pool_available` | `u32` | Unclaimed slots; some may not have storage allocated yet. |
+| 12 | `counters_enabled` | `bool` | Counter collection is built in; otherwise tags 3–8 report zero. |
+| 13 | `rx_ready` | `u32` | Idle allocated slots available to callback RX without allocation; zero if an external provider cannot report it. |
+
+One FIFO holds references for all modules, with no per-module packet ceiling.
+Queue metadata is allocated dynamically on the owner; payloads stay in the common
+pool. Queued packets are released if their target instance stops. Memory pressure
+or a full queue refuses new packets; no callback grows the queue or packet storage.
+The owner briefly warms up to 32 RX slots after a burst/receive shortage and
+returns to four cached slots after quiet operation. Counter collection can be
+disabled with `CONFIG_XIP_PACKET_STATS`. These limits are independent of Wi-Fi's
+SDK RX buffers and lwIP's UDP socket mailbox.

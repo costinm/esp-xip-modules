@@ -29,6 +29,11 @@
           "x-protobuf-index": 4,
           "x-protobuf-type": "Slot[]"
         },
+        "packets": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "map"
+        },
         "wifi": {
           "type": "string",
           "x-protobuf-index": 2,
@@ -53,7 +58,7 @@
     ]
   },
   {
-    "description": "start a module",
+    "description": "explicit lifecycle/debug activation",
     "inputSchema": {
       "properties": {
         "name": {

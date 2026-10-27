@@ -70,5 +70,384 @@
       "unavailable",
       "internal"
     ]
+  },
+  {
+    "description": "allocate a forwarding with one destination",
+    "inputSchema": {
+      "properties": {
+        "dest": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "any"
+        },
+        "endpoint": {
+          "type": "boolean",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "bool"
+        },
+        "idle_ms": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "reuse": {
+          "type": "boolean",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "bool"
+        },
+        "rewritten_dcid": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bytes"
+        },
+        "transport": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        },
+        "weight": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "disc.relay_create",
+    "outputSchema": {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "endpoint": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "hops": {
+          "type": "array",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "RelayHop[]"
+        },
+        "idle_age_ms": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "idle_ms": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "last_used_us": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "reused": {
+          "type": "boolean",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 47,
+    "x-method-index": 3,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "add a next hop or change its weight",
+    "inputSchema": {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "dest": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "any"
+        },
+        "rewritten_dcid": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bytes"
+        },
+        "transport": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        },
+        "weight": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "disc.relay_add",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 47,
+    "x-method-index": 4,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "read a forwarding",
+    "inputSchema": {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "disc.relay_get",
+    "outputSchema": {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "endpoint": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "hops": {
+          "type": "array",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "RelayHop[]"
+        },
+        "idle_age_ms": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "idle_ms": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "last_used_us": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 47,
+    "x-method-index": 5,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "enumerate active forwardings",
+    "inputSchema": {
+      "properties": {
+        "index": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "disc.relay_list",
+    "outputSchema": {
+      "properties": {
+        "next": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "routes": {
+          "type": "array",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "RelayRoute[]"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 47,
+    "x-method-index": 6,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "close a forwarding",
+    "inputSchema": {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "disc.relay_remove",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 47,
+    "x-method-index": 7,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "remove a next hop",
+    "inputSchema": {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "dest": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "any"
+        },
+        "rewritten_dcid": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bytes"
+        },
+        "transport": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "disc.relay_remove_hop",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 47,
+    "x-method-index": 8,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "change inactivity policy",
+    "inputSchema": {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "idle_ms": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "disc.relay_set_idle",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 47,
+    "x-method-index": 9,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
   }
 ]

@@ -102,6 +102,12 @@
             "name": "components",
             "tag": 5,
             "type": "map"
+          },
+          {
+            "description": "Global packet queue and pool snapshot below; empty when unsupported.",
+            "name": "packets",
+            "tag": 6,
+            "type": "map"
           }
         ]
       },

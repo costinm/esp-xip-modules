@@ -36,6 +36,202 @@
       "type": "object",
       "x-component-index": 47,
       "x-method-index": 2
+    },
+    {
+      "properties": {
+        "dest": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "any"
+        },
+        "endpoint": {
+          "type": "boolean",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "bool"
+        },
+        "idle_ms": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "method": {
+          "const": "disc.relay_create"
+        },
+        "reuse": {
+          "type": "boolean",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "bool"
+        },
+        "rewritten_dcid": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bytes"
+        },
+        "transport": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        },
+        "weight": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 47,
+      "x-method-index": 3
+    },
+    {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "dest": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "any"
+        },
+        "method": {
+          "const": "disc.relay_add"
+        },
+        "rewritten_dcid": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bytes"
+        },
+        "transport": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        },
+        "weight": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 47,
+      "x-method-index": 4
+    },
+    {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "method": {
+          "const": "disc.relay_get"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 47,
+      "x-method-index": 5
+    },
+    {
+      "properties": {
+        "index": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "method": {
+          "const": "disc.relay_list"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 47,
+      "x-method-index": 6
+    },
+    {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "method": {
+          "const": "disc.relay_remove"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 47,
+      "x-method-index": 7
+    },
+    {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "dest": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "any"
+        },
+        "method": {
+          "const": "disc.relay_remove_hop"
+        },
+        "rewritten_dcid": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bytes"
+        },
+        "transport": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 47,
+      "x-method-index": 8
+    },
+    {
+      "properties": {
+        "dcid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "idle_ms": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "method": {
+          "const": "disc.relay_set_idle"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 47,
+      "x-method-index": 9
     }
   ]
 }

@@ -88,5 +88,114 @@
       "unavailable",
       "internal"
     ]
+  },
+  {
+    "description": "transport counters",
+    "inputSchema": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "quic.stats",
+    "outputSchema": {
+      "properties": {
+        "active": {
+          "type": "boolean",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bool"
+        },
+        "duplicate_packets": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "enabled": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "inferred_missing_packets": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "loss_events": {
+          "type": "string",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "uint"
+        },
+        "out_of_order_packets": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        },
+        "received_control_packets": {
+          "type": "string",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "uint"
+        },
+        "received_packets": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "received_stream_packets": {
+          "type": "string",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "uint"
+        },
+        "retransmitted_packets": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "uint"
+        },
+        "sampled": {
+          "type": "boolean",
+          "x-protobuf-index": 15,
+          "x-protobuf-type": "bool"
+        },
+        "sent_control_packets": {
+          "type": "string",
+          "x-protobuf-index": 14,
+          "x-protobuf-type": "uint"
+        },
+        "sent_packets": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "sent_stream_packets": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "uint"
+        },
+        "submission_failures": {
+          "type": "string",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 48,
+    "x-method-index": 3,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
   }
 ]

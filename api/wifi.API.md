@@ -192,14 +192,15 @@ Promiscuous receive.
 
 **C type:** WifiTuning
 
-Switches are `default`, `on` or `off`; numbers are 0 for the default. Settings marked "Rust runtime" are not available in the
-C runtime, and `raw_rx`, `driver_tx` and `raw_tx_rate` need the `udp6` link, which is not ported yet.
+Switches are `default`, `on` or `off`; numbers are 0 for the default.
+The C runtime supports opt-in raw STA UDP6 with `raw_rx=on`; default/off uses sockets.
+`driver_tx` and `raw_tx_rate` remain unsupported in C.
 
 | Tag | Field | Type | Description |
 |---:|---|---|---|
 | 1 | `ampdu` | [`Switch`](#enum-switch) | A-MPDU aggregation in both directions. Default: on. |
 | 2 | `rates_11b` | [`Switch`](#enum-switch) | 802.11b rates; applied before the radio starts. Default: off (DMesh's tested baseline). |
-| 3 | `raw_rx` | [`Switch`](#enum-switch) | Rust runtime: the firmware takes the received frames of the station before the network stack. |
+| 3 | `raw_rx` | [`Switch`](#enum-switch) | Opt-in native STA Ethernet ingress for link-local IPv6 UDP on the default QUIC port, with native Ethernet replies. Other traffic stays with lwIP. |
 | 4 | `driver_tx` | [`Switch`](#enum-switch) | Rust runtime: station egress through the driver's data path; `off` is raw 802.11 injection. |
 | 5 | `bssid_check` | [`Switch`](#enum-switch) | Standard BSSID filtering of the station's receive lane. Default: off, so frames of other BSSIDs reach unassociated ESP-NOW receive. |
 | 6 | `raw_tx_rate` | `u8` | Rust runtime: raw transmit rate (driver rate code); 0 the driver default. |

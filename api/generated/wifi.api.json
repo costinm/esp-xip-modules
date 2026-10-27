@@ -529,7 +529,7 @@
       }
     },
     {
-      "doc": "Switches are `default`, `on` or `off`; numbers are 0 for the default. Settings marked \"Rust runtime\" are not available in the\nC runtime, and `raw_rx`, `driver_tx` and `raw_tx_rate` need the `udp6` link, which is not ported yet.",
+      "doc": "Switches are `default`, `on` or `off`; numbers are 0 for the default.\nThe C runtime supports opt-in raw STA UDP6 with `raw_rx=on`; default/off uses sockets.\n`driver_tx` and `raw_tx_rate` remain unsupported in C.",
       "fields": [
         {
           "description": "A-MPDU aggregation in both directions. Default: on.",
@@ -554,7 +554,7 @@
           }
         },
         {
-          "description": "Rust runtime: the firmware takes the received frames of the station before the network stack.",
+          "description": "Opt-in native STA Ethernet ingress for link-local IPv6 UDP on the default QUIC port, with native Ethernet replies. Other traffic stays with lwIP.",
           "name": "raw_rx",
           "tag": 3,
           "type": "Switch",
