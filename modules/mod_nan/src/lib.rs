@@ -18,7 +18,6 @@ mod frames;
 mod protocol;
 mod sleep;
 mod wake;
-mod watch;
 mod station;
 use protocol::Engine;
 use xip_abi::{
@@ -59,7 +58,6 @@ struct Context {
     last_sync: Option<([u8; 6], u64)>,
     armed: bool,
     discovery: discovery::Discovery,
-    watches: watch::Watches,
     remote_wake: Option<alloc::boxed::Box<RemoteWake>>,
     station: Option<alloc::boxed::Box<station::Station>>,
     auto_reconnect_original: Option<bool>,
@@ -103,12 +101,6 @@ fn bytes(data: &[u8], key: u64) -> Option<&[u8]> {
     match cbor::get(data, key).ok()??.next()? {
         Item::Bytes(b) => Some(b),
         _ => None,
-    }
-}
-fn watch_duration(fields: &[u8]) -> Result<u64,i32> {
-    match cbor::get(fields,1).map_err(|_|ERR_ARG)? {
-        None=>Ok(5000),
-        Some(mut r)=>match r.next() {Some(Item::Uint(ms)) if ms<=300_000=>Ok(ms),_=>Err(ERR_ARG)},
     }
 }
 // TODO: standalone NOW, with the normal awake NOW radio configuration, needs
@@ -458,53 +450,8 @@ impl Context {
         let mut body=[0;96];let n=w.len;body[..n].copy_from_slice(&w.record[..n]);
         let _=self.enqueue_type(hw,path,&body[..n],now,2);
     }
-    /// One event of a watch. A native route gets `result` as another answer to the request (`SEND_MORE`: the runtime wraps it with the request's id and
-    /// keeps the request open; `last` ends it); a radio route gets the envelope that goes over the air, which this module builds for the peer.
-    fn deliver_event(&self, hw: &Hw, route: watch::Route, id: u64, result: &[u8], last: bool, now: u64) {
-        match route {
-            watch::Route::Native { address, token } => {
-                hw.message(address, C_SELF, 7 | if last { 0 } else { SEND_MORE }, token, result);
-            }
-            watch::Route::Radio(path) => {
-                let mut enc=[0;1400];
-                let Some(n)=dmesh_server::tagged::encode_numeric_response(46,7,id,result,&mut enc) else { return };
-                let data=&enc[..n];
-                // No discovery backlog: a BUSY/failed destination loses this
-                // event and its lease immediately. Control replies keep their
-                // separate bounded transaction ownership.
-                let Ok(pkt)=hw.pkt_alloc() else { return };
-                let len=hw.pkt_buf(pkt).ok().and_then(|(ptr,cap)| {
-                    let out=unsafe {core::slice::from_raw_parts_mut(ptr,cap)};
-                    if path.now { self.engine.now_message(now,data,out) } else {
-                        frames::followup(out,self.engine.local,path.peer,self.cluster_bssid().ok()?,path.instance,1,data)
-                    }
-                });
-                if let Some(n)=len {
-                    let rc=hw.send(pkt,n,if path.now {self.now_link}else{self.action_link} as u32,0,0,mac_token(path.peer));
-                    if rc==ERR_BUSY {hw.pkt_free(pkt);}
-                } else {hw.pkt_free(pkt);}
-            }
-        }
-    }
     fn observation(&mut self, hw: &Hw, path: discovery::ReturnPath, record: &[u8], now: u64, rssi: i8) {
-        // The bounded cache is the `discovery.nodes` answer: every heard
-        // transmission, keyed by radio MAC, before any fan-out.
-        self.observed.note(path.peer, rssi, self.channel, record, (now / 1_000).min(u32::MAX as u64) as u32);
-        for listener in self.watches.listeners().iter().filter(|s| s.until > now) {
-            let mut result=[0;1280]; let mut w=Writer::new(&mut result);
-            w.map(6).uint(1).uint(1).uint(2).bytes(&path.peer).uint(3).bytes(record)
-                .uint(4).uint(now).uint(5).boolean(path.now).uint(6).int(rssi as i64);
-            let Some(result)=w.finish() else {continue};
-            self.deliver_event(hw,listener.route,listener.id,result,false,now);
-        }
-    }
-    fn expire_watches(&mut self, hw: &Hw, now: u64) {
-        // Four route descriptors on the stack, never retained observations.
-        let mut ended=[None;4]; let mut n=0;
-        self.watches.expire(now, |s| {ended[n]=Some(s);n+=1;});
-        for s in ended.into_iter().flatten() {
-            self.deliver_event(hw,s.route,s.id,&[0xa1,1,2],true,now);
-        }
+        self.observed.note(hw, path.peer, rssi, self.channel, record, now, path.now);
     }
     fn dispatch_record(
         &mut self,
@@ -546,7 +493,7 @@ impl Context {
         }
         if let Some(id) = dmesh_server::announce::discovery_request_id(record) {
             let mut response = [0; 255];
-            let n = publication::response(&self.engine.info[..self.engine.info_len], id, &mut response)
+            let n = publication::response(&self.engine.info, id, &mut response)
                 .ok_or(ERR_UNSUPPORTED)?;
             return self.enqueue(hw, path, &response[..n], now);
         }
@@ -582,19 +529,6 @@ impl Context {
         if wrapped {directed_activity(hw,payload);}
         self.remote_wake_peer(hw,path,payload,now);
         self.observation(hw, path, payload, now, rssi);
-        if let Some(record) = dmesh_server::tagged::decode(payload) {
-            if record.component == Some(dmesh_server::tagged::Name::Tag(46)) && record.method == Some(dmesh_server::tagged::Name::Tag(7)) {
-                if let Some(id) = record.id {
-                    let rc = watch_duration(record.fields.unwrap_or(&[0xa0])).and_then(|ms|self.watches.register(watch::Route::Radio(path),id,ms,now));
-                    let mut out=[0;64]; let n=match rc {
-                        Ok(()) => dmesh_server::tagged::encode_numeric_response(46,7,id,&[0xa0],&mut out),
-                        Err(_) => dmesh_server::tagged::encode_numeric_error(46,7,id,b"invalid or full watch",&mut out),
-                    };
-                    if let Some(n)=n { let _=self.enqueue(hw,path,&out[..n],now); }
-                }
-                return;
-            }
-        }
         if let Err(rc) = self.dispatch_record(hw, path, payload, now) {
             self.engine.with_stats(|s| s.last_error = rc);
         }
@@ -825,11 +759,12 @@ impl Context {
     fn tick(&mut self, hw: &Hw) {
         self.boot_policy(hw);
         self.station_tick(hw,hw.now_us().unwrap_or(0));
-        self.expire_watches(hw, hw.now_us().unwrap_or(0));
+        self.observed.expire(hw, hw.now_us().unwrap_or(0));
         if !self.radio_ready(hw) {
             self.offline_report(hw);
             let now=hw.now_us().unwrap_or(0);
             let next=self.station.as_ref().map_or(now+1_000_000,|p|p.next.max(now+1000).min(now+1_000_000));
+            let next=self.observed.next_expiry(now).map_or(next,|expiry|next.min(expiry));
             self.schedule(hw,next,TICK);return;
         }
         if !self.armed { self.arm(hw); return; }
@@ -887,7 +822,7 @@ impl Context {
             self.transmit(hw, now, false);
         }
         if let Some(p)=self.station.as_ref() {plan.next_us=plan.next_us.min(p.next.max(now+1000));}
-        if let Some(expiry)=self.watches.next_expiry() {plan.next_us=plan.next_us.min(expiry);}
+        if let Some(expiry)=self.observed.next_expiry(now) {plan.next_us=plan.next_us.min(expiry);}
         if let Some(w)=self.remote_wake.as_ref() {plan.next_us=plan.next_us.min(w.until);}
         let retry = self.tx.iter().flatten().any(|tx| tx.now || plan.public);
         if self.sleep.enabled {
@@ -961,7 +896,7 @@ impl Context {
         w.uint(21)
             .boolean(false) // retired local signature-verification flag
             .uint(22)
-            .uint(e.info_len as u64)
+            .uint(e.info.len() as u64)
             .uint(23).array(0); // retired inventory field; use live watch
 
         if let Some(s) = stats {
@@ -1056,7 +991,7 @@ impl State {
                 last_sync: None,
                 armed: false,
                 discovery,
-                watches: watch::Watches::default(), remote_wake: None, station:None, auto_reconnect_original:None,
+                remote_wake: None, station:None, auto_reconnect_original:None,
                 tx: [None; 4],
                 sleep: sleep::Policy::default(),
                 sleep_original: None,
@@ -1084,8 +1019,7 @@ impl State {
             // The DMesh announce component's discovery stream commands: this
             // module is the NAN/NOW observer a NAN-less host extends through.
             // `discovery.active` (10) queues an active SD pass into the next
-            // public window; `discovery.nodes` (9) streams the bounded
-            // observation cache back.
+            // public window; `discovery.nodes` (9) opens a live observation window.
             for (component,method) in [(DISCOVERY_COMPONENT,DISCOVERY_ACTIVE),(DISCOVERY_COMPONENT,DISCOVERY_NODES)] {
                 let rc=unsafe {listen(hw.ctx(),component,method)};
                 if rc<0 {self.stop(hw);return Err(rc);}
@@ -1105,6 +1039,7 @@ impl State {
         self.context = 0;
         let cx = unsafe { &mut *ptr };
         if let Some(session)=cx.companion.take() {session.dispose(hw);}
+        cx.observed.stop(hw);
         cx.leave_sleepy(hw);
         if let Some(original)=cx.auto_reconnect_original {
             if let Some(f)=hw.wifi().and_then(|w|w.auto_reconnect) {unsafe {f(hw.ctx(),original);}}
@@ -1378,38 +1313,40 @@ impl State {
     }
     fn companion_event(&mut self,hw:&Hw,call:&CallView)->i32 {
         if self.context==0 {return ERR_NOTFOUND;}
-        // The discovery stream commands answer one bounded response per open:
-        // `discovery.active` queues a NAN active SD pass into the next public
-        // window (DW0/DW8; sleepy peers report there — the TX scheduler owns
-        // the wait) and closes; `discovery.nodes` streams the bounded
-        // observation cache. Neither holds a session.
         if call.component==DISCOVERY_COMPONENT {
             if !matches!(call.method,DISCOVERY_ACTIVE|DISCOVERY_NODES) {return ERR_UNSUPPORTED;}
-            if call.value!=STREAM_OPEN {return 0;}
             let cx=unsafe {&mut *(self.context as *mut Context)};
-            // One bounded response carrying the FIN flag — mod_flash's
-            // upload-reply pattern. The FIN ends the stream, so no explicit
-            // close here: a close with the output still pending drops it.
+            if call.method==DISCOVERY_NODES {
+                if call.value!=STREAM_OPEN {
+                    return cx.observed.event(hw,call.id as u32,call.value,call.data.is_empty());
+                }
+                let now=hw.now_us().unwrap_or(0);
+                let Some(options)=dmesh_server::discovery_nodes::Options::decode(Some(call.data)) else {return ERR_ARG;};
+                if let Err(rc)=cx.observed.open(hw,call.id as u32,now,call.request_id.unwrap_or(call.id),options) {return rc;}
+                // Subscribe before triggering the pass so no response is missed.
+                if options.active && options.duration_ms != 0 {
+                    if let Err(rc)=cx.active_discovery(hw,now) {cx.observed.stop(hw);return rc;}
+                    let mut request=[0;96];
+                    if let Some(n)=dmesh_server::announce::encode_discovery_request(now,&mut request) {
+                        let _=cx.post_discovery(hw,&request[..n],true,true,now);
+                    }
+                }
+                cx.tick(hw);
+                return 0;
+            }
+            if call.value!=STREAM_OPEN {return 0;}
+            if let Err(rc)=cx.active_discovery(hw,hw.now_us().unwrap_or(0)) {return rc;}
             let Some(write)=hw.stream().and_then(|s|s.write_pkt) else {return ERR_UNSUPPORTED;};
-            let mut out=[0;1600];
-            let body: &[u8] = if call.method==DISCOVERY_ACTIVE {
-                // Admission only queues the SDF; RF delivery is the window's.
-                if let Err(rc)=cx.active_discovery(hw,hw.now_us().unwrap_or(0)) {return rc;}
-                &[0xa0]
-            } else {
-                let Some(n)=cx.observed.nodes_response(call.id as u64,&mut out) else {return ERR_SIZE;};
-                &out[..n]
-            };
             let packet=match hw.pkt_alloc() {Ok(p)=>p,Err(rc)=>return rc};
-            let rc=(|| {
+            let result=(|| {
                 let (p,cap)=hw.pkt_buf(packet)?;
-                if body.len()>cap {return Err(ERR_SIZE);}
-                unsafe {core::ptr::copy_nonoverlapping(body.as_ptr(),p,body.len());}
-                let rc=unsafe {write(hw.ctx(),call.id as u32,packet,body.len() as u32,1)};
+                if cap==0 {return Err(ERR_SIZE);}
+                unsafe {*p=0xa0;}
+                let rc=unsafe {write(hw.ctx(),call.id as u32,packet,1,1)};
                 if rc<0 {Err(rc)} else {Ok(())}
             })();
-            if rc.is_err() {hw.pkt_free(packet);}
-            return rc.err().unwrap_or(0);
+            if result.is_err() {hw.pkt_free(packet);}
+            return result.err().unwrap_or(0);
         }
         if call.component!=C_SELF || call.method!=12 {return ERR_UNSUPPORTED;}
         let cx=unsafe {&mut *(self.context as *mut Context)};
@@ -1562,7 +1499,7 @@ impl State {
                 let mut w = Writer::new(&mut out);
                 w.map(1)
                     .uint(1)
-                    .bytes(&cx.engine.info[..cx.engine.info_len]);
+                    .bytes(&cx.engine.info);
                 w.finish().map_or(0, |b| b.len())
             } else if method == 4 {
                 // Discovery clients request one active subscription transmission.
@@ -1586,6 +1523,38 @@ impl State {
                 // Companion/module suppliers replace the cache without restarting sync.
                 let result = bytes(fields, 1).ok_or(ERR_ARG)
                     .and_then(|record| cx.engine.set_publication(record));
+                let mut w = Writer::new(&mut out);
+                match result { Ok(()) => { w.map(0); }, Err(rc) => { w.int(rc as i64); } }
+                w.finish().map_or(0, |b| b.len())
+            } else if method == 16 {
+                // Radio fine tuning owned by this policy: applied through the
+                // runtime's `wifi-tuning` table — RAM, never NVS — so it
+                // survives sleep and resume (power_resume re-applies the
+                // stored tuning). ESP-NOW still forces the modem awake. The
+                // same pattern absorbs the LoRa radio settings out of
+                // transport.set later.
+                let result = NanTune::decode(call.data).map_err(|rc| rc).and_then(|tune| {
+                    let table = hw.get_component(c"wifi-tuning") as *const WifiTuner;
+                    if table.is_null() { hw.log(b"nan:tune no table"); return Err(ERR_NOTFOUND); }
+                    let (Some(get), Some(set)) = (unsafe { (*table).get }, unsafe { (*table).set }) else { hw.log(b"nan:tune no fn"); return Err(ERR_UNSUPPORTED); };
+                    let mut t = WifiTuning { size: core::mem::size_of::<WifiTuning>() as u32, ..Default::default() };
+                    let rc = unsafe { get(hw.ctx(), &mut t) };
+                    let mut text = *b"nan:tune get=xx dt=xx tx=xx pow=xx";
+                    text[14] = b"0123456789"[((rc as i64).clamp(0, 9)) as usize];
+                    text[21] = b"0123456789abcdef"[(t.driver_tx & 15) as usize];
+                    text[27] = b"0123456789abcdef"[(t.raw_tx_rate & 15) as usize];
+                    text[32] = b"0123456789abcdef"[(t.power >> 4 & 15) as usize];
+                    text[33] = b"0123456789abcdef"[(t.power & 15) as usize];
+                    hw.log(&text);
+                    if rc < 0 { return Err(rc); }
+                    if tune.power != 255 { t.power = tune.power; }
+                    let rc = unsafe { set(hw.ctx(), &t) };
+                    let mut text = *b"nan:tune set=xx";
+                    text[13] = b"0123456789"[((rc as i64).clamp(0, 9)) as usize];
+                    hw.log(&text);
+                    if rc < 0 { return Err(rc); }
+                    Ok(())
+                });
                 let mut w = Writer::new(&mut out);
                 match result { Ok(()) => { w.map(0); }, Err(rc) => { w.int(rc as i64); } }
                 w.finish().map_or(0, |b| b.len())
@@ -1615,14 +1584,6 @@ impl State {
                     }
                 })();
                 let mut w=Writer::new(&mut out);match result {Ok(id)=>{w.map(1).uint(1).uint(id);},Err(rc)=>{w.int(rc as i64);}}
-                w.finish().map_or(0,|b|b.len())
-            } else if method == 7 {
-                // Discovery clients register or cancel contextful observation streams.
-                let fields=call.data;
-                // a watch is its request: keyed by the envelope id (the runtime puts it on every event of the route)
-                let id=call.request_id.unwrap_or(call.id);
-                let rc=watch_duration(fields).and_then(|ms|cx.watches.register(watch::Route::Native {address:call.from,token:call.id},id,ms,hw.now_us().unwrap_or(0)));
-                let mut w=Writer::new(&mut out);match rc {Ok(())=>{w.map(0);},Err(rc)=>{w.int(rc as i64);}}
                 w.finish().map_or(0,|b|b.len())
             } else if method == 6 {
                 // Operators explicitly arm or leave coordinated sleep.
@@ -2020,7 +1981,7 @@ mod packet_lifetime_tests {
             last_sync: None,
             armed: true,
             discovery: discovery::Discovery::new(100),
-            watches: watch::Watches::default(), remote_wake: None, station:None, auto_reconnect_original:None,
+            remote_wake: None, station:None, auto_reconnect_original:None,
             tx: [None; 4],
             sleep: sleep::Policy::default(),
                 sleep_original: None,
@@ -2221,21 +2182,20 @@ mod packet_lifetime_tests {
             let hw=unsafe {Hw::new(&h)}.unwrap();let mut state=State::default();
             state.start(&hw,data).unwrap();
             let cx=unsafe {&*(state.context as *const Context)};
-            assert_eq!(&cx.engine.info[..cx.engine.info_len], publication::start_record(data).unwrap());
+            assert_eq!(&cx.engine.info, publication::start_record(data).unwrap());
             assert_eq!(cx.engine.started_us,1234);assert_eq!(f.wifi.now,1);
             state.stop(&hw);assert_eq!(f.context_freed,1);assert!(f.packets.is_empty());
         }
     }
 
     #[test]
-    fn publication_replacement_preserves_clock_sleep_watches_and_prepared_leases() {
+    fn publication_replacement_preserves_clock_sleep_and_prepared_leases() {
         let mut f = Fixture::default(); let h = host(&mut f);
         let hw = unsafe { Hw::new(&h) }.unwrap();
         let mut cx = context();
         cx.engine.set_publication(b"old").unwrap();
         cx.sleep.enabled = true;
         cx.alarm = 77;
-        cx.watches.register(watch::Route::Native { address: 52, token: 19 }, 19, 5000, 0).unwrap();
         cx.enqueue(&hw, discovery::ReturnPath { peer: [2;6], instance: 1, now: false }, b"prepared", 100).unwrap();
         let lease = cx.tx[0].unwrap().pkt;
         let clock = (cx.engine.nan.cluster(), cx.engine.master, cx.engine.started_us, cx.engine.wake_dw);
@@ -2254,10 +2214,9 @@ mod packet_lifetime_tests {
             if expected == 0 { assert_eq!(reply, &[0xa0]); }
             else { assert_eq!(cbor::Reader::new(reply).next().and_then(|i| i.as_int()), Some(expected as i64)); }
             let cx = unsafe { &*ptr };
-            assert_eq!(&cx.engine.info[..cx.engine.info_len], b"new");
+            assert_eq!(&cx.engine.info, b"new");
             assert_eq!((cx.engine.nan.cluster(),cx.engine.master,cx.engine.started_us,cx.engine.wake_dw),clock);
             assert!(cx.sleep.enabled); assert_eq!(cx.alarm,77);
-            assert_eq!(cx.watches.next_expiry(),Some(5_000_000));
             assert_eq!(cx.tx[0].unwrap().pkt,lease);
         }
         // A direct module call uses the same method, then an empty value clears.
@@ -2265,7 +2224,7 @@ mod packet_lifetime_tests {
         let call = CallView { component:C_SELF, method:11, value:0, flags:1, data:&fields,
             time_us:0,pkt:0,from:52,id:19, request_id: None, src: None };
         state.handle(&hw,&call); assert_eq!(f.sent.last().unwrap(), &[0xa0]);
-        assert_eq!(unsafe { &*ptr }.engine.info_len,0);
+        assert_eq!(unsafe { &*ptr }.engine.info.len(),0);
         assert!(unsafe { &*ptr }.engine.info.iter().all(|b|*b==0));
         state.stop(&hw); assert!(f.packets.is_empty());
     }
@@ -2281,7 +2240,7 @@ mod packet_lifetime_tests {
         let table=&state.hosted.table;
         let ctx=core::ptr::addr_of!(state.hosted.ctx) as *mut core::ffi::c_void;
         assert_eq!(unsafe {table.set_announce.unwrap()(ctx,b"native".as_ptr(),6)},0);
-        assert_eq!(unsafe {&*ptr}.engine.info_len,6);
+        assert_eq!(unsafe {&*ptr}.engine.info.len(),6);
         f.usb=true;
         assert_eq!(unsafe {table.usb.unwrap()(ctx,1)},0);
         assert_eq!(unsafe {table.sleepy.unwrap()(ctx,1,8,0,0)},ERR_BUSY);
@@ -2533,22 +2492,6 @@ mod packet_lifetime_tests {
             assert!(!cx.sleep.enabled);assert_eq!(f.wifi_sets,1);
         }
     }
-    #[test]
-    fn watch_forwards_only_new_data_and_busy_never_retains_an_event() {
-        let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();let mut cx=context();
-        let path=discovery::ReturnPath {peer:[2;6],instance:1,now:true};
-        cx.observation(&hw,path,b"before",100,-43);assert_eq!(f.next,0);
-        let route=watch::Route::Native {address:ADDR_LINK+1,token:246};
-        cx.watches.register(route,77,1000,101).unwrap();cx.observation(&hw,path,b"new",102,-43);
-        assert_eq!(f.sent.len(),1);assert_eq!(bytes(&f.sent[0],3),Some(&b"new"[..]));
-        assert_eq!(f.sent_methods[0],7|SEND_MORE,"an event keeps the request open");
-        cx.expire_watches(&hw,1_000_101);assert_eq!(f.sent.len(),2);assert_eq!(f.sent_methods[1],7,"the last one ends it");
-        cx.observation(&hw,path,b"after",1_000_102,-43);assert_eq!(f.sent.len(),2);
-        cx.watches.register(watch::Route::Radio(path),78,1000,2_000_000).unwrap();f.busy=true;
-        cx.observation(&hw,path,b"drop",2_000_001,-43);
-        assert!(f.packets.is_empty());assert!(cx.tx.iter().all(Option::is_none));assert_eq!(f.freed,1);
-    }
-
     #[test]
     fn arbitrary_discovery_content_and_android_like_remote_wake_keep_wire_shape() {
         let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();let mut cx=context();

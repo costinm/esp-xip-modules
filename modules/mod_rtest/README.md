@@ -17,3 +17,16 @@ If another test mode is running, stop it and wait for stopped status first.
 Probe mode allows two connections; duplex uses one stream per direction.
 Other test modes are described in [API.md](API.md). See the
 [probe guide](../../notes/docs/probes.md) for NOW relays.
+
+## Retained state
+
+The 512-byte state block holds test mode/progress, last results, link handles,
+radio-test counters and task state. A probe driver is allocated only for a
+probe session and is stopped/freed on module stop. Temporary test vectors and
+packets belong to each test. Some tests deliberately retain a packet or leak
+managed memory to test runtime diagnostics; these are explicit test modes,
+not the idle baseline, and a deliberate leak can require reboot before reuse.
+
+Verify the declared state/stack budget with `python3 scripts/check-module-memory.py`
+from the repository root. For device heap/packet lifetime measurements, use the
+[common measurement procedure](../README.md#measuring-retained-ram).

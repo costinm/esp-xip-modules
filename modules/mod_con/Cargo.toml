@@ -10,14 +10,14 @@ publish = false
 [workspace]
 
 [dependencies]
-xip-abi = { path = "../../crates/xip-abi", features = ["global-alloc"] }
+xip-abi = { path = "../../crates/xip-abi" }
 
 [package.metadata]
 # Options for tools/mkmod.py (scripts/build.sh).
 mkmod = "--stack 8192 --state 0 --autostart"
 
 [features]
-flat-image = []
+flat-image = ["xip-abi/global-alloc"]
 # the panic handler of a no_std library built as a shared object for crates/xip-runtime-host (scripts/build-host-modules.sh)
 sim = []
 

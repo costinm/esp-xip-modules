@@ -1,6 +1,6 @@
 //! NAN state/wire behavior, independent of ESP-IDF and the firmware adapter.
 use crate::diagnostics::Stats;
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use dmesh_rawnan::{self as wire, MacAddr, NanState, RxFrame};
 
 pub const PERIOD_US: u64 = 512 * 1024;
@@ -34,8 +34,7 @@ pub struct Engine {
     pub nan: NanState,
     pub stats: Option<Box<Stats>>,
     pub local: [u8; 6],
-    pub info: [u8; INFO_MAX],
-    pub info_len: usize,
+    pub info: Vec<u8>,
     pub master: Option<[u8; 6]>,
     pub master_is_beacon: bool,
     master_sync_beacon: bool,
@@ -54,8 +53,7 @@ impl Engine {
             nan: NanState::new(MASTER_STALE_US),
             stats: None,
             local,
-            info: [0; INFO_MAX],
-            info_len: 0,
+            info: Vec::new(),
             master: None,
             master_is_beacon: false,
             master_sync_beacon: false,
@@ -69,13 +67,14 @@ impl Engine {
         }
     }
     /// A supplier owns content/signing policy. A bounded copy into the active
-    /// context is the only retained publication; no identity/certificate cache.
+    /// allocation is the only retained publication; clearing it frees its storage.
     /// Supplier methods replace the opaque publication used by future transmissions.
     pub fn set_publication(&mut self, record: &[u8]) -> Result<(), i32> {
         if record.len() > INFO_MAX { return Err(xip_abi::ERR_SIZE); }
-        self.info[..record.len()].copy_from_slice(record);
-        self.info[record.len()..].fill(0);
-        self.info_len = record.len();
+        let mut info = Vec::new();
+        info.try_reserve_exact(record.len()).map_err(|_| xip_abi::ERR_NOMEM)?;
+        info.extend_from_slice(record);
+        self.info = info;
         Ok(())
     }
     /// Diagnostic startup enables optional timing storage without taxing ordinary operation.
@@ -326,7 +325,7 @@ impl Engine {
     }
     /// The sync sender encodes a NOW announcement using the current publication.
     pub fn now_body(&self, now: u64, out: &mut [u8]) -> Option<usize> {
-        self.now_message(now, &self.info[..self.info_len], out)
+        self.now_message(now, &self.info, out)
     }
     /// Control/data senders encode a NOW body with the current clock anchor.
     pub fn now_message(&self, now: u64, payload: &[u8], out: &mut [u8]) -> Option<usize> {
@@ -356,7 +355,7 @@ impl Engine {
     /// The publication sender encodes a NAN service frame for the current window.
     pub fn publish(&self, out: &mut [u8]) -> Option<usize> {
         let cluster = self.nan.cluster()?.0;
-        let n = 43 + self.info_len;
+        let n = 43 + self.info.len();
         if out.len() < n {
             return None;
         }
@@ -374,10 +373,10 @@ impl Engine {
         out[16..22].copy_from_slice(&bssid);
         out[24..30].copy_from_slice(&[4, 9, 0x50, 0x6f, 0x9a, 0x13]);
         out[30] = 3;
-        out[31..33].copy_from_slice(&((10 + self.info_len) as u16).to_le_bytes());
+        out[31..33].copy_from_slice(&((10 + self.info.len()) as u16).to_le_bytes());
         out[33..39].copy_from_slice(&wire::DMESH_SERVICE_ID);
-        out[39..43].copy_from_slice(&[1, 0, 0x10, self.info_len as u8]);
-        out[43..n].copy_from_slice(&self.info[..self.info_len]);
+        out[39..43].copy_from_slice(&[1, 0, 0x10, self.info.len() as u8]);
+        out[43..n].copy_from_slice(&self.info);
         Some(n)
     }
 }
@@ -390,10 +389,10 @@ mod tests {
         let mut e = Engine::new([2;6],1);
         e.set_publication(&[7;INFO_MAX]).unwrap();
         assert_eq!(e.set_publication(&[8;INFO_MAX+1]),Err(xip_abi::ERR_SIZE));
-        assert_eq!(e.info_len,INFO_MAX);assert_eq!(e.info,[7;INFO_MAX]);
+        assert_eq!(e.info.len(),INFO_MAX);assert_eq!(e.info,[7;INFO_MAX]);
         e.set_publication(b"x").unwrap();assert_eq!(e.info[0],b'x');
-        assert!(e.info[1..].iter().all(|b|*b==0));
-        e.set_publication(&[]).unwrap();assert_eq!(e.info_len,0);
+        assert_eq!(e.info.len(),1);
+        e.set_publication(&[]).unwrap();assert_eq!(e.info.len(),0);assert_eq!(e.info.capacity(),0);
         assert!(e.info.iter().all(|b|*b==0));
     }
 
@@ -776,8 +775,7 @@ mod tests {
         let local = [2, 0, 0, 0, 0, 1];
         let mut e = engine(local, 1);
         e.tick(ACQUIRE_US + 1);
-        e.info[..3].copy_from_slice(b"abc");
-        e.info_len = 3;
+        e.set_publication(b"abc").unwrap();
         let mut out = [0; 512];
         let n = e.now_body(ACQUIRE_US + 2, &mut out).unwrap();
         let f = e.nan.now_sync_outgoing(ACQUIRE_US + 2).unwrap();

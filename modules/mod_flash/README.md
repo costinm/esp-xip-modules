@@ -48,3 +48,18 @@ and upload steps, and [module troubleshooting](../../notes/ai/modules/TROUBLESHO
 for placement, inspection and recovery.
 
 QUIC upload commands: [UART, UDP and NOW relay](../../notes/ai/quic/quic_flash.md).
+
+## Retained state
+
+The 128-byte state block retains authentication policy (including an optional
+65-byte development key), listener/status flags, a connection pointer and an
+alarm handle while started. An upload connection, signed header, journal
+operations, page inventory and upload packet leases exist only for a session
+and are disposed on completion/error/timeout/stop. The autostarted listener and
+its polling alarm still cost runtime RAM while waiting; unloading the module
+is required to remove that baseline. Upload buffers are not permanent Main
+buffers.
+
+Verify the declared state/stack budget with `python3 scripts/check-module-memory.py`
+from the repository root. For device heap/packet lifetime measurements, use the
+[common measurement procedure](../README.md#measuring-retained-ram).

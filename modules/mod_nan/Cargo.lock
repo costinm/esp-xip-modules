@@ -135,7 +135,6 @@ dependencies = [
 [[package]]
 name = "dmesh-rawnan"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=0b3e629444b072d65799baab73a8868c476498b0#0b3e629444b072d65799baab73a8868c476498b0"
 dependencies = [
  "anyhow",
 ]
@@ -143,7 +142,6 @@ dependencies = [
 [[package]]
 name = "dmesh-server"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=0b3e629444b072d65799baab73a8868c476498b0#0b3e629444b072d65799baab73a8868c476498b0"
 dependencies = [
  "dmesh-rawnan",
  "mesh-api",
@@ -311,7 +309,6 @@ dependencies = [
 [[package]]
 name = "quic-lite"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=0b3e629444b072d65799baab73a8868c476498b0#0b3e629444b072d65799baab73a8868c476498b0"
 dependencies = [
  "smallvec",
  "spin",

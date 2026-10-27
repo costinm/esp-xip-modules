@@ -40,3 +40,7 @@ opt-level = "s"
 panic = "abort"
 # Symbols stay in the ELF for size audits; mkmod packages only loadable bytes.
 strip = "none"
+
+[patch."https://github.com/costinm/dmesh"]
+dmesh-server = { path = "../../../dmesh/crates/dmesh-server" }
+dmesh-rawnan = { path = "../../../dmesh/crates/rawnan" }

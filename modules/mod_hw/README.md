@@ -16,3 +16,15 @@ cargo test                                         # the module against a fake h
 
 Same tooling and slot variables as [mod_lora](../mod_lora/README.md). Checked on an ESP32 board (lora3): a battery
 reading is emitted as event 111; the pin default is GPIO35 (ESP32) / GPIO0 (ESP32-C6).
+
+## Retained state
+
+The 128-byte state block retains battery-divider configuration, pending
+settle state, up to four probe pin numbers and probe progress, plus button pin
+and press/release timestamps. It holds no samples or event history. Enabled
+probes/buttons retain their native alarms/IRQ registrations until stopped;
+stop cancels work and disables the owned resources.
+
+Verify the declared state/stack budget with `python3 scripts/check-module-memory.py`
+from the repository root. For device heap/packet lifetime measurements, use the
+[common measurement procedure](../README.md#measuring-retained-ram).

@@ -45,7 +45,7 @@ pub const NAT_OUT: u16 = 2;
 pub const NAT_METHODS_N: usize = 5;
 pub const NAT_PARAMS_N: usize = 12;
 pub const NAT_STRUCTS_N: usize = 3;
-pub const NAT_FIELDS_N: usize = 26;
+pub const NAT_FIELDS_N: usize = 27;
 pub static NAT_POOL: [u8; 18] = [0x00, 0x77, 0x69, 0x66, 0x69, 0x00, 0x77, 0x69, 0x66, 0x69, 0x2d, 0x74, 0x75, 0x6e, 0x69, 0x6e, 0x67, 0x00];
 pub static NAT_METHODS: [NatMethod; 6] = [
     NatMethod { comp: 10, method: 1, table: 1, slot: 1, first_param: 0, nparams: 3 },
@@ -73,10 +73,10 @@ pub static NAT_PARAMS: [NatParam; 13] = [
 pub static NAT_STRUCTS: [NatStruct; 4] = [
     NatStruct { size: 216, first: 0, count: 11 },
     NatStruct { size: 8, first: 11, count: 3 },
-    NatStruct { size: 20, first: 14, count: 12 },
+    NatStruct { size: 24, first: 14, count: 13 },
     NatStruct { size: 0, first: 0, count: 0 },
 ];
-pub static NAT_FIELDS: [NatField; 27] = [
+pub static NAT_FIELDS: [NatField; 28] = [
     NatField { tag: 0, offset: 0, size: 4, kind: 5, len_size: 0, len_offset: 0, is_signed: 0 },
     NatField { tag: 1, offset: 4, size: 1, kind: 2, len_size: 0, len_offset: 0, is_signed: 0 },
     NatField { tag: 2, offset: 5, size: 1, kind: 2, len_size: 0, len_offset: 0, is_signed: 0 },
@@ -98,11 +98,12 @@ pub static NAT_FIELDS: [NatField; 27] = [
     NatField { tag: 4, offset: 7, size: 1, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
     NatField { tag: 5, offset: 8, size: 1, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
     NatField { tag: 6, offset: 9, size: 1, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
-    NatField { tag: 7, offset: 12, size: 2, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
-    NatField { tag: 8, offset: 14, size: 2, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
-    NatField { tag: 9, offset: 16, size: 2, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
-    NatField { tag: 10, offset: 18, size: 2, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
+    NatField { tag: 7, offset: 14, size: 2, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
+    NatField { tag: 8, offset: 16, size: 2, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
+    NatField { tag: 9, offset: 18, size: 2, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
+    NatField { tag: 10, offset: 20, size: 2, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
     NatField { tag: 11, offset: 10, size: 1, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
+    NatField { tag: 12, offset: 11, size: 1, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
     NatField { tag: 0, offset: 0, size: 0, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
 ];
 

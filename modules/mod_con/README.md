@@ -22,3 +22,14 @@ implementation details.
 
 Memory and task diagnostics live in mod_system: system.heap, system.heap_dump
 and system.dump_tasks. PM-lock diagnostics remain nan.dump_locks.
+
+## Retained state
+
+The module requests a zero-byte state block and retains no application
+buffers. Native-call arguments, scan rows and response vectors live for one
+request and are dropped on return. A mapped instance still has runtime overhead
+(including its task/stack); zero module state does not mean zero instance RAM.
+
+Verify the declared state/stack budget with `python3 scripts/check-module-memory.py`
+from the repository root. For device heap/packet lifetime measurements, use the
+[common measurement procedure](../README.md#measuring-retained-ram).

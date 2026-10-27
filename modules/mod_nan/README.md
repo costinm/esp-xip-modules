@@ -9,8 +9,8 @@ It follows the cluster clock on DW0/DW8 and sends NOW timing announcements on ea
 when following a peer.
 
 Build with `scripts/build.sh esp32c6`; the package is `mod_nan.dmod`
-(`scripts/flash-serial.sh SERIAL --module-only mod_nan`). The installed module auto-starts;
-query `nan.status` for synchronization. Use `nan.watch` for fresh discovery
+(upload through the running mod_flash service). The installed module auto-starts;
+query `nan.status` for synchronization. Use the five-second `discovery.nodes` stream for fresh discovery
 observations; the module keeps no peer inventory. The module
 caches an opaque supplied announcement, answers compatible discovery requests, and exchanges NAN
 Follow-ups through the normal application dispatcher. `nan.announce` reads the
@@ -71,3 +71,10 @@ Only the opening nan.report request is sent. The CLI half-closes its sending
 side and reads report bodies; no further commands or response envelopes travel
 on this feed. Slow readers lose observations. NAN uses the common Stream API,
 with no TCP listener, socket handling or input buffer.
+
+## Retained state
+
+Discovery keeps no peer inventory. The stream's handle/deadline exists only
+while it is open; packets transfer to the stream on accepted writes. See the
+[API](API.md#discovery-observation-stream-component-6-method-9) and
+[memory/lifecycle guide](../../notes/ai/modules/README.md) for details.

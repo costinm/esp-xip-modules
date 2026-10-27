@@ -3,6 +3,8 @@
 //! Requests reach it as 0x444d0002 datagrams parsed by the runtime (`call.is_envelope()`); this module has no port and parses no envelope of a port.
 #![no_std]
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 use alloc::{vec, vec::Vec};
 use core::ffi::{c_int, c_void, CStr};
 use xip_abi::cbor::{self, Item, Reader, Writer};
@@ -478,3 +480,28 @@ macro_rules! export {
 
 #[cfg(feature = "sim")]
 export!();
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+    #[test]
+    fn tuning_power_decodes_to_its_offset() {
+        // the wire fields map: {12: 2} (power)
+        let map = [0xa1, 0x0c, 0x02];
+        let s = &NAT_STRUCTS[2]; // the wifi_tuning struct
+        let mut b = [0u8; 24];
+        assert!(nat_fill(s, &mut b, Some(&map)), "nat_fill accepts the power field");
+        assert_eq!(b[11], 2, "power at offset 11");
+        assert_eq!(&b[0..4], &24u32.to_le_bytes(), "the size field is filled");
+        // and the get emits it back (uint key/value pairs; walk the raw bytes)
+        let mut out = [0u8; 64]; let mut w = Writer::new(&mut out);
+        let _pairs = nat_emit(s, &b, &mut w);
+        let written = w.finish().unwrap();
+        let mut i = 0; let mut decoded = Vec::new();
+        while i + 1 < written.len() {
+            decoded.push((written[i] as u64, written[i+1] as u64));
+            i += 2;
+        }
+        assert!(decoded.contains(&(12, 2)), "power round-trips: {decoded:?}");
+    }
+}

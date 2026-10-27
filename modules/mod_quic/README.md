@@ -31,3 +31,18 @@ It owns received packets and retained protocol history until consumption or
 close. Accepted TX holds a separate driver reference until physical use ends.
 There are no endpoint packet quotas, ticket tables or return-packet completion
 queues; TX BUSY keeps the prepared packet for another path or retry.
+
+## Retained state
+
+The 8-byte state block contains a running-context pointer. A started endpoint
+retains its native handles, transport state and enabled statistics; the core
+owns association/stream state and packet history while those connections need
+it. Packets use the shared native pool, not a private packet-storage array.
+Statistics are optional and reclaimed when disabled. Stream close releases
+session resources, but a started endpoint and association capacity can remain
+resident for reuse. Stop drops bridges, sessions, core and context and closes
+native handles. An installed, unstarted image has no endpoint instance.
+
+Verify the declared state/stack budget with `python3 scripts/check-module-memory.py`
+from the repository root. For device heap/packet lifetime measurements, use the
+[common measurement procedure](../README.md#measuring-retained-ram).

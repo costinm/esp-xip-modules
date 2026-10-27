@@ -33,3 +33,17 @@ A companion can skip this module and call `nan.set_announce` directly. No
 certificate-chain protocol is implemented here yet; see [API.md](API.md), the
 [NAN guide](../../notes/ai/nan/README.md) and
 [module troubleshooting](../../notes/ai/modules/TROUBLESHOOTING.md).
+
+## Retained state
+
+The 8-byte state block contains the running-context pointer. While started,
+the context retains a 255-byte local signed publication buffer, channel,
+request sequence, one pending transaction and twelve relay link handles. The
+publication is required to answer discovery without signing on each reply;
+this is local publication state, not an observed-peer inventory. Stop cancels
+alarms, releases links, clears NAN's publication and frees the context. Disable
+this optional supplier when its publication/relay policy is not needed.
+
+Verify the declared state/stack budget with `python3 scripts/check-module-memory.py`
+from the repository root. For device heap/packet lifetime measurements, use the
+[common measurement procedure](../README.md#measuring-retained-ram).

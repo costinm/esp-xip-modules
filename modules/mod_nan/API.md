@@ -32,7 +32,7 @@ local follow-up; ordinary runtime envelope delivery uses the same decoder.
 
 The `nan` hosted table has native policy and supplier calls documented in
 [API.local.md](API.local.md). The runtime calls USB/wake methods directly under
-the module lock. Contextful discovery/watch requests retain their remote handler.
+the module lock. Contextful discovery requests retain their remote handler.
 `transport.set` (component 1, method 4) routes directly to NAN through its
 manifest's additional envelope ownership. Independent STA/AP/NOW, BLE, UART and
 LoRa/FSK fields patch only the requested settings; there is no aggregate mode or
@@ -73,7 +73,7 @@ reconnect policy and the latest explicit configuration if still module-owned.
 ### Response
 
 Counter fields exist only when diagnostics is enabled. Peer inventories have
-been removed; legacy fields 14 and 23 are empty. Use `watch` for fresh data.
+been removed; legacy fields 14 and 23 are empty. Use `discovery.nodes` for fresh data.
 
 | Tag | Field | Type | Description |
 |---:|---|---|---|
@@ -140,7 +140,7 @@ been removed; legacy fields 14 and 23 are empty. Use `watch` for fresh data.
 ## 4. `discover` — queue an active NAN Subscribe
 
 Returns `{1: request_id}` on queuing. This is one transmission intent, not a
-collected inventory or proof of a peer response. Use `watch` to observe replies.
+collected inventory or proof of a peer response. Use `discovery.nodes` to observe replies.
 
 ## 5. `send` — queue an application record
 
@@ -176,22 +176,7 @@ Temporary `awake` holds defer sleep without disabling the policy. Physical sleep
 needs an unplugged/UART device by default; `usb.sleep=1` enables experimental
 USB detach. A queued result does not prove physical sleep.
 
-## 7. `watch` — fresh observations for a bounded interval
-
-### Request
-
-| Tag | Field | Type | Description |
-|---:|---|---|---|
-| 1 | `duration_ms` | `uint` | Default 5000, maximum 300000; zero cancels the same route/request ID. |
-
-An empty correlated response acknowledges registration. Subsequent CBOR
-response datagrams use the same request ID and return route, including UDP or
-NOW. Results are `{1:1, 2:peer_mac, 3:record, 4:received_us, 5:via_now, 6:rssi_dbm}`.
-Expiration sends `{1:2}` as a best-effort completion. Renew/cancel by reusing
-the route and request ID. Four registrations maximum; no registration allocation
-when idle, no inventory, no replay and no event backlog. Raw observation data
-is not a trusted identity assertion: consumers validate signed announcements.
-A busy/full destination loses that event. Stop/update frees registrations.
+Method 7 (`watch`) is retired; use discovery.nodes (component 6, method 9).
 
 ## 8. `post` — arbitrary discovery SUB/PUB content
 
@@ -220,7 +205,7 @@ Returns `{1: transaction_id}` on admission. One lazily allocated transaction
 runs for at most twenty seconds. NAN requests discovery, then sends an Android
 compatible type-2 Follow-up after observing the specified peer/instance. NOW
 sends the same targeted CBOR directly. A correlated peer result/error ends the
-transaction; otherwise it expires. Observe responses using `watch`: neither
+transaction; otherwise it expires. Observe responses using `discovery.nodes`: neither
 admission nor a peer intent ACK establishes active IP/service readiness.
 No pairing window or secret installation is opened by this operation.
 
@@ -250,7 +235,7 @@ as start field 2 and the `announce` getter. An absent/wrong-type or oversized
 value fails before changing the existing record. No additional allocation,
 signing, identity/certificate interpretation or persistence is performed.
 
-Replacement preserves synchronization, sleep policy, watches and wake
+Replacement preserves synchronization, sleep policy, streams and wake
 transactions. Future publications and newly prepared discovery responses use
 the replacement; already prepared packet leases remain unchanged until sent or
 released. A supplied DMesh discovery envelope is answered by changing only its
@@ -283,8 +268,8 @@ current provider (including UART/BLE/UDP bearers); NAN creates no TCP listener
 and contains no socket adapter. A future provider can use the same interface.
 There are no commands or request bodies after the opening watch; extra input is
 rejected without input buffering. Client FIN half-closes its sending direction
-and reports continue. Full close or module stop releases the sink. Datagram
-nan.watch and one-shot nan.report remain separate existing APIs.
+and reports continue. Full close or module stop releases the sink. Discovery announcements use discovery.nodes; nan.report also includes clock
+summaries and non-announcement service frames.
 
 ## 13. `powerinfo` — The power state and the FreeRTOS numbers
 
@@ -318,6 +303,23 @@ restores the radio once and drops the rest of the request. With a USB-Serial/JTA
 **C function:** power/Power.dump_locks
 
 Who keeps the CPU frequency up or light sleep out (`esp_pm_dump_locks`).
+
+**Access:** any of `system`, `mesh.owner`, `mesh.admin`
+
+## 16. `tune` — radio fine tuning owned by this policy
+
+### Request
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `power` | `uint` | Modem power save: 0 derive it from the radio state (`none` with ESP-NOW or without a station, `min` for the plain station), 1 force `none`, 2 request `min` for the plain station; 255 retain the current value. A state with ESP-NOW always forces `none` — ESP-NOW cannot run against a sleeping modem. |
+
+Returns an empty map after applying. The settings go through the runtime's
+`wifi-tuning` table, so they live in RAM (never NVS) and survive sleep and
+resume — the radio restart re-applies the stored tuning. A change restarts the
+radio (the station rejoins) on the next reconcile. This method owns the radio
+fine tuning that does not belong in `transport.set` (the LoRa frequency and
+friends move here later). Absent fields retain; unknown fields are rejected.
 
 **Access:** any of `system`, `mesh.owner`, `mesh.admin`
 
@@ -406,3 +408,22 @@ reports passively and does not send a wake request.
 | 25 | `soft_sleep` | `u8` | How the last sleep was done: 1 soft, 0 physical. Soft while the console is on USB-Serial/JTAG with a host attached (light sleep powers that port down and the host does not recover the device): the radio is stopped and restarted around a plain delay and the CPU does not sleep. Physical with a UART console or no host. |
 | 26 | `active_window` | `u8` | A five-second activity interval from local serial bytes or a validated directed network record is still active. Modules decide sleep policy; querying this flag does not acquire a PM lock. |
 | 27 | `ip_sockets` | `u8` | Open runtime TCP sockets plus the default UDP listener. Zero during NAN/NOW-only sleepy windows. |
+
+## Discovery observation stream (component 6, method 9)
+
+`discovery.nodes` uses the shared DMesh contract in `dmesh-server::discovery_nodes`
+and DMesh's root API.md. Request fields are `{1: duration_ms, 2: retained,
+3: active}`, defaulting to 5000 ms, true, true. Duration is 0..300000 ms.
+The response is a correlated `{1:6,2:9,3:id,6:{1:1}}` header, followed by the
+shared CBOR observation sequence and a terminal `{0:0}` plus FIN.
+
+NAN registers the stream before requesting discovery on NAN and NOW. It retains
+no inventory; retained=true therefore adds no historical ESP rows. One stream
+is allowed at a time. Original record bytes/signatures are encoded directly in
+pool packets with receiver MAC, RSSI, channel, monotonic receipt time, bearer,
+origin=direct and retained=false. Accepted writes transfer ownership to Stream;
+refused observation writes drop the event without a module queue. Request FIN
+only closes the peer's sending half. Disconnect, invalid input, stop or deadline
+reclaims the session. Terminal admission has a one-second grace for pending
+stream output. Consumers verify the original signed identity; receiver metadata
+is not part of that signature.
