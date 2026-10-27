@@ -13,7 +13,7 @@
 #define pdPASS 1
 #define CONFIG_XIP_WORKER_PRIORITY 5
 #define XIP_EV_IO 9
-static uint8_t flash[65536], packet[1204];
+static uint8_t flash[65536];static uint8_t *packet;static xip_pool *pool;
 static int fail_create,callbacks,dropped;
 static void (*task)(void *);
 static void *task_arg;
@@ -21,7 +21,7 @@ static int worker_queue, registry_lock, critical, reenter, queue_failures;
 static void completion_dispatch(void);
 #define portENTER_CRITICAL(lock) do { (void)(lock); assert(!critical); critical = 1; } while (0)
 #define portEXIT_CRITICAL(lock) do { (void)(lock); assert(critical); critical = 0; completion_dispatch(); } while (0)
-typedef struct{uint32_t id;xip_held held;} instance;
+typedef struct{uint32_t id;} instance;
 #define I(p) ((instance *)(p))
 typedef struct{int kind;uint32_t inst;int32_t component,method,value;uint64_t id;} xip_event_t;
 static xip_event_t completion;
@@ -34,17 +34,19 @@ static int xTaskCreate(void (*entry)(void *),const char *name,int stack,void *ar
 static void run_task(void){void (*entry)(void *)=task;void *arg=task_arg;task=NULL;task_arg=NULL;assert(entry);entry(arg);}
 static void vTaskDelay(int n){(void)n;if(task)run_task();}
 static void vTaskDelete(void *x){(void)x;}
-static void drop_slot(int n){assert(n==7);dropped++;}
-static int h_pkt_span(void *u,uint32_t handle,uint8_t **data,size_t *cap){if(!xip_held_get(&I(u)->held,handle))return XIP_ERR_ARG;*data=packet;*cap=sizeof(packet);return 0;}
+static void drop_slot(int n){assert(n==0);xip_pool_release(pool,n);dropped++;}
+static int h_pkt_span(void *u,uint32_t handle,uint8_t **data,size_t *cap){(void)u;if(!xip_packet_get(pool,handle))return XIP_ERR_ARG;*data=packet;*cap=1204;return 0;}
+static xip_packet_ref packet_take(uint32_t h){return *xip_packet_get(pool,h);}
+static uint32_t new_packet(void){int slot=xip_pool_acquire(pool,0);assert(slot==0);packet=xip_pool_slot(pool,slot);return xip_packet_handle(pool,slot,64,0);}
 #include "../../components/xip_runtime/src/flash_hal.inc"
 static instance *dispatch_instance;
 static void completion_dispatch(void){if(reenter && callbacks){reenter=0;assert(atomic_load(&flash_owner)==0);assert(h_flash_erase(dispatch_instance,0x3000,0,4096,44,101,102)==0);}}
 int main(void){
- instance in={.id=42};xip_held_init(&in.held,4);
- uint32_t pkt=xip_held_add(&in.held,7,64,0,XIP_HELD_OWNED);
+ instance in={.id=42};pool=xip_pool_create(8,1204);assert(pool);packet=xip_pool_slot(pool,0);
+ uint32_t pkt=new_packet();
  memset(flash,0,sizeof(flash));memcpy(packet+64,"payload",7);
  assert(h_flash_write(&in,0x1000,3,pkt,64,7,44,101,99)==0);
- assert(!xip_held_get(&in.held,pkt));assert(!dropped && !callbacks);
+ assert(xip_packet_get(pool,pkt));assert(!dropped && !callbacks);
  assert(h_flash_erase(&in,0,0,4096,44,101,100)==XIP_ERR_BUSY);
  dispatch_instance=&in;reenter=1;queue_failures=1;
  run_task();assert(dropped==1 && callbacks==1);assert(task);run_task();assert(callbacks==2);assert(!memcmp(flash+0x1003,"payload",7));
@@ -54,9 +56,9 @@ int main(void){
  assert(h_flash_erase(&in,1,0,4096,44,101,1)==XIP_ERR_ARG);
  assert(h_flash_erase(&in,65536,0,4096,44,101,1)==XIP_ERR_ARG);
  assert(h_flash_read(&in,UINT32_MAX,2,read,7)==XIP_ERR_ARG);
- pkt=xip_held_add(&in.held,7,64,0,XIP_HELD_OWNED);
- assert(h_flash_write(&in,0,0,pkt,1200,10,44,101,1)==XIP_ERR_ARG);assert(xip_held_get(&in.held,pkt));
- fail_create=1;assert(h_flash_write(&in,0,0,pkt,64,7,44,101,1)==XIP_ERR_NOMEM);assert(xip_held_get(&in.held,pkt));
+ pkt=new_packet();
+ assert(h_flash_write(&in,0,0,pkt,1200,10,44,101,1)==XIP_ERR_ARG);assert(xip_packet_get(pool,pkt));
+ fail_create=1;assert(h_flash_write(&in,0,0,pkt,64,7,44,101,1)==XIP_ERR_NOMEM);assert(xip_packet_get(pool,pkt));
  fail_create=0;int before=callbacks;assert(h_flash_write(&in,0x2000,0,pkt,64,7,44,101,1)==0);
  flash_release(42);assert(!task && callbacks==before && dropped==2);assert(flash[0x2000]==0);
  puts("physical flash HAL ownership/cancellation/ranges: ok");

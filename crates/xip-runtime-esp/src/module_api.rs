@@ -43,11 +43,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn system_manifest_owns_memory_and_task_diagnostics() {
+        let api = InstalledApi::decode(include_bytes!("../../../modules/mod_system/API.manifest"))
+            .expect("installed system API");
+        assert_eq!((api.name, api.component), ("system", 49));
+        assert_eq!(api.methods, [(1, "heap"), (2, "heap_dump"), (3, "dump_tasks")]);
+    }
+
+    #[test]
     fn console_manifest_advertises_only_binary_methods() {
         let data = include_bytes!("../../../modules/mod_con/API.manifest");
         let api = InstalledApi::decode(data).expect("installed console API");
         assert_eq!((api.name, api.component), ("console", 20));
-        assert_eq!(api.methods, [(5, "status"), (6, "start"), (7, "stop"), (8, "reset"), (9, "heap"), (10, "nv"), (11, "link.send")]);
+        assert_eq!(api.methods, [(5, "status"), (6, "start"), (7, "stop"), (8, "reset"), (10, "nv"), (11, "link.send")]);
         assert!(InstalledApi::decode(&data[..2]).is_none(), "required name bytes are missing");
     }
 

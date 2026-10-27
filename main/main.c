@@ -26,7 +26,7 @@ void app_main(void)
     /* Module lifecycle and desired Wi-Fi state use the same hooks in either partition. */
     xip_host_hooks_t hooks = {
         .modules_info = xip_loader_modules_info, .module_start = xip_loader_start_named,
-        .module_stop = xip_loader_stop_named, .module_manifest = xip_loader_manifest_named, .module_rescan = xip_loader_rescan, .component_start = xip_loader_start_hosting,
+        .module_stop = xip_loader_stop_named, .module_manifest = xip_loader_manifest_named, .module_rescan = xip_loader_rescan, .component_start = xip_loader_start_hosting, .request_start = xip_loader_start_request,
     };
     xip_wifi_install_hooks(&hooks);
     ESP_ERROR_CHECK(xip_host_init(&hooks));

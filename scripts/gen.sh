@@ -51,7 +51,7 @@ for src in api/*.API.md; do
 done
 
 # The binary console needs native component layouts, not a text/name catalog.
-"$gen" --api api/wifi.API.md --api api/ip.API.md --rustdoc "$layout" --pointer-width 4 --out-console-native "$tmp/native.h"
+"$gen" --api api/wifi.API.md --rustdoc "$layout" --pointer-width 4 --out-console-native "$tmp/native.h"
 python3 tools/catalog_rs.py "$tmp/native.h" > modules/mod_con/src/tables.rs
 
 for api in modules/*/API.md; do

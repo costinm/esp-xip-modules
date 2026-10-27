@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define XIP_ABI_VERSION 2
+#define XIP_ABI_VERSION 4
 
 // Success.
 #define XIP_OK 0
@@ -34,7 +34,7 @@
 // The buffer is too small (`*len` says how much is needed).
 #define XIP_ERR_SIZE -8
 
-// A module ended holding packets (the host gets them back) or memory (`mem_alloc`: not recoverable, the slot needs a reboot to be replaced) it had not given back. The stop is reported as failed.
+// A module ended holding managed memory (`mem_alloc`: not recoverable, the slot needs a reboot to be replaced). The stop is reported as failed.
 #define XIP_ERR_LEAK -9
 
 // A nonblocking socket operation would block; wait for another readiness event.
@@ -233,7 +233,7 @@
 // events). The last message is sent without it. Only the lower 30 bits are the method.
 #define XIP_SEND_MORE (1 << 30)
 
-// Event: a frame sent to the link is done (the packet comes back, `call.value` is the outcome).
+// Reserved legacy event id. ABI 3 releases driver references without returning packets.
 #define XIP_LINK_EVENT_TX_DONE 1
 
 // Event: the link has capacity again after answering a send with `ERR_BUSY`.
@@ -269,9 +269,22 @@
 // link in the metadata, to the common QUIC receive function (`xip_quic_rx_set`), like the frames of ESP-NOW and the BLE channel.
 #define XIP_PORT_QUIC 247
 
-// Multicast port: bound by a module's manifest (key 9), the runtime's `xip_mc` UDP listener delivers datagrams of the DMesh discovery group
-// (IPv6 `ff02::5227`, IPv4 later) here; the module answers by sending back to the source token it arrived with.
+// Datagram registration port of the local QUIC endpoint provider.
+// Both this carrier and PORT_QUIC enter the native classifier.
+#define XIP_PORT_QUIC_ENDPOINT 244
+
+// Multicast port: bound by a module's manifest (key 9), the runtime's discovery UDP port delivers datagrams of the DMesh discovery group
+// (IPv6 `ff02::5227`, IPv4 later) here, with their source in the deliver (`call.src`); the module answers with `udp_send` on the socket handle it received on `call.from`.
 #define XIP_PORT_MC 250
+
+// The wire UDP port of the DMesh discovery sweep (the mc socket's bind and the
+// raw ingress classifier). Distinct from XIP_PORT_MC: that is the module
+// registry port the datagrams fan out to, this is the number on the wire.
+#define XIP_MC_UDP_PORT 5227
+
+// Handle space of a runtime-owned UDP socket: `ADDR_UDP + fd`. Modules never parse it — a
+// datagram receive carries it on `call.from`, and a module sends with `udp_send` back on it.
+#define XIP_ADDR_UDP 1610612736
 
 #define XIP_PORT_NET 5225
 
@@ -311,7 +324,7 @@
 
 #define XIP_STREAM_CLOSED 4
 
-#define XIP_QUIC_VERSION 1
+#define XIP_QUIC_VERSION 2
 
 // `Power::version`.
 #define XIP_POWER_VERSION 4
@@ -397,8 +410,6 @@
 #define XIP_ERROR_INVALID_SIGNATURE -149
 
 #define XIP_ERROR_CORRUPTION_DETECTED -151
-
-#define XIP_IP_VERSION 1
 
 typedef struct {
   uint32_t free;
@@ -507,33 +518,6 @@ typedef struct {
   int (*usb_sleep_allowed)(void *ctx);
 } xip_serial;
 
-// Point-to-point IP interface. No Ethernet/ARP, default route, forwarding or
-// compression. Static IPv6 addresses use an on-link /64; all-zero disables a family.
-typedef struct {
-  uint32_t size;
-  // 0 selects1280; otherwise1280..1500. Tunnel endpoints budget outer headers.
-  uint16_t mtu;
-  uint16_t reserved;
-  uint8_t ipv4[4];
-  uint8_t netmask[4];
-  uint8_t gateway[4];
-  uint8_t ipv6[16];
-} xip_ip_config;
-
-typedef struct {
-  uint32_t version;
-  uint32_t size;
-  // Creates one lazy native link named `ip`, returning its address. The owner
-  // subscribes with Link.open and injects complete packets with normal send.
-  // Owned input is retained by lwIP until its native custom-pbuf callback
-  // releases it. No module pointer/vtable survives in the stack.
-  int (*open)(void *ctx, const xip_ip_config *config, uint32_t *link);
-  int (*set_up)(void *ctx, uint32_t link, uint32_t up);
-  // Removes the netif synchronously on the TCP/IP thread. Owner stop and
-  // network sleep teardown also close it; recreate after resume.
-  int (*close)(void *ctx, uint32_t link);
-} xip_ip;
-
 typedef struct {
   uint32_t packet;
   uint32_t len;
@@ -569,30 +553,38 @@ typedef struct {
   int (*written)(void *ctx, uint32_t handle);
 } xip_stream;
 
+// One weighted egress. Destination is the link's opaque peer token (MACs use mac_token).
 typedef struct {
-  // sizeof(QuicPoolInfo).
-  uint32_t size;
-  // Physical pool slot bytes, including prefix and tail.
-  uint32_t slot_bytes;
-  uint32_t headroom;
-  uint32_t max_packet;
-  // Current endpoint lease budget, bounded by module quota and pool capacity.
-  uint32_t capacity;
-  uint32_t available;
-} xip_quic_pool_info;
-
-typedef struct {
-  uint32_t size;
-  // Newly owned module handle for the exact completed physical slot.
-  uint32_t packet;
-  uint32_t ticket;
-  uint32_t start;
-  uint32_t len;
+  uint64_t token;
   uint32_t link;
-  uint64_t peer;
-  int32_t outcome;
-  uint32_t elapsed_us;
-} xip_quic_tx_completion;
+  uint16_t weight;
+  uint8_t cid_len;
+  // 0 uses token; 22 is IPv6 (IPv4 mapped), big-endian port and scope.
+  uint8_t address_len;
+  uint8_t rewritten_dcid[20];
+  uint8_t padding[4];
+  uint8_t address[24];
+} xip_relay_hop;
+
+// At most four egress alternatives. Zero weights disable an alternative;
+// at least one must be positive. Selection is weighted round robin per packet.
+typedef struct {
+  xip_relay_hop hops[4];
+  uint8_t dcid[20];
+  uint8_t dcid_len;
+  uint8_t hop_count;
+  // 1 terminates an opaque short-header circuit; hops describe the return path.
+  uint8_t endpoint;
+  uint8_t reserved;
+} xip_relay_route;
+
+// Monotonic local observation. Configuration reads never refresh last use.
+typedef struct {
+  uint64_t last_used_us;
+  // 0 disables inactivity expiry.
+  uint32_t idle_ms;
+  uint32_t reserved;
+} xip_relay_stats;
 
 // get_component("quic"), native component 13. Functions run on the module worker.
 typedef struct {
@@ -601,26 +593,32 @@ typedef struct {
   // Attach this instance as the one local/unhandled endpoint. RX is delivered
   // as CALL_LINK(component=this module, method=rx_method), preserving origin.
   int (*attach)(void *ctx, int rx_method);
-  // Stop admission, release completed packets, disown native physical sends.
-  // A late SDK completion releases its old epoch's lease without calling Rust.
+  // Stop admission. The module closes its protocol holders; accepted native TX
+  // references finish independently without calling the stopped module.
   int (*detach)(void *ctx);
-  int (*pool_info)(void *ctx, xip_quic_pool_info *out);
-  // Allocate one owned handle while leaving reserved physical pool slots free.
-  int (*acquire)(void *ctx, uint32_t reserved, uint32_t *out);
-  // Transfer a uniquely owned range only on success. ALL immediate negative
-  // returns retain the exact handle/range (unlike consuming Host.send).
-  // Success sets ticket; poll_tx returns the same backing slot after native TX.
-  int (*try_send)(void *ctx,
-                  uint32_t packet,
-                  uint32_t start,
-                  uint32_t len,
-                  uint32_t link,
-                  uint64_t peer,
-                  uint32_t *ticket);
-  // 1 completed lease, 0 none, negative error. A full held quota retains the
-  // native completion for another poll; completions are never lost to inbox pressure.
-  int (*poll_tx)(void *ctx, xip_quic_tx_completion *out);
+  // Atomically create (mode=0) or replace (mode=1) a forwarding owned by this instance.
+  int (*relay_set)(void *ctx, const xip_relay_route *route, uint32_t mode);
+  // Read this instance's route at a sorted index. NOTFOUND ends enumeration.
+  int (*relay_get)(void *ctx, uint32_t index, xip_relay_route *route);
+  int (*relay_remove)(void *ctx, const uint8_t *cid, size_t len);
+  // Allocate an opaque CID, or reuse an identical live owned forwarding.
+  // Returns 1 for reuse, 0 for a new route; negative errors leave routes intact.
+  int (*relay_create)(void *ctx, xip_relay_route *route, uint32_t idle_ms, uint32_t reuse);
+  int (*relay_stats)(void *ctx, const uint8_t *cid, size_t len, xip_relay_stats *stats);
+  // Remove expired owned routes; returns the number removed.
+  int (*relay_expire)(void *ctx);
+  int (*relay_idle)(void *ctx, const uint8_t *cid, size_t len, uint32_t idle_ms);
 } xip_quic;
+
+// Geometry of the shared pool; no per-module allocation budget.
+typedef struct {
+  uint32_t size;
+  uint32_t slot_bytes;
+  uint32_t headroom;
+  uint32_t max_packet;
+  uint32_t capacity;
+  uint32_t available;
+} xip_packet_pool_info;
 
 // `get_component("identity")`: P-256 identity, compatible with the firmware's
 // existing `sec/id_p256` key. Calls are serialized by the module owner.
@@ -829,19 +827,8 @@ typedef struct {
   //
   // `int` — `OK`; the restart follows in 300 ms.
   int (*reset)(void *user);
-  // Take an empty packet.
-  //
-  // The packet is **held** by this module: it counts against a small fixed quota (`CONFIG_XIP_PKT_HELD`, default 4) and is
-  // returned to the pool when the module sends or frees it, or ends. The handle is an opaque number that is never 0 and
-  // stops being valid when the packet leaves the module (a stale handle gets `ERR_ARG`, not someone else's packet).
-  //
-  // # Returns
-  //
-  // `int` — `OK` and the handle in `*pkt`; `ERR_NOMEM` when the pool is down to the network's reserve; `ERR_BUSY` when the module already holds its quota.
-  //
-  // # Arguments
-  //
-  // * `pkt` (`uint32_t *`): The new handle.
+  // Allocate one owned packet from the shared pool, without a module quota.
+  // The caller must free or transfer it, including on module shutdown.
   int (*pkt_alloc)(void *user, uint32_t *pkt);
   // The payload window of a packet.
   //
@@ -858,15 +845,8 @@ typedef struct {
   // * `ptr` (`uint8_t **`): The window.
   // * `max` (`size_t *`): Its size.
   int (*pkt_buf)(void *user, uint32_t pkt, uint8_t **ptr, size_t *max);
-  // Keep the packet of this call after the handler returns.
-  //
-  // # Returns
-  //
-  // `int` — `OK` (the packet lifetime is now held), `ERR_ARG`, `ERR_BUSY` when the module holds its quota. Retained receive references remain read borrows until unique: mutable access and link TX return `ERR_BUSY` while another reader exists; there is no implicit clone.
-  //
-  // # Arguments
-  //
-  // * `pkt` (`uint32_t`): `call.pkt`.
+  // Clone a packet reference. Each successful retain requires one free or transfer.
+  // Mutable payload access requires the last reference.
   int (*pkt_keep)(void *user, uint32_t pkt);
   // Give a packet back.
   //
@@ -888,7 +868,7 @@ typedef struct {
   //
   // # Returns
   //
-  // `int` — `OK`; `ERR_NOTFOUND` (no running module has that component), `ERR_BUSY` (its inbox is full), `ERR_SIZE`, `ERR_ARG`.
+  // `int` — `OK`; `ERR_NOTFOUND` (no running module has that component), `ERR_BUSY` (the delivery queue cannot admit another packet), `ERR_SIZE`, `ERR_ARG`.
   //
   // # Arguments
   //
@@ -1096,11 +1076,11 @@ typedef struct {
   int (*socket_peer)(void *user, uint32_t socket, uint8_t *address, uint16_t *port, uint32_t *scope);
   // Full mutable pool slot for framing.
   //
-  // Returns the full slot and capacity while the packet is uniquely owned. The caller chooses a valid prefix, payload and suffix range; `socket_write_pkt` validates the selected range. Pointers do not survive packet release or transfer.
+  // Returns the full slot and capacity for reading while a reference is owned. Writing requires uniqueness. The caller chooses a valid prefix, payload and suffix range; `socket_write_pkt` validates the selected range. Pointers do not survive packet release or transfer.
   //
   // # Returns
   //
-  // `int` — `OK`, `ERR_ARG`, `ERR_BUSY` when shared.
+  // `int` — `OK`, `ERR_ARG`. Shared references permit reading; mutable access requires uniqueness.
   //
   // # Arguments
   //
@@ -1196,13 +1176,14 @@ typedef struct {
   int (*flash_read)(void *user, uint32_t address, uint32_t offset, uint8_t *out, size_t len);
   // Structured device and component status.
   //
-  // Returns one tagged-CBOR map: `{1: device, 2: wifi, 3: heap, 4: modules, 5: components}`.
+  // Returns one tagged-CBOR map: `{1: device, 2: wifi, 3: heap, 4: modules, 5: components, 6: packets}`.
   // Device is `{1: uptime_ms, 2: chip, 3: flash_size, 4: active_partition_label,
   // 5: active_partition_address, 6: active_partition_size}`. Chip is an ESP chip model number;
   // partition fields are omitted when the platform cannot identify its running partition.
   // Wi-Fi, heap and modules reuse the Wi-Fi state, `heap_info` and `modules_info` records;
   // unavailable Wi-Fi is an empty map and unavailable module enumeration is an empty array.
   // Components is `{component: {method: {1: updated_ms, 2: status_map}}}`.
+  // Packets is the global delivery queue/pool snapshot described by host.API.md; empty when unsupported.
   // Times are milliseconds since boot. Built-in records are read during the call; contributed
   // records are cached and may be stale. This call never invokes another module handler.
   // No console module is needed. No partial record is returned on buffer overflow.
@@ -1273,6 +1254,43 @@ typedef struct {
   //
   // `int` — the number of modules, or a negative error (`ERR_UNSUPPORTED` when the host has no loader).
   int (*module_rescan)(void *user);
+  // Shared physical packet pool geometry and current availability.
+  int (*pkt_pool_info)(void *user, xip_packet_pool_info *out);
+  // Allocate an owned packet, leaving `reserve` physical slots available.
+  int (*pkt_acquire)(void *user, uint32_t reserve, uint32_t *out);
+  // Transmit a slot range. BUSY retains the exact reference; all other outcomes
+  // consume it. Accepted drivers release their reference after physical use.
+  // Reserved prefix bytes may be framed synchronously; payload stays immutable.
+  int (*pkt_tx)(void *user,
+                uint32_t packet,
+                uint32_t start,
+                uint32_t len,
+                uint32_t link,
+                uint64_t peer);
+  // Nonblocking datagram send on a runtime-owned UDP socket the caller received
+  // on `call.from`, to a datagram source received on `call.src_ip/port/scope`.
+  // The host copies; there is no send-by-reference. ERR_BUSY retries send from
+  // the caller; no pool lease is blocked.
+  //
+  // # Returns
+  //
+  // `int` — bytes sent (equal to `len`), `ERR_BUSY` (the socket would block), `ERR_ARG`, `ERR_NOTFOUND`.
+  //
+  // # Arguments
+  //
+  // * `handle` (`uint32_t`): Socket handle as received in `call.from`.
+  // * `ip` (`const uint8_t *`): Exactly 16 bytes of the destination address.
+  // * `port` (`uint16_t`): Destination port, host byte order.
+  // * `scope` (`uint32_t`): IPv6 interface scope.
+  // * `data` (`const uint8_t *`): Bytes to send.
+  // * `len` (`size_t`): Byte count.
+  int (*udp_send)(void *user,
+                  uint32_t handle,
+                  const uint8_t *ip,
+                  uint16_t port,
+                  uint32_t scope,
+                  const uint8_t *data,
+                  size_t len);
 } xip_host;
 
 // what a handler is called with
@@ -1285,13 +1303,13 @@ typedef struct {
   int32_t method;
   // IRQ: the pin level. Alarm: how late it fired, in ms (saturated). `HOST_NETWORK`: 1 or 0. Request: 0. A frame of a link: its signal (`link` component).
   int32_t value;
-  // Bit 0: the call is a request that expects an answer (`send` to `from` with the same `id`, `Hw::reply`). Bit 1 (`CALL_LINK`): a frame of a link, `from` is its address and `id` an address token, not a request. Bit 2 (`CALL_LINK_EVENT`): an event of a link, its kind in bits 8..15. Bit 3 (`CALL_ENVELOPE`): a request that arrived as a CBOR envelope, parsed by the runtime (`component`, `method`, `data` = the fields); its answer is wrapped by the runtime.
+  // Bit 0: the call is a request that expects an answer (`send` to `from` with the same `id`, `Hw::reply`). Bit 1 (`CALL_LINK`): a frame of a link, `from` is its address and `id` an address token, not a request; or a datagram of a runtime-owned UDP socket, `from` the socket handle (answer with `udp_send`), source in `src_*`. Bit 2 (`CALL_LINK_EVENT`): an event of a link, its kind in bits 8..15. Bit 3 (`CALL_ENVELOPE`): a request that arrived as a CBOR envelope, parsed by the runtime (`component`, `method`, `data` = the fields); its answer is wrapped by the runtime.
   uint32_t flags;
   // Payload, valid during the call only.
   const uint8_t *data;
   // Length of `data`.
   size_t len;
-  // The packet `data` lives in, lent for this call (0: none, as for alarms and interrupts). Keep it with `pkt_keep`, pass it on with `send`; otherwise it goes back to the pool when the handler returns.
+  // The owned packet reference transferred with this call (0: none). The handler must release or transfer it; Rust export_module supplies a Drop guard. pkt_keep clones a reference.
   uint32_t pkt;
   // Who sent it: a component (`ADDR_MAIN` = 0: the application). Answer with `send` to this address.
   uint32_t from;
@@ -1305,6 +1323,12 @@ typedef struct {
   uint64_t request_id;
   uint32_t request_has_id;
   uint32_t request_reserved;
+  // A datagram received on a runtime-owned UDP socket (`CALL_LINK`, `from` its handle): the datagram's source,
+  // to answer with `udp_send` on the same handle. `src_port` 0: no address. Appended: a host with a
+  // shorter `size` does not have it; a host without it leaves the fields zero.
+  uint8_t src_ip[16];
+  uint16_t src_port;
+  uint32_t src_scope;
 } xip_call;
 
 // argument of `spi_open`
@@ -1531,7 +1555,7 @@ typedef struct {
   uint8_t ampdu;
   // 802.11b rates; applied before the radio starts. Default: off (DMesh's tested baseline: the legacy basic-rate set is not negotiated).
   uint8_t rates_11b;
-  // The firmware takes the received frames of the station before the network stack (raw RX). Rust host only.
+  // Opt-in native STA Ethernet ingress for link-local UDP6 on the default QUIC port, with native Ethernet replies. Other traffic stays with lwIP.
   uint8_t raw_rx;
   // Station egress through the driver's normal data path (`TUNE_OFF`: raw 802.11 injection). Rust host only.
   uint8_t driver_tx;
@@ -1627,8 +1651,8 @@ typedef struct {
             uint64_t source,
             int32_t signal,
             uint32_t time_us);
-  // The provider is done with a frame it was given (the held packet `pkt`, which it kept): `outcome` is 0 or a negative
-  // `ERR_*`. If the sender asked, the packet goes back to it as a `LINK_EVENT_TX_DONE` call; otherwise it is released.
+  // Release the provider's completed TX reference. `outcome` is retained for
+  // source compatibility; no packet or callback returns to the original sender.
   int (*tx_done)(void *ctx, uint32_t addr, uint32_t pkt, int outcome);
   // The provider has capacity again after refusing a frame: every subscriber gets `LINK_EVENT_READY`.
   int (*ready)(void *ctx, uint32_t addr);
@@ -2174,7 +2198,9 @@ typedef struct {
   int (*resume)(void *ctx);
 } xip_nimble;
 
-_Static_assert(sizeof(xip_ip_config) == 36, "xip_ip_config layout");
+_Static_assert(sizeof(xip_relay_hop) == 64, "xip_relay_hop layout");
+_Static_assert(sizeof(xip_relay_route) == 280, "xip_relay_route layout");
+_Static_assert(sizeof(xip_relay_stats) == 16, "xip_relay_stats layout");
 _Static_assert(sizeof(xip_spi_config) == 44, "xip_spi_config layout");
 _Static_assert(sizeof(xip_dmod_header) == 64, "xip_dmod_header layout");
 _Static_assert(sizeof(xip_wifi_intent) == 216, "xip_wifi_intent layout");
@@ -2201,15 +2227,12 @@ _Static_assert(sizeof(xip_nimble_connect) == 20, "xip_nimble_connect layout");
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(sizeof(xip_system) == 20, "xip_system layout");
 _Static_assert(sizeof(xip_stream) == 36, "xip_stream layout");
-_Static_assert(sizeof(xip_quic) == 32, "xip_quic layout");
+_Static_assert(sizeof(xip_quic) == 44, "xip_quic layout");
 _Static_assert(sizeof(xip_stream_packet) == 12, "xip_stream_packet layout");
-_Static_assert(sizeof(xip_quic_pool_info) == 24, "xip_quic_pool_info layout");
-_Static_assert(sizeof(xip_quic_tx_completion) == 40, "xip_quic_tx_completion layout");
-_Static_assert(sizeof(xip_ip) == 20, "xip_ip layout");
-_Static_assert(sizeof(xip_call) == 64, "xip_call layout");
+_Static_assert(sizeof(xip_call) == 88, "xip_call layout");
 _Static_assert(sizeof(xip_identity) == 20, "xip_identity layout");
 _Static_assert(sizeof(xip_power) == 44, "xip_power layout");
-_Static_assert(sizeof(xip_host) == 156, "xip_host layout");
+_Static_assert(sizeof(xip_host) == 172, "xip_host layout");
 #endif
 
 /* Non-zero when the host's table includes this call (older hosts are shorter). */

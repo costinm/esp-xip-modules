@@ -90,26 +90,22 @@ int main(void)
     CHECK(fake_free_count == 4);
     xip_pool_destroy(ext);
 
-    /* the held table: handles, generations, quota */
-    xip_held h;
-    xip_held_init(&h, 2);
-    uint32_t x = xip_held_add(&h, 3, 144, 10, XIP_HELD_OWNED);
-    uint32_t y = xip_held_add(&h, 4, 144, 0, XIP_HELD_OWNED);
-    CHECK(x && y && x != y && !xip_held_add(&h, 5, 144, 0, XIP_HELD_OWNED));   /* quota 2 */
-    uint32_t c = xip_held_add(&h, 6, 144, 5, XIP_HELD_BORROWED);                /* borrowed ones are not counted */
-    CHECK(c && xip_held_get(&h, c)->slot == 6 && xip_held_get(&h, x)->len == 10);
-    CHECK(xip_held_keep(&h, c) == -2);            /* keeping would pass the quota */
-    xip_held_entry t = xip_held_take(&h, x);
-    CHECK(t.slot == 3 && !xip_held_get(&h, x));  /* the handle is gone */
-    CHECK(xip_held_take(&h, x).slot == -1);       /* taking twice finds nothing */
-    CHECK(xip_held_keep(&h, c) == 0 && xip_held_get(&h, c)->state == XIP_HELD_OWNED);
-    uint32_t z = xip_held_add(&h, 7, 144, 0, XIP_HELD_OWNED);   /* reuses x's place with a new generation */
-    CHECK(z == 0);                                   /* y and c are the two */
-    xip_held_take(&h, y);
-    z = xip_held_add(&h, 7, 144, 0, XIP_HELD_OWNED);
-    CHECK(z && z != x && z != y && !xip_held_get(&h, y) && !xip_held_get(&h, x));
-    CHECK(!xip_held_get(&h, 0) && !xip_held_get(&h, 0xff) && !xip_held_get(&h, 0xffffff));
-    CHECK(xip_held_count(&h, XIP_HELD_OWNED) == 2);
+    /* Handles describe physical allocations, with no module quota/table. */
+    xip_pool *large=xip_pool_create(32,1704);CHECK(large);
+    uint32_t handles[32];int slots[32];
+    for(int i=0;i<32;i++){
+        slots[i]=xip_pool_acquire(large,0);CHECK(slots[i]>=0);
+        handles[i]=xip_packet_handle(large,slots[i],144,10);CHECK(handles[i]);
+    }
+    CHECK(xip_pool_available(large)==0);
+    CHECK(xip_packet_retain(large,handles[0])==0);
+    xip_pool_release(large,slots[0]);CHECK(xip_packet_get(large,handles[0]));
+    xip_pool_release(large,slots[0]);CHECK(!xip_packet_get(large,handles[0]));
+    int again=xip_pool_acquire(large,0);CHECK(again==slots[0]);
+    CHECK(xip_packet_handle(large,again,144,0)!=handles[0]);
+    CHECK(!xip_packet_get(large,handles[0]));xip_pool_release(large,again);
+    for(int i=1;i<32;i++)xip_pool_release(large,slots[i]);
+    CHECK(xip_pool_available(large)==32);xip_pool_destroy(large);
 
     /* two tasks hammering the pool never go below the reserve or lose a slot */
     shared = p;

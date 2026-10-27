@@ -10,6 +10,7 @@ mod power_api;
 use api_gen::Api;
 mod report;
 mod companion;
+mod observed;
 mod diagnostics;
 mod discovery;
 mod publication;
@@ -25,6 +26,12 @@ use xip_abi::{
     *,
 };
 const C_SELF: i32 = 46;
+// The DMesh announce component's discovery stream commands (dmesh-cli's
+// `discovery.active` / `discovery.nodes`): this module is the NAN/NOW-capable
+// observer a NAN-less host extends its discovery through.
+const DISCOVERY_COMPONENT: i32 = 6;
+const DISCOVERY_NODES: i32 = 9;
+const DISCOVERY_ACTIVE: i32 = 10;
 const TICK: i32 = 100;
 const ACQUIRE_RETRY: i32 = 101;
 const CONTINUE: i32 = RET_CONTINUE as i32;
@@ -69,6 +76,7 @@ struct Context {
     usb_sleep: bool,
     reports: report::Reports,
     companion: Option<companion::Session>,
+    observed: observed::Observed,
 }
 #[derive(Clone, Copy)]
 struct QueuedTx {
@@ -478,7 +486,10 @@ impl Context {
             }
         }
     }
-    fn observation(&self, hw: &Hw, path: discovery::ReturnPath, record: &[u8], now: u64, rssi: i8) {
+    fn observation(&mut self, hw: &Hw, path: discovery::ReturnPath, record: &[u8], now: u64, rssi: i8) {
+        // The bounded cache is the `discovery.nodes` answer: every heard
+        // transmission, keyed by radio MAC, before any fan-out.
+        self.observed.note(path.peer, rssi, self.channel, record, (now / 1_000).min(u32::MAX as u64) as u32);
         for listener in self.watches.listeners().iter().filter(|s| s.until > now) {
             let mut result=[0;1280]; let mut w=Writer::new(&mut result);
             w.map(6).uint(1).uint(1).uint(2).bytes(&path.peer).uint(3).bytes(record)
@@ -1050,7 +1061,7 @@ impl State {
                 sleep: sleep::Policy::default(),
                 sleep_original: None,
                 cadence: boot_cadence(hw), usb: serial_usb(hw), auto_sleep: true,
-                ble_restore: None, radio_request: None, radio_suspended: false, usb_sleep: usb_sleep_allowed(hw), reports: report::Reports::default(), companion: None,
+                ble_restore: None, radio_request: None, radio_suspended: false, usb_sleep: usb_sleep_allowed(hw), reports: report::Reports::default(), companion: None, observed: observed::Observed::default(),
             });
         }
         self.context = ptr as usize;
@@ -1070,6 +1081,15 @@ impl State {
         if let Some(listen)=hw.stream().and_then(|s|s.listen) {
             let rc=unsafe {listen(hw.ctx(),C_SELF,12)};
             if rc<0 {self.stop(hw);return Err(rc);}
+            // The DMesh announce component's discovery stream commands: this
+            // module is the NAN/NOW observer a NAN-less host extends through.
+            // `discovery.active` (10) queues an active SD pass into the next
+            // public window; `discovery.nodes` (9) streams the bounded
+            // observation cache back.
+            for (component,method) in [(DISCOVERY_COMPONENT,DISCOVERY_ACTIVE),(DISCOVERY_COMPONENT,DISCOVERY_NODES)] {
+                let rc=unsafe {listen(hw.ctx(),component,method)};
+                if rc<0 {self.stop(hw);return Err(rc);}
+            }
         }
         unsafe {
             (*ptr).schedule(hw, hw.now_us().unwrap() + 20_000, ACQUIRE_RETRY);
@@ -1358,6 +1378,39 @@ impl State {
     }
     fn companion_event(&mut self,hw:&Hw,call:&CallView)->i32 {
         if self.context==0 {return ERR_NOTFOUND;}
+        // The discovery stream commands answer one bounded response per open:
+        // `discovery.active` queues a NAN active SD pass into the next public
+        // window (DW0/DW8; sleepy peers report there — the TX scheduler owns
+        // the wait) and closes; `discovery.nodes` streams the bounded
+        // observation cache. Neither holds a session.
+        if call.component==DISCOVERY_COMPONENT {
+            if !matches!(call.method,DISCOVERY_ACTIVE|DISCOVERY_NODES) {return ERR_UNSUPPORTED;}
+            if call.value!=STREAM_OPEN {return 0;}
+            let cx=unsafe {&mut *(self.context as *mut Context)};
+            // One bounded response carrying the FIN flag — mod_flash's
+            // upload-reply pattern. The FIN ends the stream, so no explicit
+            // close here: a close with the output still pending drops it.
+            let Some(write)=hw.stream().and_then(|s|s.write_pkt) else {return ERR_UNSUPPORTED;};
+            let mut out=[0;1600];
+            let body: &[u8] = if call.method==DISCOVERY_ACTIVE {
+                // Admission only queues the SDF; RF delivery is the window's.
+                if let Err(rc)=cx.active_discovery(hw,hw.now_us().unwrap_or(0)) {return rc;}
+                &[0xa0]
+            } else {
+                let Some(n)=cx.observed.nodes_response(call.id as u64,&mut out) else {return ERR_SIZE;};
+                &out[..n]
+            };
+            let packet=match hw.pkt_alloc() {Ok(p)=>p,Err(rc)=>return rc};
+            let rc=(|| {
+                let (p,cap)=hw.pkt_buf(packet)?;
+                if body.len()>cap {return Err(ERR_SIZE);}
+                unsafe {core::ptr::copy_nonoverlapping(body.as_ptr(),p,body.len());}
+                let rc=unsafe {write(hw.ctx(),call.id as u32,packet,body.len() as u32,1)};
+                if rc<0 {Err(rc)} else {Ok(())}
+            })();
+            if rc.is_err() {hw.pkt_free(packet);}
+            return rc.err().unwrap_or(0);
+        }
         if call.component!=C_SELF || call.method!=12 {return ERR_UNSUPPORTED;}
         let cx=unsafe {&mut *(self.context as *mut Context)};
         match call.value {
@@ -1850,7 +1903,8 @@ mod packet_lifetime_tests {
     }
     unsafe extern "C" fn companion_close(p:*mut core::ffi::c_void,handle:u32)->i32 {fixture(p).stream_closes.push(handle);0}
     unsafe extern "C" fn companion_listen(_: *mut core::ffi::c_void,component:i32,method:i32)->i32 {
-        assert_eq!((component,method),(46,12));0
+        // The report stream plus the discovery stream commands (component 6).
+        assert!(matches!((component,method),(46,12)|(6,10)|(6,9)));0
     }
     static COMPANION_STREAM:Stream=Stream {version:STREAM_VERSION,size:core::mem::size_of::<Stream>() as u32,
         listen:Some(companion_listen),write_pkt:Some(companion_write),close:Some(companion_close),..unsafe{core::mem::zeroed()}};
@@ -1971,7 +2025,7 @@ mod packet_lifetime_tests {
             sleep: sleep::Policy::default(),
                 sleep_original: None,
             cadence: 0, usb: false, auto_sleep: true, ble_restore: None,
-            radio_request: None, radio_suspended: false, usb_sleep: false, reports: report::Reports::default(), companion: None,
+            radio_request: None, radio_suspended: false, usb_sleep: false, reports: report::Reports::default(), companion: None, observed: observed::Observed::default(),
         }
     }
     #[test]

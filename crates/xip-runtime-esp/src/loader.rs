@@ -102,6 +102,7 @@ mod imp {
         wifi_monitor: Option<unsafe extern "C" fn(*const xip_abi::WifiMonitor) -> i32>,
         module_rescan: Option<unsafe extern "C" fn() -> i32>,
         component_start: Option<unsafe extern "C" fn(*const c_char) -> i32>,
+        request_start: Option<unsafe extern "C" fn(i32,u32)->i32>,
     }
 
     /// `xip_loader_config_t`.
@@ -131,6 +132,7 @@ mod imp {
         fn xip_loader_manifest_named(name: *const u8, name_len: usize, out: *mut u8, capacity: usize) -> i32;
         fn xip_loader_rescan() -> i32;
         fn xip_loader_start_hosting(name: *const c_char) -> i32;
+        fn xip_loader_start_request(component:i32,port:u32)->i32;
     }
 
     pub fn init(partition: &'static str, features: Features, on_event: Option<EventHandler>) -> i32 {
@@ -142,7 +144,7 @@ mod imp {
             wifi_tuning_set: None, wifi_tuning_get: None,
             nv: features.nv,
             pool: features.pool.map_or(core::ptr::null(), |p| p as *const PoolOps),
-            modules_info: None, module_start: None, module_stop: None, module_manifest: None, packet: features.packet, inbox_ready: None, module_rescan: None, component_start: None,
+            modules_info: None, module_start: None, module_stop: None, module_manifest: None, packet: features.packet, inbox_ready: None, module_rescan: None, component_start: None, request_start:None,
         };
         if let Some(owner) = features.wifi {
             ext.wifi_set = Some(owner.set); ext.wifi_get = Some(owner.get);
@@ -159,6 +161,7 @@ mod imp {
             ext.module_manifest = Some(xip_loader_manifest_named);
             ext.module_rescan = Some(xip_loader_rescan);
             ext.component_start = Some(xip_loader_start_hosting);
+            ext.request_start = Some(xip_loader_start_request);
         }
         unsafe {
             let _ = on_event;

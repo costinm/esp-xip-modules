@@ -18,6 +18,8 @@
 #include <unistd.h>
 #include "xip.h"
 #include "xip_pool.h"
+#define ESP_OK 0
+typedef int esp_err_t;
 #define pdTRUE 1
 #define pdPASS 1
 #define portMAX_DELAY 0
@@ -54,7 +56,7 @@ static int xTaskCreate(void (*entry)(void *),const char *name,int stack,void *ar
 }
 static void vTaskDelay(int ms) { usleep((unsigned)ms*1000); }
 static void vTaskDelete(void *task) { (void)task; }
-typedef struct {uint32_t id;xip_held held;} instance;
+typedef struct {uint32_t id;} instance;
 #define I(p) ((instance *)(p))
 typedef struct {int kind;uint32_t inst;int32_t component,method,value;uint64_t id;} xip_event_t;
 static int worker_queue;
@@ -68,12 +70,14 @@ static int xQueueSend(int q,const xip_event_t *event,int timeout) {
     pthread_mutex_lock(&queue_lock);assert(queue_end-queue_at<64);queue[queue_end++%64]=*event;
     pthread_cond_signal(&queue_ready);pthread_mutex_unlock(&queue_lock);return pdTRUE;
 }
-static uint8_t packet[1204];
+static uint8_t *packet;static xip_pool *pool;
 static int h_pkt_span(void *u,uint32_t pkt,uint8_t **data,size_t *cap) {
-    if(!xip_held_get(&I(u)->held,pkt))return XIP_ERR_ARG;
-    *data=packet;*cap=sizeof(packet);return 0;
+    (void)u;if(!xip_packet_get(pool,pkt))return XIP_ERR_ARG;
+    *data=packet;*cap=1204;return 0;
 }
-static void drop_slot(int slot) { assert(slot==7);atomic_fetch_add(&dropped,1); }
+static void drop_slot(int slot) { assert(slot==0);xip_pool_release(pool,slot);atomic_fetch_add(&dropped,1); }
+static xip_packet_ref packet_take(uint32_t h){return *xip_packet_get(pool,h);}
+static uint32_t new_packet(void){int slot=xip_pool_acquire(pool,0);assert(slot==0);packet=xip_pool_slot(pool,slot);return xip_packet_handle(pool,slot,64,0);}
 #include "../../components/xip_runtime/src/socket_hal.inc"
 static xip_event_t next_event(int value) {
     struct timespec deadline;clock_gettime(CLOCK_REALTIME,&deadline);deadline.tv_sec+=5;
@@ -94,7 +98,7 @@ static uint16_t free_port(void) {
     assert(!getsockname(fd,(struct sockaddr *)&addr,&size));close(fd);return ntohs(addr.sin6_port);
 }
 int main(void) {
-    instance in={.id=42},other={.id=43};xip_held_init(&in.held,4);xip_held_init(&other.held,4);
+    instance in={.id=42},other={.id=43};pool=xip_pool_create(8,1204);assert(pool);packet=xip_pool_slot(pool,0);
     uint32_t listener;uint16_t port=free_port();
     atomic_store(&fail_create,1);assert(h_tcp_accept(&in,port,XIP_SOCKET_MODE_DIRECT,44,100,&listener)==XIP_ERR_NOMEM);
     atomic_store(&fail_create,0);assert(h_tcp_accept(&in,port,XIP_SOCKET_MODE_DIRECT,44,100,&listener)==0);
@@ -120,10 +124,10 @@ int main(void) {
     next_event(XIP_SOCKET_EVENT_READABLE);assert(h_socket_read(&in,peer,bytes,sizeof(bytes))==5);
     assert(h_socket_write(&in,peer,(const uint8_t *)"reply",5)==5);
     assert(recv(client,bytes,sizeof(bytes),0)==5 && !memcmp(bytes,"reply",5));
-    uint32_t pkt=xip_held_add(&in.held,7,64,0,XIP_HELD_OWNED);memcpy(packet+64,"packet",6);
-    assert(h_socket_write_pkt(&other,peer,pkt,64,6)==XIP_ERR_ARG && xip_held_get(&in.held,pkt));
+    uint32_t pkt=new_packet();memcpy(packet+64,"packet",6);
+    assert(h_socket_write_pkt(&other,peer,pkt,64,6)==XIP_ERR_ARG && xip_packet_get(pool,pkt));
     attempts=atomic_load(&queue_attempts);atomic_store(&queue_blocked,1);
-    assert(h_socket_write_pkt(&in,peer,pkt,64,6)==0 && !xip_held_get(&in.held,pkt));
+    assert(h_socket_write_pkt(&in,peer,pkt,64,6)==0 && xip_packet_get(pool,pkt));
     assert(recv(client,bytes,sizeof(bytes),0)==6 && !memcmp(bytes,"packet",6));
     wait_counter(&queue_attempts,attempts+1);atomic_store(&queue_blocked,0);
     next_event(XIP_SOCKET_EVENT_WRITE_DONE);assert(atomic_load(&dropped)==1);
@@ -131,9 +135,9 @@ int main(void) {
     shutdown(client,SHUT_WR);next_event(XIP_SOCKET_EVENT_READABLE);
     assert(h_socket_read(&in,peer,bytes,sizeof(bytes))==0);
     assert(h_socket_close(&other,peer)==XIP_ERR_ARG);
-    pkt=xip_held_add(&in.held,7,64,0,XIP_HELD_OWNED);
+    pkt=new_packet();
     assert(h_socket_write_pkt(&in,peer,pkt,64,6)==0);
-    assert(!xip_held_get(&in.held,pkt));
+    assert(!xip_packet_get(pool,pkt));
     assert(h_socket_close(&in,peer)==0);
     close(client);socket_release(in.id);wait_counter(&tasks_done,1);pthread_join(tasks[0],NULL);
     assert(!sockets && !c_poll_running && atomic_load(&dropped)==2);
