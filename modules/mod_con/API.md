@@ -1,7 +1,7 @@
 # `console` API (20)
 
-CBOR device control, and the home of the native components that no module hosts (Wi-Fi 10, ip 12, ...). The module has no port. Methods are reached
-as a numeric envelope in a 0x444d0002 datagram (the runtime parses it and sends the answer back the same way), or as direct calls from the application. The native components without a hosting module (`wifi.*`, `ip.*`) are served from the native method table. Method IDs 1–4 are retired (4 was `dispatch`: an envelope as an argument; a module that holds an envelope sends it to `ADDR_ENVELOPE` and the runtime dispatches it).
+CBOR device control, and the home of the native components that no module hosts (Wi-Fi 10, ...). The module has no port. Methods are reached
+as a numeric envelope in a 0x444d0002 datagram (the runtime parses it and sends the answer back the same way), or as direct calls from the application. The native components without a hosting module (`wifi.*`) are served from the native method table. Method IDs 1–4 are retired (4 was `dispatch`: an envelope as an argument; a module that holds an envelope sends it to `ADDR_ENVELOPE` and the runtime dispatches it).
 Text lines, parsing, rendering and TCP console connections are not supported.
 Method IDs 1–4 are retired and must not be reused.
 
@@ -46,8 +46,9 @@ replaces the whole intent.
 | 3 | `heap` | `map` | Heap information. |
 | 4 | `modules` | `Slot[]` | Installed module slots. |
 | 5 | `components` | `map` | Cached component status. |
+| 6 | `packets` | `map` | Global delivery queue depth, high-water mark, drops and pool usage; see host `device_info`. |
 
-## 6. `start` — start a module
+## 6. `start` — explicit lifecycle/debug activation
 
 ### Request
 
@@ -55,6 +56,12 @@ replaces the whole intent.
 |---:|---|---|---|
 | 1 | `name` | `string` | Installed module name. |
 | 2 | `request` | `bytes` | Opaque module start request; optional, defaults to empty. |
+
+Ordinary component commands activate their installed owner automatically. This
+method is for explicit lifecycle/debug use and custom start parameters, not a
+prerequisite for calling a component. Its success acknowledges queued startup;
+ordinary component requests instead initialize the owner before dispatch and
+return initialization errors.
 
 ## 7. `stop` — queue module stop
 

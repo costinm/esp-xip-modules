@@ -4,6 +4,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 mod announce;
+mod relay;
 use xip_abi::{
     cbor::{self, Item, Reader, Writer},
     *,
@@ -54,6 +55,8 @@ struct Context {
     channel: u8,
     next_id: u64,
     pending: Option<Pending>,
+    relay_links: [u32; 12],
+    relay_alarm: u32,
 }
 impl Context {
     fn refresh(&mut self, hw: &Hw) -> Result<(), i32> {
@@ -138,6 +141,7 @@ impl State {
                 channel: channel as u8,
                 next_id: hw.now_us().unwrap_or(1) << 8,
                 pending: None,
+                relay_links: [0;12], relay_alarm:0,
             });
         }
         if let Err(rc) = unsafe { &mut *ptr }.refresh(hw) {
@@ -157,6 +161,7 @@ impl State {
         let ptr = self.context as *mut Context;
         self.context = 0;
         let cx = unsafe { &mut *ptr };
+        relay::stop(hw,cx);
         if let Some(p) = cx.pending.take() {
             hw.alarm_cancel(p.alarm);
             p.reply.error(hw, ERR_NOTFOUND);
@@ -195,7 +200,11 @@ impl State {
             Some(n) => n,
             None => return,
         };
-        hw.message(call.from, 6, 2, call.id, &out[..n]);
+        // Not a link: the datagram's source rides on the call; the module sends
+        // from the runtime UDP socket it received on.
+        let Some((ip, port, scope)) = call.src else { return };
+        let rc = hw.udp_send(call.from, (ip, port, scope), &out[..n]);
+        debug_assert!(rc != ERR_UNSUPPORTED, "the host that delivered a UDP datagram has a UDP send");
     }
 }
 
@@ -218,7 +227,7 @@ impl Module for State {
         // A raw datagram on the discovery port: the runtime's multicast link
         // delivered a tagged discovery request. Reply with the cached signed
         // record, correlated to the request's id, to the source it came from.
-        if call.flags & CALL_LINK != 0 {
+        if call.flags & CALL_LINK != 0 && !call.is_envelope() {
             Self::discovery_reply(hw, cx, call);
             return RET_CONTINUE as i32;
         }
@@ -240,10 +249,11 @@ impl Module for State {
             }
             return RET_CONTINUE as i32;
         }
+        if call.component==COMPONENT && call.method==relay::TICK && !call.is_envelope(){relay::tick(hw,cx);return RET_CONTINUE as i32;}
         // Unrelated/stale module replies are data, not calls to our API.
         // In particular, never bounce an unsupported response back forever.
         // A raw frame of the module's port is not a request either: the runtime parses envelopes and delivers them as requests.
-        if call.flags & CALL_LINK != 0 || call.component != COMPONENT {
+        if (call.flags & CALL_LINK != 0 && !call.is_envelope()) || call.component != COMPONENT {
             return RET_CONTINUE as i32;
         }
         let (method, fields) = (call.method, call.data);
@@ -255,6 +265,7 @@ impl Module for State {
         };
         let envelope = call.is_envelope();
         let result = (|| {
+            if matches!(method, 3..=9) { return relay::handle(hw, cx, method, fields, reply); }
             if !matches!(method, 1 | 2) {
                 return Err(ERR_UNSUPPORTED);
             }
@@ -308,6 +319,7 @@ mod tests {
         next: u32,
         packets: BTreeMap<u32, Vec<u8>>,
         sent: Vec<Sent>,
+        udp: Vec<(u32, [u8; 16], u16, u32, Vec<u8>)>,
         alarms: i32,
         canceled: Vec<i32>,
         frees: usize,
@@ -362,6 +374,25 @@ mod tests {
         });
         0
     }
+    unsafe extern "C" fn udp_send(
+        p: *mut core::ffi::c_void,
+        handle: u32,
+        ip: *const u8,
+        port: u16,
+        scope: u32,
+        data: *const u8,
+        len: usize,
+    ) -> i32 {
+        if ip.is_null() || (data.is_null() && len != 0) {
+            return ERR_ARG;
+        }
+        let f = fake(p);
+        let bytes = std::slice::from_raw_parts(data, len).to_vec();
+        let mut ip0 = [0u8; 16];
+        ip0.copy_from_slice(std::slice::from_raw_parts(ip, 16));
+        f.udp.push((handle, ip0, port, scope, bytes));
+        0
+    }
     unsafe extern "C" fn alarm(
         p: *mut core::ffi::c_void,
         delay: u32,
@@ -394,6 +425,7 @@ mod tests {
         h.pkt_buf = Some(buf);
         h.pkt_free = Some(free);
         h.send = Some(send);
+        h.udp_send = Some(udp_send);
         h.alarm_set = Some(alarm);
         h.alarm_cancel = Some(cancel);
         h.mem_free = Some(release);
@@ -406,6 +438,7 @@ mod tests {
             channel: 6,
             next_id: 100,
             pending: None,
+            relay_links: [0;12], relay_alarm:0,
         };
         cx.record[..6].copy_from_slice(b"cached");
         State {
@@ -422,7 +455,7 @@ mod tests {
             time_us: 0,
             pkt: 0,
             from: 52,
-            id: 19, request_id: None }
+            id: 19, request_id: None, src: None }
     }
     #[test]
     fn repeated_reads_do_not_need_crypto_and_failed_refresh_keeps_the_cache() {
@@ -460,7 +493,7 @@ mod tests {
         let mut s = state();
         // an envelope {1: 47, 2: 2, 3: id, 5: {}} as the runtime hands it over: component, method and the fields, answered by (from, token)
         let mut request = call(2, &[0xa0]);
-        request.flags = 1 | CALL_ENVELOPE;
+        request.flags = 1 | CALL_ENVELOPE | CALL_LINK;
         request.from = ADDR_LINK;
         request.id = 9;
         s.handle(&hw, &request);
@@ -598,18 +631,21 @@ mod tests {
             cx.record[..n].copy_from_slice(&record[..n]);
             cx.len = n;
         }
-        // A discovery request {1:6, 2:2, 3:id, 5:{}} as a raw frame from the mc link.
+        // A discovery request {1:6, 2:2, 3:id, 5:{}} as a raw datagram of the runtime's
+        // discovery UDP port: `from` its socket handle, `src` the sweep's source.
         let mut req = [0u8; 96];
         let req_len = dmesh_server::announce::encode_discovery_request(42, &mut req).unwrap();
         let mut request = call(0, &req[..req_len]);
         request.flags = CALL_LINK;
-        request.from = 77; // the runtime's multicast link
-        request.id = 1234; // the source token it arrived with
+        request.from = 77; // the discovery port's socket handle
+        request.id = 1234; // unused on a UDP bearer: no link, no token
+        request.src = Some(([9u8; 16], 3339, 2)); // the host's sweep source
         s.handle(&hw, &request);
-        assert_eq!(f.sent.len(), 1, "one reply to the multicast link and its source token");
-        let sent = &f.sent[0];
-        assert_eq!((sent.dst, sent.id), (77, 1234));
-        let decoded = dmesh_server::tagged::decode(&sent.data).unwrap();
+        assert_eq!(f.udp.len(), 1, "one reply from the discovery socket to the sweep source");
+        let (handle, ip, port, scope, data) = &f.udp[0];
+        assert_eq!((*handle, *port, *scope), (77, 3339, 2), "from the handle to the source");
+        assert_eq!(*ip, [9u8; 16]);
+        let decoded = dmesh_server::tagged::decode(data).unwrap();
         assert_eq!(decoded.id, Some(42), "correlated to the request's id");
         assert_eq!(decoded.component, Some(dmesh_server::tagged::Name::Tag(6)));
         assert_eq!(decoded.method, Some(dmesh_server::tagged::Name::Tag(2)));

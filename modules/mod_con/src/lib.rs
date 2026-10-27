@@ -420,22 +420,7 @@ fn wifi_binary(hw: &Hw, method: u64) -> Result<Vec<u8>, i32> {
     Ok(out)
 }
 
-fn ip_control(hw: &Hw, method: i64, fields: &[u8]) -> Result<Vec<u8>, i32> {
-    let table = hw.get_component(c"ip").cast::<xip_abi::Ip>();
-    if table.is_null() { return Err(ERR_UNSUPPORTED); }
-    let ip = unsafe { &*table };
-    if ip.version != xip_abi::IP_VERSION || ip.size < core::mem::size_of::<xip_abi::Ip>() as u32 { return Err(ERR_UNSUPPORTED); }
-    let link = cbor::get_int(fields, 1).map_err(|_| xip_abi::ERR_ARG)?.ok_or(xip_abi::ERR_ARG)?;
-    let link = u32::try_from(link).map_err(|_| xip_abi::ERR_ARG)?;
-    let rc = if method == 2 {
-        let up = cbor::get_int(fields, 2).map_err(|_| xip_abi::ERR_ARG)?.ok_or(xip_abi::ERR_ARG)?;
-        if !(0..=1).contains(&up) { return Err(xip_abi::ERR_ARG); }
-        unsafe { ip.set_up.ok_or(ERR_UNSUPPORTED)?(hw.ctx(), link, up as u32) }
-    } else { unsafe { ip.close.ok_or(ERR_UNSUPPORTED)?(hw.ctx(), link) } };
-    binary_result(rc)
-}
-
-/// Run request `(comp, method)` with the field map `fields`: the console methods, the Wi-Fi and IP controls and the native components of the
+/// Run request `(comp, method)` with the field map `fields`: the console methods, the Wi-Fi controls and the native components of the
 /// catalog. The runtime delivers a request that arrived as an envelope (port or datagram) as an ordinary call, so this is its only entry;
 /// the answer it makes is wrapped by the runtime. Remote module dispatch is performed by the firmware's manifest registry; never
 /// synchronously call another module from its shared worker.
@@ -447,7 +432,6 @@ fn dispatch_request(hw: &Hw, comp: i64, method: i64, fields: &[u8]) -> Result<Ve
     if comp == 10 && (method == 3 || method == 4) {
         return wifi_binary(hw, method as u64);
     }
-    if comp == 12 && matches!(method, 2 | 3) { return ip_control(hw, method, fields); }
     if let Some(nm) = nat_find(comp as u64, method as u64) {
         return native_binary(hw, nm, fields);
     }

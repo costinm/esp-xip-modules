@@ -42,21 +42,20 @@ pub const NAT_K_SIZE: u16 = 5;
 pub const NAT_CTX: u16 = 0;
 pub const NAT_IN: u16 = 1;
 pub const NAT_OUT: u16 = 2;
-pub const NAT_METHODS_N: usize = 6;
-pub const NAT_PARAMS_N: usize = 15;
-pub const NAT_STRUCTS_N: usize = 4;
-pub const NAT_FIELDS_N: usize = 32;
-pub static NAT_POOL: [u8; 21] = [0x00, 0x77, 0x69, 0x66, 0x69, 0x00, 0x77, 0x69, 0x66, 0x69, 0x2d, 0x74, 0x75, 0x6e, 0x69, 0x6e, 0x67, 0x00, 0x69, 0x70, 0x00];
-pub static NAT_METHODS: [NatMethod; 7] = [
+pub const NAT_METHODS_N: usize = 5;
+pub const NAT_PARAMS_N: usize = 12;
+pub const NAT_STRUCTS_N: usize = 3;
+pub const NAT_FIELDS_N: usize = 26;
+pub static NAT_POOL: [u8; 18] = [0x00, 0x77, 0x69, 0x66, 0x69, 0x00, 0x77, 0x69, 0x66, 0x69, 0x2d, 0x74, 0x75, 0x6e, 0x69, 0x6e, 0x67, 0x00];
+pub static NAT_METHODS: [NatMethod; 6] = [
     NatMethod { comp: 10, method: 1, table: 1, slot: 1, first_param: 0, nparams: 3 },
     NatMethod { comp: 10, method: 2, table: 1, slot: 0, first_param: 3, nparams: 3 },
     NatMethod { comp: 10, method: 7, table: 1, slot: 4, first_param: 6, nparams: 2 },
     NatMethod { comp: 10, method: 5, table: 6, slot: 1, first_param: 8, nparams: 2 },
     NatMethod { comp: 10, method: 6, table: 6, slot: 0, first_param: 10, nparams: 2 },
-    NatMethod { comp: 12, method: 1, table: 18, slot: 0, first_param: 12, nparams: 3 },
     NatMethod { comp: 0, method: 0, table: 0, slot: 0, first_param: 0, nparams: 0 },
 ];
-pub static NAT_PARAMS: [NatParam; 16] = [
+pub static NAT_PARAMS: [NatParam; 13] = [
     NatParam { role: 0, what: 0, is_signed: 0, tag: 0 },
     NatParam { role: 2, what: 256, is_signed: 0, tag: 0 },
     NatParam { role: 2, what: 4, is_signed: 0, tag: 0 },
@@ -70,18 +69,14 @@ pub static NAT_PARAMS: [NatParam; 16] = [
     NatParam { role: 0, what: 0, is_signed: 0, tag: 0 },
     NatParam { role: 1, what: 258, is_signed: 0, tag: 0 },
     NatParam { role: 0, what: 0, is_signed: 0, tag: 0 },
-    NatParam { role: 1, what: 259, is_signed: 0, tag: 0 },
-    NatParam { role: 2, what: 4, is_signed: 0, tag: 1 },
-    NatParam { role: 0, what: 0, is_signed: 0, tag: 0 },
 ];
-pub static NAT_STRUCTS: [NatStruct; 5] = [
+pub static NAT_STRUCTS: [NatStruct; 4] = [
     NatStruct { size: 216, first: 0, count: 11 },
     NatStruct { size: 8, first: 11, count: 3 },
     NatStruct { size: 20, first: 14, count: 12 },
-    NatStruct { size: 36, first: 26, count: 6 },
     NatStruct { size: 0, first: 0, count: 0 },
 ];
-pub static NAT_FIELDS: [NatField; 33] = [
+pub static NAT_FIELDS: [NatField; 27] = [
     NatField { tag: 0, offset: 0, size: 4, kind: 5, len_size: 0, len_offset: 0, is_signed: 0 },
     NatField { tag: 1, offset: 4, size: 1, kind: 2, len_size: 0, len_offset: 0, is_signed: 0 },
     NatField { tag: 2, offset: 5, size: 1, kind: 2, len_size: 0, len_offset: 0, is_signed: 0 },
@@ -108,12 +103,6 @@ pub static NAT_FIELDS: [NatField; 33] = [
     NatField { tag: 9, offset: 16, size: 2, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
     NatField { tag: 10, offset: 18, size: 2, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
     NatField { tag: 11, offset: 10, size: 1, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
-    NatField { tag: 0, offset: 0, size: 4, kind: 5, len_size: 0, len_offset: 0, is_signed: 0 },
-    NatField { tag: 1, offset: 8, size: 4, kind: 4, len_size: 0, len_offset: 0, is_signed: 0 },
-    NatField { tag: 2, offset: 12, size: 4, kind: 4, len_size: 0, len_offset: 0, is_signed: 0 },
-    NatField { tag: 3, offset: 16, size: 4, kind: 4, len_size: 0, len_offset: 0, is_signed: 0 },
-    NatField { tag: 4, offset: 20, size: 16, kind: 4, len_size: 0, len_offset: 0, is_signed: 0 },
-    NatField { tag: 5, offset: 4, size: 2, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
     NatField { tag: 0, offset: 0, size: 0, kind: 0, len_size: 0, len_offset: 0, is_signed: 0 },
 ];
 
