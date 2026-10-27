@@ -119,6 +119,7 @@ int xip_quic_table_add(xip_quic_table *t, const uint8_t *cid, unsigned len, unsi
         t->e[at].len = (uint8_t)len;
     }
     xip_quic_entry *e = &t->e[at];
+    free(e->route); e->route = NULL; e->owner = e->cursor = 0; e->out_address_len=0;
     e->kind = (uint8_t)kind; e->egress = egress; e->token = token;
     e->out_len = 0;
     if (kind == XIP_QUIC_DCID_RELAY) { memcpy(e->out_cid, out_cid, out_len); e->out_len = (uint8_t)out_len; }
@@ -166,13 +167,16 @@ int xip_quic_table_remove(xip_quic_table *t, const uint8_t *cid, unsigned len)
     if (!t || !cid || !len || len > XIP_QUIC_CID_MAX) return XIP_ERR_ARG;
     const unsigned at = lower_bound(t, cid, len);
     if (at >= t->n || cmp(&t->e[at], cid, len)) return XIP_ERR_NOTFOUND;
+    free(t->e[at].route);
     memmove(&t->e[at], &t->e[at + 1], (t->n - at - 1) * sizeof(t->e[0]));
     t->n--;
+    if(!t->n){free(t->e);t->e=NULL;t->cap=0;}
     return XIP_OK;
 }
 void xip_quic_table_clear(xip_quic_table *t)
 {
     if (!t) return;
+    for (unsigned i=0;i<t->n;i++) free(t->e[i].route);
     free(t->e);
     memset(t, 0, sizeof(*t));
 }
@@ -205,4 +209,124 @@ const xip_quic_reply *xip_quic_reply_find(const xip_quic_replies *t, uint32_t li
 void xip_quic_reply_done(xip_quic_replies *t, const xip_quic_reply *r)
 {
     if (r >= t->r && r < t->r + XIP_QUIC_REPLIES) ((xip_quic_reply *)r)->used = false;
+}
+
+int xip_quic_relay_set(xip_quic_table *t,uint32_t owner,const xip_relay_route *r,unsigned mode)
+{
+    if(!t || !owner || !r || mode>1 || !r->dcid_len || r->dcid_len>XIP_QUIC_CID_MAX ||
+       !r->hop_count || r->hop_count>4 || r->reserved || r->endpoint>1)return XIP_ERR_ARG;
+    if(r->endpoint && (r->dcid_len>8 || (r->dcid_len==1 && !r->dcid[0]) || xip_quic_cid_class_len(r->dcid[0])!=r->dcid_len))return XIP_ERR_ARG;
+    unsigned total=0;
+    for(unsigned i=0;i<r->hop_count;i++){
+        const xip_relay_hop *h=&r->hops[i];
+        if(!h->link || !h->cid_len || h->cid_len>XIP_QUIC_CID_MAX || (h->address_len!=0 && h->address_len!=22) ||
+           memcmp(h->padding,(uint8_t[4]){0},4))return XIP_ERR_ARG;
+        if(h->address_len==22 && ((!h->address[16] && !h->address[17]) || h->address[22] || h->address[23]))return XIP_ERR_ARG;
+        total+=h->weight;
+    }
+    if(!total)return XIP_ERR_ARG;
+    const xip_quic_entry *old=xip_quic_table_find(t,r->dcid,r->dcid_len);
+    if(old && (old->owner!=owner || mode==0))return XIP_ERR_BUSY;
+    if(!old && mode==1)return XIP_ERR_NOTFOUND;
+    xip_relay_route *copy=malloc(sizeof(*copy));if(!copy)return XIP_ERR_NOMEM;
+    *copy=*r;
+    uint64_t last=old?old->last_used_us:0;uint32_t idle=old?old->idle_ms:0;
+    const xip_relay_hop *h=&r->hops[0];
+    int rc=xip_quic_table_add(t,r->dcid,r->dcid_len,XIP_QUIC_DCID_RELAY,h->link,h->token,h->rewritten_dcid,h->cid_len);
+    if(rc){free(copy);return rc;}
+    xip_quic_entry *e=&t->e[lower_bound(t,r->dcid,r->dcid_len)];
+    e->route=copy;e->owner=owner;e->last_used_us=last;e->idle_ms=idle;return 0;
+}
+int xip_quic_relay_get(const xip_quic_table *t,uint32_t owner,unsigned index,xip_relay_route *out)
+{
+    if(!out)return XIP_ERR_ARG;
+    for(unsigned i=0;i<t->n;i++)if(t->e[i].owner==owner && t->e[i].route){
+        if(!index--){*out=*t->e[i].route;return 0;}
+    }
+    return XIP_ERR_NOTFOUND;
+}
+int xip_quic_relay_remove(xip_quic_table *t,uint32_t owner,const uint8_t *cid,unsigned len)
+{
+    const xip_quic_entry *e=xip_quic_table_find(t,cid,len);
+    if(!e)return XIP_ERR_NOTFOUND;
+    if(e->owner!=owner)return XIP_ERR_BUSY;
+    return xip_quic_table_remove(t,cid,len);
+}
+void xip_quic_relay_release(xip_quic_table *t,uint32_t owner)
+{
+    for(unsigned i=t->n;i>0;i--)if(t->e[i-1].owner==owner)
+        xip_quic_table_remove(t,t->e[i-1].cid,t->e[i-1].len);
+}
+int xip_quic_relay_select_at(xip_quic_table *t,const uint8_t *cid,unsigned len,uint64_t now_us,xip_quic_entry *out)
+{
+    const xip_quic_entry *found=xip_quic_table_find(t,cid,len);
+    if(!found)return XIP_ERR_NOTFOUND;
+    xip_quic_entry *e=&t->e[found-t->e];
+    if(e->route && e->idle_ms && now_us>=e->last_used_us && now_us-e->last_used_us>=(uint64_t)e->idle_ms*1000)return XIP_ERR_NOTFOUND;
+    if(e->route && now_us>e->last_used_us)e->last_used_us=now_us;
+    *out=*e;
+    if(!e->route)return 0;
+    if(e->route->endpoint)out->kind=3;
+    unsigned total=0;for(unsigned i=0;i<e->route->hop_count;i++)total+=e->route->hops[i].weight;
+    unsigned at=e->cursor++%total;
+    for(unsigned i=0;i<e->route->hop_count;i++){
+        const xip_relay_hop *h=&e->route->hops[i];
+        if(at<h->weight){out->egress=h->link;out->token=h->token;out->out_len=h->cid_len;
+            memcpy(out->out_cid,h->rewritten_dcid,h->cid_len);
+            out->out_address_len=h->address_len;memcpy(out->out_address,h->address,24);return 0;}
+        at-=h->weight;
+    }
+    return XIP_ERR_ARG;
+}
+
+int xip_quic_relay_select(xip_quic_table *t,const uint8_t *cid,unsigned len,xip_quic_entry *out)
+{return xip_quic_relay_select_at(t,cid,len,0,out);}
+int xip_quic_relay_stats(const xip_quic_table *t,uint32_t owner,const uint8_t *cid,unsigned len,xip_relay_stats *out)
+{
+    if(!out)return XIP_ERR_ARG;
+    const xip_quic_entry *e=xip_quic_table_find(t,cid,len);
+    if(!e || e->owner!=owner || !e->route)return XIP_ERR_NOTFOUND;
+    *out=(xip_relay_stats){.last_used_us=e->last_used_us,.idle_ms=e->idle_ms};return 0;
+}
+int xip_quic_relay_expire(xip_quic_table *t,uint32_t owner,uint64_t now_us)
+{
+    int count=0;
+    for(unsigned i=t->n;i>0;i--){
+        xip_quic_entry *e=&t->e[i-1];
+        if(e->route && (!owner || e->owner==owner) && e->idle_ms && now_us>=e->last_used_us && now_us-e->last_used_us>=(uint64_t)e->idle_ms*1000){
+            xip_quic_table_remove(t,e->cid,e->len);count++;
+        }
+    }
+    return count;
+}
+int xip_quic_relay_idle(xip_quic_table *t,uint32_t owner,const uint8_t *cid,unsigned len,uint32_t idle_ms)
+{
+    const xip_quic_entry *found=xip_quic_table_find(t,cid,len);
+    if(!found || found->owner!=owner || !found->route)return XIP_ERR_NOTFOUND;
+    t->e[found-t->e].idle_ms=idle_ms;return 0;
+}
+int xip_quic_relay_create(xip_quic_table *t,uint32_t owner,xip_relay_route *route,uint32_t idle_ms,bool reuse,uint64_t now_us)
+{
+    if(!t || !owner || !route || route->dcid_len || route->hop_count!=1)return XIP_ERR_ARG;
+    xip_quic_relay_expire(t,owner,now_us);
+    if(reuse)for(unsigned i=0;i<t->n;i++){
+        xip_quic_entry *e=&t->e[i];
+        if(e->owner==owner && e->route && e->idle_ms==idle_ms && e->route->endpoint==route->endpoint &&
+           e->route->hop_count==1 && !memcmp(&e->route->hops[0],&route->hops[0],sizeof(route->hops[0]))){
+            *route=*e->route;e->last_used_us=now_us;return 1;
+        }
+    }
+    /* A separate high range avoids the local endpoint's small sequential CIDs.
+     * Never recycle a closed ID during this runtime lifetime: delayed packets
+     * cannot become traffic for a newly allocated circuit. */
+    for(unsigned tries=0;tries<=XIP_QUIC_TABLE_MAX;tries++){
+        if(t->next_relay_cid>=((uint64_t)1<<60)-1)return XIP_ERR_NOMEM;
+        xip_relay_route candidate=*route;
+        candidate.dcid_len=xip_quic_cid_encode(((uint64_t)1<<60)|++t->next_relay_cid,candidate.dcid);
+        if(xip_quic_table_find(t,candidate.dcid,candidate.dcid_len))continue;
+        int rc=xip_quic_relay_set(t,owner,&candidate,0);if(rc)return rc;
+        xip_quic_entry *e=&t->e[lower_bound(t,candidate.dcid,candidate.dcid_len)];
+        e->last_used_us=now_us;e->idle_ms=idle_ms;*route=candidate;return 0;
+    }
+    return XIP_ERR_NOMEM;
 }

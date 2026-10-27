@@ -25,9 +25,8 @@ and [ESP-NOW](ESPNOW.md) for the relevant contracts and options. Development
 notes are under [notes/](../../notes/ai/2026-10-23-runtime-implementation.md).
 
 Experimental endpoint modules use the native [QUIC packet interface](../../api/quic.API.md).
-The [raw-IP virtual interface](../../api/ip.API.md) lets a module connect complete
-IP packets to native sockets. Both are optional; see [current behavior and
-validation gaps](../../notes/ai/modules/README.md) before device experiments.
+Native TCP listeners use the normal lwIP stack and module-declared stream ports.
+Mesh relays and streams use QUIC. VIP/IP tunnel endpoints are not part of the runtime.
 
 ## Envelopes
 

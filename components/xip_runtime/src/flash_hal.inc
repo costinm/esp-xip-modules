@@ -46,11 +46,11 @@ static int flash_submit(void *user, uint32_t address, uint32_t len, uint32_t pkt
     flash_job *j = malloc(sizeof(*j));
     if (!j) { atomic_store(&flash_owner, 0); return XIP_ERR_NOMEM; }
     *j=(flash_job){.owner=I(user)->id,.address=address,.len=len,.slot=-1,.data=data,.component=component,.method=method,.id=id};
-    if (pkt) j->slot=xip_held_get(&I(user)->held,pkt)->slot;
+    if (pkt) j->slot=xip_packet_get(pool,pkt)->slot;
     if (xTaskCreate(flash_task,"xip_flash",4096,j,CONFIG_XIP_WORKER_PRIORITY-1,NULL)!=pdPASS) {
         free(j); atomic_store(&flash_owner,0); return XIP_ERR_NOMEM;
     }
-    if (pkt) (void)xip_held_take(&I(user)->held,pkt);
+    if (pkt) (void)packet_take(pkt);
     atomic_store(&j->ready,true);
     return 0;
 }

@@ -5,7 +5,7 @@
 #include <string.h>
 #define XIP_UDP_PEERS 16
 #define XIP_UDP_PEER_IDLE_US (120ull*1000000ull)
-typedef struct { uint8_t ip[16]; uint16_t port; uint32_t scope; } xip_udp_address;
+/* xip_udp_address is `xip_runtime.h`'s: the public source descriptor. */
 typedef struct { xip_udp_address addr; uint64_t seen_us; uint32_t generation; bool used; } xip_udp_peer;
 typedef struct { uint32_t epoch; xip_udp_peer p[XIP_UDP_PEERS]; } xip_udp_peers;
 static inline bool xip_udp_same(const xip_udp_address *a,const xip_udp_address *b)

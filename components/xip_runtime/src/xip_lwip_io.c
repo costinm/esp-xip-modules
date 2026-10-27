@@ -6,6 +6,7 @@
 #include "freertos/task.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"
 #include "lwip/sockets.h"
 #include "xip_lwip_io.h"
 #include "internal.h"
@@ -155,10 +156,7 @@ static bool poll_once(bool *thread_initialized)
     io_entry snapshots[IO_SLOTS];
     struct pollfd fds[IO_SLOTS];
     unsigned count=0;
-    /* Native raw-IP interfaces join lwIP directly, not esp_netif's Wi-Fi
-     * registry. Runtime readiness includes them; keep the registry fallback
-     * for externally owned legacy adapters. */
-    bool netif=xip_connected() || esp_netif_next_unsafe(NULL) != NULL;
+    bool netif=esp_netif_next_unsafe(NULL) != NULL;
     if (netif && !*thread_initialized) {
         lwip_socket_thread_init(); *thread_initialized=true;
     }
@@ -183,6 +181,13 @@ static bool poll_once(bool *thread_initialized)
     int timeout=50;
     for (unsigned i=0; i<count; i++)
         if (snapshots[i].tick_ms > 0 && snapshots[i].tick_ms < timeout) timeout=snapshots[i].tick_ms;
+    /* lwip_poll is correct here, and poll() is not: LWIP_SOCKET_OFFSET is
+     * FD_SETSIZE - CONFIG_LWIP_MAX_SOCKETS, so every runtime socket lives in
+     * lwIP's internal index range (fd >= 54 on this build) — the space
+     * lwip_poll reads. The VFS poll() symbol does not serve those fds: with
+     * it, even the QUIC engine socket stops signalling. This one readiness
+     * task per process is what avoids one blocking task per socket; the
+     * compat mapping cannot hijack the call (LWIP_COMPAT_SOCKETS is 0). */
     int result=lwip_poll(fds, count, timeout);
     if (result < 0) { vTaskDelay(pdMS_TO_TICKS(10)); return true; }
     uint64_t now=(uint64_t)esp_timer_get_time()/1000;

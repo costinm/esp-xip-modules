@@ -186,6 +186,6 @@ static int h_socket_write_pkt(void *u,uint32_t handle,uint32_t pkt,uint32_t star
     uint8_t *data;size_t cap;int rc=h_pkt_span(u,pkt,&data,&cap);if(rc)return rc;
     if(!len || start>cap || len>cap-start || !sockets_lock)return XIP_ERR_ARG;
     xSemaphoreTake(sockets_lock,portMAX_DELAY);sock_node *s=socket_find(I(u)->id,handle);rc=XIP_ERR_ARG;
-    if(s && !s->listener){if(s->tx_slot!=-1)rc=XIP_ERR_BUSY;else{xip_held_entry e=xip_held_take(&I(u)->held,pkt);s->tx_slot=e.slot;s->tx=data+start;s->tx_at=0;s->tx_len=len;c_poll_update(s->watch,s->fd,POLLIN|POLLOUT);rc=0;}}
+    if(s && !s->listener){if(s->tx_slot!=-1)rc=XIP_ERR_BUSY;else{xip_packet_ref e=packet_take(pkt);s->tx_slot=e.slot;s->tx=data+start;s->tx_at=0;s->tx_len=len;c_poll_update(s->watch,s->fd,POLLIN|POLLOUT);rc=0;}}
     xSemaphoreGive(sockets_lock);return rc;
 }

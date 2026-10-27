@@ -38,15 +38,20 @@ typedef struct {
 void xip_periph_reserve(uint64_t mask);
 /* xip_quic_udp.c: start the receive on the default QUIC UDP port when the application sets its receive function. */
 void xip_quic_udp_ensure(void);
+void xip_quic_udp_raw_mode(bool enabled);
+bool xip_quic_udp_raw_rx(unsigned interface,const uint8_t *frame,size_t len);
 void xip_quic_udp_stop(void);
 unsigned xip_quic_udp_sockets(void);
+/* xip_quic_udp.c: the magic discovery UDP port. It has no special ABI: opened and stopped with the other runtime UDP ports, its datagrams deliver with their source, and its module answers `udp_send` on the socket handle (XIP_ADDR_UDP + fd). */
 void xip_mc_ensure(void);
 void xip_mc_stop(void);
 unsigned xip_mc_sockets(void);
+int h_udp_send(void *u,uint32_t handle,const uint8_t *ip,uint16_t port,uint32_t scope,const uint8_t *data,size_t len);
 /* xip_events.c: the CBOR of the Wi-Fi state, heap_info and heap_dump (the events ring went: events are messages, routed later) */
 int xip_wifi_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap);
 int xip_heap_dump(int kind);
 int xip_heap_info(uint8_t *out, size_t cap);
+int xip_packet_queue_info(uint8_t *out, size_t cap);
 
 /* xip_serial.c: the pins of the serial port, reserved from modules whether or not the port is started. */
 uint64_t xip_serial_pins(void);
@@ -108,9 +113,6 @@ struct xip_instance {
     xip_alarm_t alarms[XIP_ALARMS];
     xip_stats_t stats;
     xip_mem mem;               /* the managed heap of this module */
-    xip_held held;             /* packets this module owns, and the one the current call lent it */
-    struct { int16_t slot; uint16_t start, len; int32_t component, method; uint32_t from; uint64_t id; int32_t value; uint32_t lflags, time_us; } pkt_in[CONFIG_XIP_PKT_INBOX];
-    uint8_t pkt_head, pkt_count;  /* the ring of packets waiting for this module (under the registry lock) */
     struct { char name[16]; const void *table; void *ctx; } comps[XIP_COMPONENTS_MAX];  /* hosted components (manifest key 11); table/ctx once published */
     bool start_done;               /* HOST_START was dispatched (by the worker, or inline by get_component) */
     uint64_t req_id; uint32_t req_has_id;   /* the envelope id of the request being dispatched (xip_call.request_id) */

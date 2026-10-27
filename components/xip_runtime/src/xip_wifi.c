@@ -4,10 +4,13 @@
 #include "sdkconfig.h"
 #include "xip_wifi.h"
 #include "xip_cbor.h"
+#include "internal.h"
 #include "nvs.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_wifi_netif.h"
+#include "esp_private/wifi.h"
 #include "esp_wifi_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -208,8 +211,13 @@ static bool auto_reconnect = true;
 int xip_wifi_auto_reconnect(bool enabled) { bool old = auto_reconnect; auto_reconnect = enabled; return old; }
 static bool scan_only, scanning, scan_done;
 static char active_ssid[33];
-/* the driver epoch: it stays initialized across radio epochs; a changed pre-start policy (AMPDU, 11b rates) is consumed by a full re-init */
-static bool driver_initialized, driver_running, driver_ampdu = true, driver_11b_disabled = true;
+/* Driver allocation policy is fixed until esp_wifi_deinit, across radio stops. */
+static bool driver_initialized, driver_running;
+typedef struct wifi_driver_policy {
+    bool ampdu, rates_11b_disabled;
+    uint16_t rx_static, rx_dynamic, tx_dynamic, rx_ba;
+} wifi_driver_policy;
+static wifi_driver_policy driver_policy = {.ampdu=true,.rates_11b_disabled=true};
 static bool handlers_registered, phy_nvs_initialized;
 static uint8_t applied_channel;       /* only a channel this owner applied (esp_wifi_get_channel can fail while unassociated) */
 static uint8_t applied[sizeof(xip_wifi_intent)];
@@ -274,6 +282,24 @@ static void ensure_link_local(esp_netif_t *netif)
     if (netif) (void)esp_netif_create_ip6_linklocal(netif);        /* the netif must be up: the START events arrive after it is */
 }
 
+/* The Wi-Fi owner installs RX plumbing after IDF's default handlers on every
+ * start/reconnect. Unclaimed frames retain the original netif/SDK ownership. */
+static esp_err_t wifi_eth_rx(unsigned interface,void *netif,void *buffer,size_t len,void *eb)
+{
+    if(xip_quic_udp_raw_rx(interface,buffer,len)){
+        if (eb) esp_wifi_internal_free_rx_buffer(eb);
+        return ESP_OK;
+    }
+    return esp_netif_receive(netif,buffer,len,eb);
+}
+static esp_err_t wifi_sta_eth_rx(esp_netif_t *netif,void *buffer,size_t len,void *eb)
+{return wifi_eth_rx(WIFI_IF_STA,netif,buffer,len,eb);}
+static void wifi_eth_rx_install(esp_netif_t *netif)
+{
+    if(netif)(void)esp_wifi_register_if_rxcb(esp_netif_get_io_driver(netif),
+        wifi_sta_eth_rx,netif);
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t event, void *data)
 {
     (void)arg;
@@ -287,6 +313,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t event, void 
     } else if (base == WIFI_EVENT && event == WIFI_EVENT_STA_CONNECTED) {
         if (!want_sta) return; /* stale association after a switch to NOW-only */
         ensure_link_local(sta_netif);
+        wifi_eth_rx_install(sta_netif);
         associated = true;
         xip_host_set_connected(true);
         if (data) xip_rx_filter_bssid(((wifi_event_sta_connected_t *)data)->bssid);
@@ -305,12 +332,21 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t event, void 
     }
 }
 
-/* Subscribe once to the driver's events: a stop/start keeps the default event loop, so registering again would duplicate every transition. */
+/* Reattach after the default netifs are created. Their destruction can remove
+ * and recreate IDF handlers behind ours: IPv6 creation would then precede
+ * netif-up, and IDF would overwrite our Ethernet callback on CONNECTED. */
 static bool register_event_handlers(void)
 {
-    if (handlers_registered) return true;
-    if (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL) != ESP_OK ||
-        esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi_event, NULL) != ESP_OK) return false;
+    if (handlers_registered) {
+        (void)esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event);
+        (void)esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi_event);
+        handlers_registered = false;
+    }
+    if (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL) != ESP_OK) return false;
+    if (esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi_event, NULL) != ESP_OK) {
+        (void)esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event);
+        return false;
+    }
     handlers_registered = true;
     return true;
 }
@@ -325,10 +361,21 @@ static bool platform_init(void)
     return rc == ESP_OK || rc == ESP_ERR_INVALID_STATE;
 }
 
-/* A changed AMPDU or 11b policy is only consumed by re-initializing the driver (DMesh's prepare_sta_driver_policy). */
-static bool driver_policy_changed(bool ampdu, bool rates_11b_disabled)
+/* Buffer counts and BA window are init-time settings too. Compare effective
+ * values (including NV defaults/clamps), rather than just the requested zeros. */
+static bool driver_policy_changed(bool ampdu, bool rates_11b_disabled, const xip_wifi_tuning *tuning)
 {
-    return driver_initialized && (driver_ampdu != ampdu || driver_11b_disabled != rates_11b_disabled);
+    if (!driver_initialized) return false;
+    wifi_init_config_t cfg = init_config(tuning);
+    return driver_policy.ampdu != ampdu || driver_policy.rates_11b_disabled != rates_11b_disabled ||
+        driver_policy.rx_static != cfg.static_rx_buf_num || driver_policy.rx_dynamic != cfg.dynamic_rx_buf_num ||
+        driver_policy.tx_dynamic != cfg.dynamic_tx_buf_num || driver_policy.rx_ba != cfg.rx_ba_win;
+}
+static void remember_driver_policy(bool ampdu, bool rates_11b_disabled, const wifi_init_config_t *cfg)
+{
+    driver_policy = (wifi_driver_policy){.ampdu=ampdu,.rates_11b_disabled=rates_11b_disabled,
+        .rx_static=cfg->static_rx_buf_num,.rx_dynamic=cfg->dynamic_rx_buf_num,
+        .tx_dynamic=cfg->dynamic_tx_buf_num,.rx_ba=cfg->rx_ba_win};
 }
 
 /* esp_wifi_init once per driver epoch. */
@@ -336,10 +383,10 @@ static bool init_driver(bool ampdu, bool rates_11b_disabled, const xip_wifi_tuni
 {
     if (!driver_initialized) {
         driver_initialized = true;
-        driver_ampdu = ampdu; driver_11b_disabled = rates_11b_disabled;
         wifi_init_config_t init = init_config(tuning);
         esp_err_t rc = esp_wifi_init(&init);
         if (rc != ESP_OK && rc != ESP_ERR_INVALID_STATE) { driver_initialized = false; return false; }
+        remember_driver_policy(ampdu, rates_11b_disabled, &init);
     }
     (void)esp_wifi_set_storage(WIFI_STORAGE_RAM);
     return true;
@@ -467,12 +514,13 @@ static int wifi_up(const xip_wifi_intent *p, const xip_wifi_tuning *tuning)
 {
     if (started || scan_only) return -5;
     const bool sta = p->sta, ap = p->ap, now = p->now;
+    xip_quic_udp_raw_mode(tuning->raw_rx == XIP_TUNE_ON);
     /* DMesh's defaults: AMPDU on, 11b rates off, BSSID check off (frames of other BSSIDs reach unassociated NOW receive) */
     const bool ampdu = tuning->ampdu != XIP_TUNE_OFF;
     const bool rates_11b_disabled = tuning->rates_11b != XIP_TUNE_ON;
     const bool bssid_check_disabled = tuning->bssid_check != XIP_TUNE_ON;
     const uint8_t channel = p->channel ? (p->channel > 13 ? 13 : p->channel) : DEFAULT_CHANNEL;
-    if (driver_policy_changed(ampdu, rates_11b_disabled)) { wifi_down(); restart_driver(); }
+    if (driver_policy_changed(ampdu, rates_11b_disabled, tuning)) { wifi_down(); restart_driver(); }
     if (!platform_init()) return -3;
     /* The standard ESP-IDF ordering: create the default STA glue after esp-netif and the event loop but before esp_wifi_init
      * (esp_wifi_internal_tx is the glue's egress API; creating it later accepted frames but left the Ethernet path undrained). */
@@ -480,12 +528,11 @@ static int wifi_up(const xip_wifi_intent *p, const xip_wifi_tuning *tuning)
         sta_netif = esp_netif_create_default_wifi_sta();
         if (!sta_netif) return -6;
     }
-    /* the default handlers bring the netif up before our callbacks create IPv6 link-local */
-    if (!register_event_handlers()) return -3;
     if (!init_driver(ampdu, rates_11b_disabled, tuning)) return -3;
     esp_err_t rc = esp_wifi_set_mode(ap ? WIFI_MODE_APSTA : WIFI_MODE_STA);
     if (rc != ESP_OK && rc != ESP_ERR_INVALID_STATE) return -3;
     if (ap && !configure_ap(p, channel)) return -3;
+    if (!register_event_handlers()) return -3;
     if (sta) {
         wifi_config_t config = {0};
         memcpy(config.sta.ssid, p->sta_ssid, p->sta_ssid_len);

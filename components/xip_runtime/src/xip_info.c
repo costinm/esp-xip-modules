@@ -70,7 +70,7 @@ int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
     uint32_t flash_size = 0;
     if (esp_flash_get_size(NULL, &flash_size) != ESP_OK) return XIP_ERR_IO;
     const esp_partition_t *part = running_partition();
-    xip_cbor_map(&w, 5);
+    xip_cbor_map(&w, 6);
     uint8_t mac[6];
     if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return XIP_ERR_IO;
     xip_cbor_uint(&w, 1); xip_cbor_map(&w, part ? 7 : 4);
@@ -100,5 +100,10 @@ int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
     if (n == XIP_ERR_UNSUPPORTED) xip_cbor_array(&w, 0);
     else if (n < 0) return n; else w.len += (size_t)n;
     xip_cbor_uint(&w, 5); info_components(&w);
+    xip_cbor_uint(&w,6);
+    if(w.overflow)return XIP_ERR_SIZE;
+    n=xip_packet_queue_info(out+w.len,cap-w.len);
+    if(n<0)return n;
+    w.len+=(size_t)n;
     return xip_cbor_done(&w);
 }

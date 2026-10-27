@@ -50,13 +50,16 @@ static int set(const xip_wifi_intent *i, uint32_t *gen)
     return 0;
 }
 
-/* The settings of the C host: A-MPDU, 802.11b rates, the BSSID check and the buffers. The raw UDP6 path (raw receive, driver-less
- * transmit, raw rate) is DMesh's until the `udp6` link is ported. */
+/* raw_rx opts the selected UDP6 port into Ethernet ingress/native TX.
+ * Experimental raw 802.11 transmit and fixed-rate overrides remain unsupported. */
 static int tuning_valid(const xip_wifi_tuning *t)
 {
     if (t->size < sizeof(*t)) return XIP_ERR_ARG;
     if (t->ampdu > XIP_TUNE_OFF || t->rates_11b > XIP_TUNE_OFF || t->bssid_check > XIP_TUNE_OFF || t->lr > XIP_TUNE_OFF) return XIP_ERR_ARG;
-    if (t->raw_rx || t->driver_tx || t->raw_tx_rate) return XIP_ERR_UNSUPPORTED;
+    /* C supports the raw UDP6 ingress for the QUIC port and the discovery
+     * multicast (xip_quic_udp_raw_rx); `off`/default stays on lwIP sockets. */
+    if (t->raw_rx > XIP_TUNE_ON) return XIP_ERR_ARG;
+    if (t->driver_tx || t->raw_tx_rate) return XIP_ERR_UNSUPPORTED;
     if ((t->rx_static && (t->rx_static < 2 || t->rx_static > 64)) || (t->rx_dynamic && (t->rx_dynamic < 2 || t->rx_dynamic > 128)) ||
         (t->tx_dynamic && (t->tx_dynamic < 4 || t->tx_dynamic > 128)) || (t->rx_ba && (t->rx_ba < 2 || t->rx_ba > 64)))
         return XIP_ERR_ARG;

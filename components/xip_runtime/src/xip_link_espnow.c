@@ -26,8 +26,8 @@ static inline size_t xip_now_frame_len(size_t len)
 {
     return XIP_NOW_IEEE80211_HEADER + XIP_NOW_RAW_PREFIX + len;
 }
-/* One pad byte in the vendor IE makes the action prefix 16 bytes. At the
- * standard 144-byte payload offset the native request and body are aligned. */
+/* The baseline vendor IE has one pad byte and a 16-byte action prefix.
+ * Native TX may extend that padding to align its SDK request descriptor. */
 static inline size_t xip_now_action_prefix(uint8_t *out, size_t cap, size_t len)
 {
     if (len > XIP_NOW_MAX_PAYLOAD || cap < XIP_NOW_RAW_PREFIX) return 0;
@@ -223,17 +223,22 @@ static int transmit(now_state *s, const uint8_t destination[6], const xip_link_p
 {
     if (!pkt || !pkt->pool || !pkt->data) return XIP_ERR_ARG;
     if (pkt->len > XIP_PKT_MAX) return XIP_ERR_SIZE;
-    const size_t prefix = XIP_NOW_RAW_PREFIX;
     const size_t header_size = offsetof(wifi_action_tx_req_t, data);
+    /* Relay DCID rewrites and outer headers can leave any payload alignment.
+     * Extend the existing vendor-IE padding so only the SDK descriptor needs
+     * alignment; the retained opaque payload never moves. Receivers skip the
+     * complete first IE, including its advertised padding. */
+    const size_t padding=((uintptr_t)pkt->data-header_size-XIP_NOW_RAW_PREFIX) % _Alignof(wifi_action_tx_req_t);
+    const size_t prefix = XIP_NOW_RAW_PREFIX + padding;
     const size_t needed = header_size + prefix;
-    /* A packet passed for TX is an exclusive mutable lease, never an Arc-like
-     * shared read reference. Reject contract violations; do not hide them with
-     * allocation/copying. The runtime returns BUSY before calling us if borrowed. */
-    if (xip_pool_refs(pkt->pool, pkt->slot) != 1 || pkt->headroom < needed ||
-        (uintptr_t)(pkt->data - needed) % _Alignof(wifi_action_tx_req_t)) return XIP_ERR_ARG;
+    /* Only reserved prefix storage is changed, synchronously on the owner.
+     * Retained protocol references keep the opaque payload immutable. */
+    if (pkt->headroom < needed) return XIP_ERR_ARG;
     wifi_action_tx_req_t *r = (wifi_action_tx_req_t *)(pkt->data - needed);
     memset(r, 0, header_size);
     if (!xip_now_action_prefix(r->data, prefix, pkt->len)) return XIP_ERR_SIZE;
+    r->data[9]+=(uint8_t)padding;
+    if(padding)memset(r->data+XIP_NOW_RAW_PREFIX,0,padding);
     r->ifx = xip_wifi_ap_only_active() ? WIFI_IF_AP : WIFI_IF_STA;
     memcpy(r->dest_mac, destination, 6);
     r->type = WIFI_OFFCHAN_TX_REQ;

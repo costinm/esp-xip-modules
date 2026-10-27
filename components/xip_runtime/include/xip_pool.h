@@ -43,6 +43,8 @@ void xip_pool_destroy(xip_pool *pool);
 /* Storage policy of a created pool: keep `keep` idle slots with storage (default 2), and do not allocate storage when
  * free_heap() (if given) reports less than slot_size + reserve_bytes. */
 void xip_pool_set_policy(xip_pool *pool, uint16_t keep, size_t (*free_heap)(void), size_t reserve_bytes);
+/* Change only the idle cache target while callbacks are using the pool. */
+void xip_pool_set_keep(xip_pool *pool, uint16_t keep);
 /* Give back the storage of idle slots beyond `keep` (after the policy was lowered). */
 void xip_pool_trim(xip_pool *pool);
 /* Slots that hold storage now. */
@@ -52,7 +54,9 @@ uint16_t xip_pool_allocated(const xip_pool *pool);
 int xip_pool_acquire(xip_pool *pool, uint16_t reserve);
 /* Callback-safe admission: never malloc; external pools must supply acquire_cached. */
 int xip_pool_acquire_cached(xip_pool *pool, uint16_t reserve);
-/* Owner-side preparation: warm up to two retained RX buffers, within keep policy. */
+/* Idle slots whose storage is already allocated; cached RX can use these without malloc. */
+uint16_t xip_pool_cached_available(const xip_pool *pool);
+/* Owner-side preparation: warm up to 32 retained RX buffers, within keep policy. */
 void xip_pool_prepare_rx(xip_pool *pool);
 void xip_pool_retain(xip_pool *pool, int slot);
 /* The last release frees the slot (and its storage, if more than `keep` idle slots have some). */
@@ -63,32 +67,13 @@ uint16_t xip_pool_slot_size(const xip_pool *pool);
 uint16_t xip_pool_available(const xip_pool *pool);
 uint16_t xip_pool_slots(const xip_pool *pool);
 
-/* ---- what one module holds ---- */
-#define XIP_HELD_MAX 8
-
-typedef enum { XIP_HELD_FREE = 0, XIP_HELD_OWNED, XIP_HELD_BORROWED } xip_held_state;
-
-typedef struct {
-    int16_t slot;
-    uint16_t start, len;          /* the payload inside the slot: the range belongs to the holder */
-    uint8_t gen, state;           /* the handle carries gen: a stale one does not match */
-} xip_held_entry;
-
-typedef struct {
-    xip_held_entry e[XIP_HELD_MAX];
-    uint8_t quota;                /* owned packets at most (<= XIP_HELD_MAX); borrowed ones are the call's */
-} xip_held;
-
-void xip_held_init(xip_held *h, uint8_t quota);
-/* A handle (never 0) for a slot the table now owns a reference of; 0 when the table is full or, for an owned packet, at
- * its quota. */
-uint32_t xip_held_add(xip_held *h, int slot, uint16_t start, uint16_t len, xip_held_state state);
-xip_held_entry *xip_held_get(xip_held *h, uint32_t handle);          /* NULL: not valid */
-/* Borrowed -> owned. 0, or -1 for a bad handle, -2 at the quota. */
-int xip_held_keep(xip_held *h, uint32_t handle);
-/* The entry leaves the table; the caller releases or hands on the slot reference. Returns a copy, slot -1 if not valid. */
-xip_held_entry xip_held_take(xip_held *h, uint32_t handle);
-unsigned xip_held_count(const xip_held *h, xip_held_state state);
+/* A packet reference belongs to its caller, independent of module identity.
+ * Handles name a live pool allocation; retaining adds a reference, transferring
+ * passes that reference unchanged. The final release returns storage to the pool. */
+typedef struct { int16_t slot; uint16_t start, len; } xip_packet_ref;
+uint32_t xip_packet_handle(xip_pool *pool, int slot, uint16_t start, uint16_t len);
+xip_packet_ref *xip_packet_get(xip_pool *pool, uint32_t handle);
+int xip_packet_retain(xip_pool *pool, uint32_t handle);
 
 /* ---- the managed heap of one module: the bytes it has taken and not given back ----
  * Only the balance is tracked, not the blocks: a module that stops with a balance above zero cannot be replaced live (the

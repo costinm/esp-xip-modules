@@ -54,9 +54,8 @@ typedef struct {
      * lent for the call and goes back to the pool when the hook returns: copy what must stay. */
     int (*packet)(void *ctx, const char *module, uint32_t from, int component, int method, uint64_t id, const uint8_t *data, size_t len);
     void *packet_ctx;
-    /* Backpressure: a module's inbox was full and has room again (called on the worker, after the module released the packet
-     * it was handling). The application that feeds the module (a stream: xip_instance_send answered XIP_ERR_BUSY) opens
-     * its window or retries. The queue is on the runtime side; the module takes one packet at a time. */
+    /* Backpressure hint: the global packet queue has descriptor room again.
+     * Called on the worker for live components; pool pressure may still refuse a retry. */
     void (*inbox_ready)(void *ctx, int component);
     /* Bit n set: GPIO n is the application's (console UART, its own buses, ...). A module that asks for it gets
      * XIP_ERR_UNSUPPORTED. The flash pins of the classic ESP32 (6-11) are always reserved. */
@@ -72,6 +71,8 @@ typedef struct {
     int (*wifi_tuning_get)(xip_wifi_tuning *tuning);
     /* Promiscuous receive on/off (xip_wifi_monitor, include/xip.h): the frames go to the "promisc" link. NULL: ERR_UNSUPPORTED. */
     int (*wifi_monitor)(const xip_wifi_monitor *monitor);
+    /* Resolve an installed wire component or datagram port; worker only. */
+    int (*request_start)(int32_t component, uint32_t port);
 } xip_host_hooks_t;
 
 /* For an application that cannot build the hook table (Rust): the Wi-Fi, settings and module-control calls when given.
@@ -103,6 +104,7 @@ typedef struct {
     int (*wifi_monitor)(const xip_wifi_monitor *monitor);
     int (*module_rescan)(void);   /* appended: see xip_host_hooks_t */
     int (*component_start)(const char *name);   /* appended: see xip_host_hooks_t */
+    int (*request_start)(int32_t component, uint32_t port);
 } xip_host_ext_t;
 esp_err_t xip_host_init_simple(const xip_host_ext_t *ext);
 
@@ -203,7 +205,7 @@ void xip_quic_rx_set(const xip_quic_rx_ops *ops);
  *  - truncated or invalid header, or more than XIP_QUIC_MAX_PACKET bytes: dropped and counted;
  *  - SHORT header: the DCID (length from the quic-lite class rule, or the fixed `xip_quic_short_cid_len`) is looked up in the relay table. A LOCAL
  *    entry hands the packet to the `local` callback (ownership passes: it must release it with xip_quic_pkt_release or pass it on with
- *    xip_quic_pkt_send). A RELAY entry forwards the same pool packet to its link and peer address with the DCID replaced (forward or drop and count: no queue, no retransmission). Unknown DCID: dropped, counted;
+ *    xip_quic_pkt_send). A RELAY entry forwards the same pool packet to its link and peer address with the DCID replaced (forward or drop and count: no queue, no retransmission). Unknown DCID: offered to the attached module endpoint, otherwise dropped and counted;
  *  - LONG header, version XIP_QUIC_VERSION_CBOR (0x444d0002): after the SCID comes the CBOR envelope {1: component, 2: method, 3: id, 5: fields}. It
  *    goes to the module claiming its component in manifest key 12, or to the module of that component if it has a datagram port or hosts a table; otherwise to the
  *    console module (component 20), which serves console and native methods. This is the only place an envelope is parsed: the runtime parses it
@@ -214,7 +216,7 @@ typedef struct { int slot; uint16_t start, len; } xip_quic_pkt;           /* a p
 const uint8_t *xip_quic_pkt_data(const xip_quic_pkt *p, size_t *len);      /* the whole QUIC packet (headroom in front stays empty) */
 void xip_quic_pkt_release(xip_quic_pkt *p);                                /* return it to the pool; any task; p->slot = -1 */
 /* Send the packet on a link as it is (no copy). Like every send: consumed on success and on every failure except XIP_ERR_BUSY, which leaves it with
- * the caller to retry after the link's `ready` or to release. This is the primitive; relay forwarding by the table is not implemented. */
+ * the caller to retry after the link's `ready` or to release. This primitive does not look up a route; the common receive path performs table-based relay forwarding. */
 int xip_quic_pkt_send(xip_quic_pkt *p, int link, uint64_t token);
 typedef struct {
     void *ctx;
@@ -253,7 +255,7 @@ typedef struct xip_instance xip_instance_t;
 
 typedef struct {
     uint32_t spi_transfers, spi_errors, irq_events, irq_dropped, emitted, logged;
-    uint32_t pkt_sent, pkt_received, pkt_dropped, pkt_leaked, mem_leaked;  /* mem_leaked: bytes still taken when it ended */   /* packets: sent by the module; delivered to it; refused or lost; still held when it ended */
+    uint32_t pkt_sent, pkt_received, pkt_dropped, pkt_leaked, mem_leaked;  /* pkt_leaked is reserved (0); packet holders are module-owned. mem_leaked counts outstanding managed bytes. */
     uint32_t calls, alarms_fired, overruns;   /* handler calls; alarms delivered; calls over CONFIG_XIP_HANDLER_MS */
     uint32_t max_handler_us;
 } xip_stats_t;
@@ -290,7 +292,7 @@ int xip_instance_stop(xip_instance_t *inst);
 int xip_instance_post(xip_instance_t *inst, int component, int method, const uint8_t *data, size_t len);
 /* Same, and wait for the module's answer (a message to the application with the request id; at most CONFIG_XIP_RESPONSE_MAX bytes; none = length 0). */
 /* Send the module a message the way a module would: copied into a pool packet and delivered as a call with call.pkt,
- * call.from = ADDR_MAIN. XIP_ERR_BUSY when its inbox is full or the pool is out of packets. Any task. */
+ * call.from = ADDR_MAIN. XIP_ERR_BUSY when the global delivery queue is full or the pool is out of packets. Any task. */
 int xip_instance_send(xip_instance_t *inst, int component, int method, uint64_t id, const uint8_t *data, size_t len);
 int xip_instance_request(xip_instance_t *inst, int component, int method, const uint8_t *data, size_t len,
                             uint8_t *response, size_t capacity, size_t *response_len, uint32_t timeout_ms);
@@ -381,6 +383,13 @@ int xip_port_rx_begin_cached(uint32_t port, xip_link_rx_buf *buf);
 void xip_port_rx_commit_radio(int link, uint32_t port, const xip_link_rx_buf *buf,
     size_t len, uint64_t token, int32_t signal, uint32_t time_us);
 void xip_port_rx_commit(int link, uint32_t port, const xip_link_rx_buf *buf, size_t len, uint64_t token);
+/* Source of a datagram received on a runtime-owned UDP port (the call's `src`).
+ * IPv4 is represented as IPv4-mapped IPv6. */
+typedef struct { uint8_t ip[16]; uint16_t port; uint32_t scope; } xip_udp_address;
+/* A datagram of a runtime-owned UDP port: not a link — `link` is the socket handle
+ * (`ADDR_UDP + fd`, received on `call.from`) and `src` rides with the deliver as the
+ * call's source; the module answers to it with `udp_send` on the handle. */
+void xip_port_rx_commit_udp(uint32_t link, uint32_t port, const xip_link_rx_buf *buf, size_t len, const xip_udp_address *src);
 void xip_port_rx_abort(const xip_link_rx_buf *buf);
 
 /* For whoever owns light sleep (the sleepy runtime): a computer is attached on USB-Serial/JTAG (which also charges the device,
@@ -402,3 +411,6 @@ void xip_instance_stats(const xip_instance_t *inst, xip_stats_t *out);
 #ifdef __cplusplus
 }
 #endif
+
+/* Resolve a configured UDP circuit destination against the current listener. */
+int xip_quic_udp_destination(const uint8_t address[22], uint64_t *token);

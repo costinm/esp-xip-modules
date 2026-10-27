@@ -11,6 +11,7 @@
  * length without a table; a stack that issues other lengths sets one fixed length (`short_cid_len`). */
 #pragma once
 
+#include "xip.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -66,11 +67,26 @@ typedef enum {
     XIP_QUIC_DCID_RELAY = 2,     /* forwarded: to link `egress`, to the peer address `token`, with the DCID replaced by `out_cid` (as quic-lite's relay does) */
 } xip_quic_kind;
 typedef struct {
+    uint8_t out_address[24], out_address_len;
+    uint64_t last_used_us; uint32_t idle_ms;
+    xip_relay_route *route; uint32_t owner, cursor;
     uint8_t cid[XIP_QUIC_CID_MAX]; uint8_t len, kind;
     uint32_t egress; uint64_t token;                       /* RELAY: the outgoing link and the peer's address token on it (MAC, IP) */
     uint8_t out_cid[XIP_QUIC_CID_MAX]; uint8_t out_len;    /* RELAY: the DCID the next hop knows this circuit by */
 } xip_quic_entry;
-typedef struct { xip_quic_entry *e; uint16_t n, cap; } xip_quic_table;
+typedef struct { xip_quic_entry *e; uint16_t n, cap; uint64_t next_relay_cid; } xip_quic_table;
+/* Atomic owned route operations, shared with the native host tests. */
+int xip_quic_relay_set(xip_quic_table *t, uint32_t owner, const xip_relay_route *route, unsigned mode);
+int xip_quic_relay_get(const xip_quic_table *t, uint32_t owner, unsigned index, xip_relay_route *route);
+int xip_quic_relay_remove(xip_quic_table *t, uint32_t owner, const uint8_t *cid, unsigned len);
+void xip_quic_relay_release(xip_quic_table *t, uint32_t owner);
+int xip_quic_relay_create(xip_quic_table *t, uint32_t owner, xip_relay_route *route, uint32_t idle_ms, bool reuse, uint64_t now_us);
+int xip_quic_relay_stats(const xip_quic_table *t, uint32_t owner, const uint8_t *cid, unsigned len, xip_relay_stats *stats);
+int xip_quic_relay_expire(xip_quic_table *t, uint32_t owner, uint64_t now_us);
+int xip_quic_relay_idle(xip_quic_table *t, uint32_t owner, const uint8_t *cid, unsigned len, uint32_t idle_ms);
+int xip_quic_relay_select_at(xip_quic_table *t, const uint8_t *cid, unsigned len, uint64_t now_us, xip_quic_entry *out);
+/* Select one hop while holding the table lock. */
+int xip_quic_relay_select(xip_quic_table *t, const uint8_t *cid, unsigned len, xip_quic_entry *out);
 /* Insert or replace. 0, XIP_ERR_ARG (length 0 or above XIP_QUIC_CID_MAX, unknown kind, a RELAY without out_cid), XIP_ERR_NOMEM (full or out of memory). */
 int xip_quic_table_add(xip_quic_table *t, const uint8_t *cid, unsigned len, unsigned kind, uint32_t egress, uint64_t token,
                        const uint8_t *out_cid, unsigned out_len);

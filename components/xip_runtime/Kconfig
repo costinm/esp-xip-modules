@@ -19,12 +19,11 @@ menu "esp-xip-modules host"
 
     config XIP_WORKER_STACK
         int "Stack of the worker task that runs every module's handlers, bytes"
-        default 20480 if IDF_TARGET_ESP32
-        default 12288
+        default 32768
         help
             Must cover the deepest handler of any installed module (a module image states its need in stack_bytes).
-            Installed flashers can nest a large upload frame with page/status
-            inspection and native flash calls; ESP32 deployment needs this margin.
+            QUIC receive/handshake and installed flashers can nest sizeable
+            decode, stream and native-service frames. The default is 32 KiB.
 
     config XIP_WORKER_PRIORITY
         int "Priority of the worker task"
@@ -42,30 +41,34 @@ menu "esp-xip-modules host"
 
     config XIP_PKT_SLOTS
         int "Packets in the host's own pool, at most (1704 bytes each, allocated one by one as modules use them)"
-        default 16
+        default 64
+        range 1 32767
 
     config XIP_PKT_KEEP
         int "Idle packets that keep their storage (the rest go back to the heap when released)"
         default 4
+        range 0 32767
 
     config XIP_PKT_HEAP_RESERVE
         int "Free heap that must remain after a packet is allocated, bytes"
         default 16384
         help
-            A module cannot take the last RAM of the device for packets. DMesh does not use this pool: it hands the QUIC pool to the host.
+            A module cannot take the last RAM of the device for packets. The pool is shared by modules, QUIC endpoints and native links.
 
-    config XIP_PKT_RESERVE
-        int "Packets a module cannot take: kept for the application"
-        default 2
+    config XIP_PKT_QUEUE_INITIAL
+        int "Initial capacity of the shared packet delivery queue"
+        default 32
+        range 1 512
+        help
+            Only queue descriptors are allocated up front. One global FIFO holds pool references for every module.
+            The worker grows descriptors as short bursts require and heap permits. Payload storage remains lazy,
+            bounded by XIP_PKT_SLOTS and XIP_PKT_HEAP_RESERVE; receivers drop when storage is unavailable.
 
-    config XIP_PKT_HELD
-        int "Packets one module can hold at a time (at most 8)"
-        default 4
-        range 1 8
-
-    config XIP_PKT_INBOX
-        int "Packets that can wait for one module"
-        default 4
+    config XIP_PACKET_STATS
+        bool "Packet queue high-water and drop counters"
+        default y
+        help
+            Keep counters together in the queue state. Device status reports the queue and pool snapshot.
 
     config XIP_MEM_QUOTA
         int "Optional per-module allocation limit in bytes (0: use available heap)"
