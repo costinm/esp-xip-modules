@@ -19,6 +19,7 @@ if [[ $what == abi || $what == all ]]; then
     python3 tests/test_dependencies.py
 fi
 if [[ $what == generated || $what == abi || $what == all ]]; then
+    python3 scripts/check-module-memory.py
     # regenerate and compare: a stale generated file is reported (and left regenerated). gen.sh needs cbindgen and mesh-api-gen
     # (on PATH, both come from the flake); without them the check is skipped, the generated files are committed.
     if command -v cbindgen >/dev/null && command -v mesh-api-gen >/dev/null; then

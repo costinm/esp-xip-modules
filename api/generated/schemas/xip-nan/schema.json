@@ -121,24 +121,6 @@
     },
     {
       "properties": {
-        "duration_ms": {
-          "type": "string",
-          "x-protobuf-index": 1,
-          "x-protobuf-type": "uint"
-        },
-        "method": {
-          "const": "nan.watch"
-        }
-      },
-      "required": [
-        "method"
-      ],
-      "type": "object",
-      "x-component-index": 46,
-      "x-method-index": 7
-    },
-    {
-      "properties": {
         "method": {
           "const": "nan.post"
         },
@@ -295,6 +277,24 @@
       "type": "object",
       "x-component-index": 46,
       "x-method-index": 15
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "nan.tune"
+        },
+        "power": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 16
     }
   ]
 }

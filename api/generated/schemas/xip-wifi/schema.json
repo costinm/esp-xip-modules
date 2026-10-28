@@ -164,6 +164,11 @@
         "method": {
           "const": "wifi.set_tuning"
         },
+        "power": {
+          "type": "integer",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "u8"
+        },
         "rates_11b": {
           "type": "string",
           "x-protobuf-index": 2,

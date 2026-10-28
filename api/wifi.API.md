@@ -209,6 +209,7 @@ The C runtime supports opt-in raw STA UDP6 with `raw_rx=on`; default/off uses so
 | 9 | `tx_dynamic` | `u16` | Dynamic transmit buffers, 4..128. |
 | 10 | `rx_ba` | `u16` | Receive block-ack window, 2..64; the driver limits it by the receive buffers. |
 | 11 | `lr` | [`Switch`](#enum-switch) | Enable Espressif long-range protocol alongside 11b/g/n on the active interfaces. Default: off. Restarts the radio; does not force every transmission to use an LR rate. |
+| 12 | `power` | `u8` | Modem power save override: 0 derives it from the state (`none` with ESP-NOW or without a station, `min` for the plain station), 1 forces `none` (the modem awake) in every state, 2 requests `min` for the plain station. A state with ESP-NOW always forces `none` — ESP-NOW cannot run against a sleeping modem. Applies at the next association. |
 
 ## enum `StaState`
 

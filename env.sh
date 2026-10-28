@@ -30,11 +30,18 @@ if [ -z "$_em_path" ]; then
         [ -d "$_em_d" ] && { _em_path=":$(cd "$_em_d" && pwd)"; break; }
     done
 fi
-export PATH="${XIP_DEV_BIN:+$XIP_DEV_BIN:}/usr/bin:/bin${_em_path}:$PATH"
+_em_cli_bin=""
+[ ! -x "$_em_target/local/dmesh-cli/bin/dmesh-cli" ] || _em_cli_bin="$_em_target/local/dmesh-cli/bin:"
+export PATH="${XIP_DEV_BIN:+$XIP_DEV_BIN:}${_em_cli_bin}/usr/bin:/bin${_em_path}:$PATH"
+unset _em_cli_bin
 unset _em_path _em_d
 # Service catalogs (tools.json per service) for `mesh` and `dmesh-cli`: the dmesh build installs them (flake.nix, dmesh-cli package).
-if [ -z "${MESH_SCHEMA_DIR:-}" ] && [ -d "$_em_target/nix/dmesh/etc/schemas" ]; then
-    export MESH_SCHEMA_DIR="$_em_target/nix/dmesh/etc/schemas"
+if [ -z "${MESH_SCHEMA_DIR:-}" ] || [ "$MESH_SCHEMA_DIR" = "$_em_target/nix/dmesh/etc/schemas" ]; then
+    if [ -d "$_em_target/local/dmesh-cli/etc/schemas" ]; then
+        export MESH_SCHEMA_DIR="$_em_target/local/dmesh-cli/etc/schemas"
+    elif [ -d "$_em_target/nix/dmesh/etc/schemas" ]; then
+        export MESH_SCHEMA_DIR="$_em_target/nix/dmesh/etc/schemas"
+    fi
 fi
 
 # ESP-IDF: installed by scripts/esp-deps.sh. Skipped when a container or an

@@ -206,6 +206,18 @@
 // A switch of [`WifiTuning`]: disabled.
 #define XIP_TUNE_OFF 2
 
+// [`WifiTuning::power`]: derive the modem power save from the radio state —
+// `NONE` with ESP-NOW or no station, `MIN` for the plain station only.
+#define XIP_POWER_DEFAULT 0
+
+// [`WifiTuning::power`]: force the modem awake (`WIFI_PS_NONE`) in every state.
+#define XIP_POWER_NONE 1
+
+// [`WifiTuning::power`]: request modem power save (`WIFI_PS_MIN_MODEM`) for
+// the plain station. A state with ESP-NOW still forces `NONE` — ESP-NOW
+// cannot run against a sleeping modem.
+#define XIP_POWER_MIN 2
+
 // Version of the [`WifiTuner`] table.
 #define XIP_WIFI_TUNING_VERSION 1
 
@@ -277,9 +289,8 @@
 // (IPv6 `ff02::5227`, IPv4 later) here, with their source in the deliver (`call.src`); the module answers with `udp_send` on the socket handle it received on `call.from`.
 #define XIP_PORT_MC 250
 
-// The wire UDP port of the DMesh discovery sweep (the mc socket's bind and the
-// raw ingress classifier). Distinct from XIP_PORT_MC: that is the module
-// registry port the datagrams fan out to, this is the number on the wire.
+// The wire UDP port of the DMesh discovery sweep (the mc socket's bind and the raw ingress classifier). Distinct from `PORT_MC`: that is
+// the module registry port the datagrams fan out to, this is the number on the wire.
 #define XIP_MC_UDP_PORT 5227
 
 // Handle space of a runtime-owned UDP socket: `ADDR_UDP + fd`. Modules never parse it — a
@@ -1565,6 +1576,11 @@ typedef struct {
   uint8_t raw_tx_rate;
   // Espressif long-range protocol alongside 11b/g/n. Default: off.
   uint8_t lr;
+  // Modem power save override: `POWER_DEFAULT` derives it from the state
+  // (`NONE` with ESP-NOW or without a station, `MIN` for the plain
+  // station), `POWER_NONE` forces the modem awake, `POWER_MIN` requests
+  // modem save for the plain station. ESP-NOW always forces `NONE`.
+  uint8_t power;
   // Zero.
   uint8_t reserved;
   // Static receive buffers, 2..64 (the `wl` settings give the boot default).
@@ -2205,7 +2221,7 @@ _Static_assert(sizeof(xip_spi_config) == 44, "xip_spi_config layout");
 _Static_assert(sizeof(xip_dmod_header) == 64, "xip_dmod_header layout");
 _Static_assert(sizeof(xip_wifi_intent) == 216, "xip_wifi_intent layout");
 _Static_assert(sizeof(xip_wifi_state) == 68, "xip_wifi_state layout");
-_Static_assert(sizeof(xip_wifi_tuning) == 20, "xip_wifi_tuning layout");
+_Static_assert(sizeof(xip_wifi_tuning) == 24, "xip_wifi_tuning layout");
 _Static_assert(sizeof(xip_link_info) == 60, "xip_link_info layout");
 _Static_assert(sizeof(xip_wifi_monitor) == 8, "xip_wifi_monitor layout");
 _Static_assert(sizeof(xip_wifi_ap) == 42, "xip_wifi_ap layout");
