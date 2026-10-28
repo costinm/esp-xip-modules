@@ -1,0 +1,42 @@
+{
+  "mod_ble": {
+    "state_bytes": 128,
+    "stack_bytes": 4096
+  },
+  "mod_con": {
+    "state_bytes": 0,
+    "stack_bytes": 8192
+  },
+  "mod_disc": {
+    "state_bytes": 8,
+    "stack_bytes": 8192
+  },
+  "mod_flash": {
+    "state_bytes": 128,
+    "stack_bytes": 12288
+  },
+  "mod_hw": {
+    "state_bytes": 128,
+    "stack_bytes": 3072
+  },
+  "mod_lora": {
+    "state_bytes": 768,
+    "stack_bytes": 6144
+  },
+  "mod_nan": {
+    "state_bytes": 128,
+    "stack_bytes": 12288
+  },
+  "mod_quic": {
+    "state_bytes": 8,
+    "stack_bytes": 32768
+  },
+  "mod_rtest": {
+    "state_bytes": 512,
+    "stack_bytes": 4096
+  },
+  "mod_system": {
+    "state_bytes": 64,
+    "stack_bytes": 4096
+  }
+}
