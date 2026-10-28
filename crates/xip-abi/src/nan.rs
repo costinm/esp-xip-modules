@@ -90,6 +90,51 @@ impl NanTransport {
 }
 const _: () = assert!(core::mem::size_of::<NanTransport>() == 40);
 
+/// Intended radio fine tuning owned by the NAN policy (component 46); 255 means retain a selector.
+/// This is the extension point for the radio settings that do not belong in `transport.set`
+/// (the LoRa frequency and friends move here later); applied through the runtime's
+/// `wifi-tuning` table, so it lives in RAM and survives sleep and resume.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NanTune {
+    /// Modem power save: 0 derive it from the radio state (NONE with ESP-NOW or without a
+    /// station, MIN for the plain station), 1 force NONE, 2 request MIN for the plain station;
+    /// 255 retain. A state with ESP-NOW always forces NONE — ESP-NOW cannot run against a
+    /// sleeping modem.
+    pub power: u8,
+    /// Reserved for the fine tuning that moves here (LoRa frequency and friends); must be zero.
+    pub reserved: [u8; 7],
+}
+impl Default for NanTune {
+    fn default() -> Self { Self { power: 255, reserved: [0; 7] } }
+}
+impl NanTune {
+    /// A `nan.tune` adapter decodes the supported fine-tuning fields before invoking NAN.
+    pub fn decode(fields: &[u8]) -> Result<Self, i32> {
+        let mut r = Self::default();
+        let mut reader = cbor::Reader::new(fields);
+        let Some(cbor::Item::Map(n)) = reader.next() else { return Err(ERR_ARG) };
+        if n == 0 { return Err(ERR_ARG); }
+        for _ in 0..n {
+            let Some(cbor::Item::Uint(tag)) = reader.next() else { return Err(ERR_ARG) };
+            if !matches!(tag, 1) { return Err(ERR_UNSUPPORTED); }
+            if !reader.skip() { return Err(ERR_ARG); }
+        }
+        if !reader.rest().is_empty() { return Err(ERR_ARG); }
+        if let Some(v) = cbor::get_int(fields, 1).map_err(|_| ERR_ARG)? {
+            r.power = u8::try_from(v).map_err(|_| ERR_ARG)?;
+        }
+        r.validate()?;
+        Ok(r)
+    }
+    /// Native callers validate the complete selection before any driver changes.
+    pub fn validate(&self) -> Result<(), i32> {
+        if !matches!(self.power, 0 | 1 | 2 | 255) || self.reserved != [0; 7] { return Err(ERR_ARG); }
+        Ok(())
+    }
+}
+const _: () = assert!(core::mem::size_of::<NanTune>() == 8);
+
 /// Native serial mechanisms used by the coordinated transport owner.
 #[repr(C)]
 pub struct Serial {

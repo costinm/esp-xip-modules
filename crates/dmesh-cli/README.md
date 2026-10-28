@@ -6,6 +6,16 @@ examples, DEVICE is the name of a device record, OBSERVER is a reachable
 device that can observe NAN, and SERIAL is a local /dev/serial/by-id/... path.
 Use your own names and addresses; the examples are syntax, not lab targets.
 
+To use the current checkout's CLI and matching catalogs:
+
+```sh
+. ./env.sh
+scripts/build-cli.sh
+```
+
+`dmesh-cli` then uses the local build on the project PATH. Add `--release` for
+an optimized build.
+
 UART and BLE are intended for companion devices that add radios or protocols
 to a Linux host or Android device. UART also provides local boot logs and
 repair diagnostics. UART remains a normal QUIC-lite packet transport for
@@ -37,14 +47,13 @@ dmesh-cli SERIAL status
 An IPv6 link-local address needs its interface scope, such as %wlan0. A
 node name with a scoped Wi-Fi address tries it first and checks the signed
 identity. If that fails, the CLI uses discovery and NAN activation. A node
-VIP6 selects an identity; it is not a directly routable UDP address. See the
-[example node records](examples/nodes). A device record
+VIP6 selects an identity; it is not a directly routable UDP address. A device record
 (`dmesh_server::device_record::DeviceRecord`, one TOML file per device, the same files lmesh and
 Android write) holds the long-lived facts about a device and, when there is one, its secret.
-The CLI reads `DMESH_NODES_DIR` / `DMESH_PAIRED_DEVICES_DIR`, or else `~/.config/dmesh/nodes`
-and then the tracked examples; `dmesh-cli devices sync` records the devices that answer
+The CLI reads `DMESH_NODES_DIR` / `DMESH_PAIRED_DEVICES_DIR`, or else `~/.config/dmesh/nodes`;
+`dmesh-cli devices sync` records the devices that answer
 discovery. Secrets and the control-plane root live only in the private first directory (0700,
-files 0600), never in the tracked examples. Hardware tests must restore and release acquired peers so later runs can
+files 0600). Hardware tests must restore and release acquired peers so later runs can
 select them reproducibly.
 
 ## Native module console
@@ -73,7 +82,7 @@ The old text console command path is removed. See [module troubleshooting](../..
 ## Find and inspect devices
 
 ~~~sh
-dmesh-cli discover                     # Collect signed announcements and observer inventories.
+dmesh-cli discover                     # Collect multicast announcements and live NAN/NOW replies.
 dmesh-cli devices check                # Compare catalog VIP6 identities with visible peers.
 dmesh-cli devices backfill --dry-run   # Preview VIP6 values from signed discovery.
 dmesh-cli devices backfill             # Write matching VIP6 values to the catalog.
@@ -83,10 +92,25 @@ dmesh-cli DEVICE status                # Read service status.
 dmesh-cli DEVICE firmware.identity     # Read firmware identity after a boot or update.
 ~~~
 
-discover asks reachable observers for active discovery, waits for a NAN
-discovery window, and prints their observations. devices backfill modifies the
-selected catalog unless --dry-run is given. A direct check confirms discovery;
-firmware.identity and status provide application evidence.
+`discover` opens a five-second `discovery.nodes` stream on each reachable
+observer. The observer requests active discovery after registering the stream. It prints one latest announcement per
+observer, radio MAC and bearer, with the remaining announcement fields:
+
+```text
+reporter=918bab88305f78ad vip=9569f6488e61d2ac mac=74:19:f8:17:de:65 via=nan rssi_dbm=-38 authenticated=true ...
+```
+
+`reporter` identifies the device that heard the reply; `vip` and `mac` identify
+the discovered device. VIPs are the low eight bytes as 16 hex digits.
+Multicast replies use the same layout with the responder as reporter.
+`?` means the identifier was unavailable. Unsigned identity hints are marked
+`authenticated=false`; invalid signatures cannot supply a verified VIP.
+Association failures keep the target VIP/MAC and `status=association_failed`.
+Unavailable observation services report an error alongside the reporter identity.
+
+`devices backfill` modifies the selected catalog unless `--dry-run` is given.
+A direct check confirms discovery; `firmware.identity` and `status` provide
+application evidence.
 
 ## Wake a sleeping device
 
@@ -282,3 +306,19 @@ For QUIC probe counters, add `--stats`; the host emits a structured snapshot
 before closing the association. Optional ESP recording is controlled through
 `quic.stats --enabled=true`, read with `quic.stats`, and freed with
 `quic.stats --enabled=false`. See [probe commands](../../notes/docs/probes.md).
+
+
+`discovery.nodes` on C Main/NAN collects a five-second live CBOR observation
+sequence, with an eight-second default client timeout. The stream triggers
+active discovery after registering and retains no device inventory. Host
+inventory/wake discovery decodes each original announcement and checks its
+signature before using a node identity; invalid or unsigned records remain
+radio facts only. Older observer inventory responses remain readable. See the
+[NAN stream contract](../../modules/mod_nan/API.md#discovery-observation-stream-component-6-method-9).
+
+
+`discovery.nodes --duration_ms=0` reads retained records only on Linux/Android.
+`--retained=false` requests only fresh observations; `--active=false` listens
+without soliciting a discovery pass. ESP has no retained inventory. Both hosts
+and ESP return original announcement bytes with optional last-seen, age and
+direct/crawled metadata; the CLI verifies signatures and labels unsigned records.

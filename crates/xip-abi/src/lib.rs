@@ -630,7 +630,7 @@ macro_rules! export_module {
 }
 
 mod nan;
-pub use nan::{NanTransport, Serial};
+pub use nan::{NanTune, NanTransport, Serial};
 mod nan_vtable;
 pub use nan_vtable::Nan;
 mod lora_vtable;

@@ -24,6 +24,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "discover.rs"]
+mod discover;
+
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn fresh_request_id() -> u64 {
@@ -424,8 +427,8 @@ fn run_serial_stream_command(arguments: &[String]) -> Result<(), String> {
         );
         return Ok(());
     }
+    if !timeout_explicit { timeout = stream_request_timeout(&body)?; }
     let repeat_arguments = service_arguments.clone();
-    let schema = load_tagged_schema();
     let _last_response = runtime.block_on(crate::node_client::request_uart_monitor(
         path,
         baud,
@@ -441,7 +444,7 @@ fn run_serial_stream_command(arguments: &[String]) -> Result<(), String> {
                 "dmesh_cli_stream_command target={} fin=true bytes={} {}",
                 path,
                 response.bytes.len(),
-                render_device_record(&schema, &response.bytes),
+                render_stream_response(&body, &response.bytes),
             );
         },
     ))?;
@@ -787,7 +790,7 @@ fn run_tcp_service_client(arguments: &[String]) -> Result<(), String> {
                 let response = dmesh_server::stream_client::exchange(&mut stream, &[&request]).await
                     .map_err(|e| e.to_string())?;
                 println!("dmesh_cli_stream_command target={peer} fin=true bytes={} elapsed_us={} {}",
-                    response.len(), started.elapsed().as_micros(), render_device_record(&load_tagged_schema(), &response));
+                    response.len(), started.elapsed().as_micros(), render_stream_response(&request, &response));
             }
             Ok(())
         }).await.map_err(|_| format!("TCP stream timed out after {timeout:?}"))?
@@ -903,7 +906,7 @@ fn run_udp_service_client_inner(arguments: &[String]) -> Result<(), String> {
         "dmesh_cli_stream_command target={peer} fin=true bytes={} elapsed_us={} {}",
         response.len(),
         started.elapsed().as_micros(),
-        render_device_record(&load_tagged_schema(), &response),
+        render_stream_response(&request, &response),
     );
     Ok(())
 }
@@ -986,8 +989,27 @@ fn split_uart_bearer_arguments(
     Ok((retained, uart_path, uart_baud))
 }
 
+fn render_stream_response(request: &[u8], response: &[u8]) -> String {
+    let discovery = dmesh_server::tagged::decode(request).is_some_and(|r|
+        r.component == Some(dmesh_server::tagged::Name::Tag(6))
+            && r.method == Some(dmesh_server::tagged::Name::Tag(9)));
+    if discovery {
+        return match observed_nodes(response) {
+            Some(nodes) if nodes.is_empty() => "observations=0".into(),
+            Some(nodes) => nodes.into_iter().map(|n| n.fields).collect::<Vec<_>>().join("\n"),
+            None => "result=invalid_discovery_nodes".into(),
+        };
+    }
+    render_device_record(&load_tagged_schema(), response)
+}
+
 fn stream_request_timeout(request: &[u8]) -> Result<Duration, String> {
     let record = dmesh_server::tagged::decode(request).ok_or("invalid tagged request")?;
+    if record.component == Some(dmesh_server::tagged::Name::Tag(6))
+        && record.method == Some(dmesh_server::tagged::Name::Tag(9)) {
+        let options=dmesh_server::discovery_nodes::Options::decode(record.fields).ok_or("invalid discovery.nodes options")?;
+        return Ok(Duration::from_millis(options.duration_ms as u64+3000));
+    }
     Ok(dmesh_server::probe::decode_probe_start_record(record)
         .map(|(_, request)| probe_request_timeout(request.total_bytes()))
         .unwrap_or_else(|| Duration::from_secs(3)))
@@ -1103,25 +1125,28 @@ fn run_catalog_target_service(arguments: &[String], profile: &DeviceProfile) -> 
             command_arguments.push(baud.to_string());
         }
     }
+    let identity = discover::profile_prefix(profile);
     if let Some(peer) = catalog_udp6_peer(profile)? {
         match direct_discovery_announce(peer) {
             Ok((_, announce)) if catalog_profile_matches_announce(profile, &announce) => {
-                println!("dmesh_catalog_udp6_association name={name} peer={peer} associated=true");
+                println!("{identity} status=associated name={name} endpoint={peer}");
                 let mut udp_arguments = command_arguments;
                 udp_arguments[0] = format!("udp://{peer}");
-                return run_udp_service_client(&udp_arguments);
+                return run_udp_service_client(&udp_arguments).map_err(|error| {
+                    discover::association_error(&identity, peer, error)
+                });
             }
             Ok((_, announce)) => println!(
-                "dmesh_catalog_udp6_association name={name} peer={peer} associated=false reason=identity_mismatch node={}",
-                hex_encode(announce.device_id())
+                "{identity} status=association_failed name={name} endpoint={peer} reason=identity_mismatch received_vip={}",
+                discover::vip(&announce)
             ),
             Err(error) => println!(
-                "dmesh_catalog_udp6_association name={name} peer={peer} associated=false error={error}"
+                "{identity} status=association_failed name={name} endpoint={peer} error={error:?}"
             ),
         }
     } else if profile.ipv6_link_local.is_some() {
         println!(
-            "dmesh_catalog_udp6_association name={name} associated=false reason=missing_udp6_iface"
+            "{identity} status=association_failed name={name} reason=missing_udp6_iface"
         );
     }
 
@@ -1262,20 +1287,12 @@ pub(crate) fn discover_and_nan_activate(
         return Ok((peer.peer, peer.announce));
     }
 
-    for peer in &peers {
-        if peer.passive_ready {
-            let request = encode_stream_command_with_id("discovery.active", fresh_request_id())
-                .map_err(|error| error.to_string())?;
-            let _ = exchange_udp_stream_record(peer.peer, &request);
-        }
-    }
-    std::thread::sleep(Duration::from_secs(5));
     let mut observations = Vec::new();
     for peer in &peers {
         observations.push((peer.peer, peer.passive_ready, None, None));
         let request = encode_stream_command_with_id("discovery.nodes", fresh_request_id())
             .map_err(|error| error.to_string())?;
-        let Ok(response) = exchange_udp_stream_record(peer.peer, &request) else {
+        let Ok(response) = exchange_discovery_nodes(peer.peer, &request) else {
             continue;
         };
         let Some(nodes) = observed_nodes(&response) else {
@@ -1488,59 +1505,7 @@ fn run_devices_sync(dry_run: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Ask every directly reachable inventory node for a fresh discovery reply,
-/// wait one DW8 interval plus margin, then collect each observer's local
-/// `discovery.nodes` cache.  Every line describes one node; direct replies
-/// are self reports without `visible_from`, observer cache rows carry the
-/// single `visible_from` nodeID, and receiver-side facts keep one row per
-/// (node, observer) pair because they differ per observer.
-fn run_hosts_discovery() -> Result<(), String> {
-    let reachable = multicast_discover_peers()?;
-    if reachable.is_empty() {
-        return Err("no peer answered UDP6 multicast discovery".into());
-    }
-    // Each observer owns different local media. Ask every reachable one to
-    // run its common active pass (UDP, NAN, NOW where available), then allow
-    // the sleepy-device DW and Android's temporary Aware Subscribe to report
-    // before reading any observer cache.
-    for discovered in &reachable {
-        if !discovered.passive_ready {
-            continue;
-        }
-        let request = encode_stream_command_with_id("discovery.active", fresh_request_id())
-            .map_err(|error| format!("encode discovery.active: {error}"))?;
-        let _ = exchange_udp_stream_record(discovered.peer, &request);
-    }
-    std::thread::sleep(Duration::from_secs(5));
-    let mut rows = Vec::<(String, String, String)>::new();
-    for discovered in &reachable {
-        let peer = discovered.peer;
-        let observer = discovered.node.clone();
-        let request = encode_stream_command_with_id("discovery.nodes", fresh_request_id())
-            .map_err(|error| format!("encode discovery.nodes: {error}"))?;
-        match exchange_udp_stream_record(peer, &request) {
-            Ok(response) => match observed_nodes(&response) {
-                Some(nodes) => {
-                    for entry in nodes {
-                        rows.push((entry.node, observer.clone(), entry.fields));
-                    }
-                }
-                None => println!("observer={observer} result=invalid_discovery_nodes"),
-            },
-            Err(error) => println!("observer={observer} error={error}"),
-        }
-    }
-    rows.sort();
-    for (node, observer, fields) in rows {
-        let node_field = if node.is_empty() {
-            String::new()
-        } else {
-            format!("node={node} ")
-        };
-        println!("{node_field}{fields} visible_from={observer}");
-    }
-    Ok(())
-}
+fn run_hosts_discovery() -> Result<(), String> { discover::run() }
 
 pub(crate) fn device_target_matches(peer: &DiscoveredPeer, target: &DeviceTarget) -> bool {
     device_target_matches_announce(&peer.announce, target)
@@ -1610,11 +1575,6 @@ pub(crate) struct DiscoveredPeer {
 /// names. The virtual IPv6 identity replaces the raw public key/signature.
 fn announce_log_fields(announce: &announce::Announce) -> Vec<String> {
     let mut fields = Vec::new();
-    if announce.has_identity() {
-        if let Some(vip) = announce::virtual_ip6(announce.public_key()) {
-            fields.push(format!("vip6={}", Ipv6Addr::from(vip)));
-        }
-    }
     fields.push(format!("kind={}", announce.kind));
     fields.push(format!("uptime_secs={}", announce.uptime_secs));
     if announce.device_class != announce::DEVICE_CLASS_UNKNOWN {
@@ -1637,13 +1597,13 @@ fn announce_log_fields(announce: &announce::Announce) -> Vec<String> {
         fields.push("recovery=true".to_owned());
     }
     if let Some(name) = announce.device_name() {
-        fields.push(format!("device_name={name}"));
+        fields.push(format!("device_name={name:?}"));
     }
     if let Some(domain) = announce.device_domain() {
-        fields.push(format!("device_domain={domain}"));
+        fields.push(format!("device_domain={domain:?}"));
     }
     if let Some(name) = announce.network_name() {
-        fields.push(format!("network_name={name}"));
+        fields.push(format!("network_name={name:?}"));
     }
     if announce.wifi_channel != 0 {
         fields.push(format!("wifi_channel={}", announce.wifi_channel));
@@ -1674,25 +1634,7 @@ pub(crate) fn multicast_discover_peers() -> Result<Vec<DiscoveredPeer>, String> 
                 } else {
                     node_id.clone()
                 };
-                let mut line = vec![format!("peer={}", entry.peer)];
-                if !node_id.is_empty() {
-                    line.insert(0, format!("node={node_id}"));
-                }
-                line.extend(announce_log_fields(&entry.announce));
-                if let Some(facts) = entry.facts {
-                    if let Some(suffix) = facts.nan_cluster_suffix {
-                        line.push(format!("nan_cluster_suffix={}", hex_encode(&suffix)));
-                    }
-                    line.push(format!(
-                        "nan_service_observations={}",
-                        facts.nan_service_observations
-                    ));
-                    line.push(format!("nan_visible_nodes={}", facts.nan_visible_nodes));
-                }
-                if !passive_ready {
-                    line.push("passive_ready=false".to_owned());
-                }
-                println!("{}", line.join(" "));
+                println!("{}", discover::multicast_line(&entry.announce, entry.peer));
                 DiscoveredPeer {
                     peer: entry.peer,
                     node,
@@ -1711,15 +1653,27 @@ pub(crate) fn multicast_discover_peers() -> Result<Vec<DiscoveredPeer>, String> 
 /// remaining observation fact with its CBOR schema name, in wire order.
 struct ObservedNode {
     node: String,
+    display_key: String,
     peer_mac: Option<[u8; 6]>,
+    bearer: String,
     fields: String,
 }
 
-/// Decode the full bounded observation cache. The caller retains observer
+/// Decode live observations or an older inventory response, retaining observer
 /// provenance rather than pretending that a controller-local observation is
 /// global mesh truth; receiver-side facts differ per observer and must not
 /// be averaged together.
 fn observed_nodes(response: &[u8]) -> Option<Vec<ObservedNode>> {
+    let mut first=minicbor::Decoder::new(response);
+    if first.skip().is_ok() && dmesh_server::tagged::decode(&response[..first.position()]).is_some_and(dmesh_server::discovery_nodes::is_header) {
+        return discover::decode_nodes("?",response).ok();
+    }
+    if minicbor::Decoder::new(response).map().ok() == Some(Some(7))
+        || response == [0xa1, 0, 0]
+    {
+        return live_observed_nodes(response);
+    }
+    // Older observers still return a bounded inventory response.
     dmesh_server::announce::decode_devices_observed_response(response).map(|devices| {
         devices
             .into_iter()
@@ -1753,12 +1707,65 @@ fn observed_nodes(response: &[u8]) -> Option<Vec<ObservedNode>> {
                 fields.push(format!("unavailable_fields={}", device.unavailable_fields));
                 ObservedNode {
                     node: hex_encode(&device.device_id),
+                    display_key: hex_encode(&device.device_id),
                     peer_mac: device.peer,
+                    bearer: device.bearer.clone().unwrap_or_default(),
                     fields: fields.join(" "),
                 }
             })
             .collect()
     })
+}
+
+/// Decode the live CBOR sequence only after its terminal item arrives. The
+/// observer supplies radio facts; identity is promoted only after verification
+/// of the original signed announcement, never from the observer's assertion.
+fn live_observed_nodes(response: &[u8]) -> Option<Vec<ObservedNode>> {
+    let mut d = minicbor::Decoder::new(response);
+    let mut nodes = Vec::new();
+    loop {
+        let count = d.map().ok()??;
+        if d.u8().ok()? != 0 { return None; }
+        match d.u8().ok()? {
+            0 if count == 1 => return (d.position() == response.len()).then_some(nodes),
+            1 if count == 7 => {}
+            _ => return None,
+        }
+        if d.u8().ok()? != 1 { return None; }
+        let peer: [u8; 6] = d.bytes().ok()?.try_into().ok()?;
+        if d.u8().ok()? != 2 { return None; }
+        let rssi = d.i16().ok()?;
+        if d.u8().ok()? != 3 { return None; }
+        let channel = d.u8().ok()?;
+        if d.u8().ok()? != 4 { return None; }
+        let received_us = d.u64().ok()?;
+        if d.u8().ok()? != 5 { return None; }
+        let via_now = d.bool().ok()?;
+        if d.u8().ok()? != 6 { return None; }
+        let payload = d.bytes().ok()?;
+        let verified = dmesh_server::tagged::decode(payload)
+            .and_then(announce::decode_record)
+            .filter(|a| a.has_identity() && announce::verify_identity(*a));
+        let mut fields = vec![format!("peer={} channel={channel} rssi_dbm={rssi} received_us={received_us} bearer={} authenticated={}",
+            mac_encode(&peer), if via_now { "now" } else { "nan" }, verified.is_some())];
+        if let Some(a) = verified.as_ref() {
+            if let Some(name) = a.device_name() { fields.push(format!("name={name}")); }
+        }
+        nodes.push(ObservedNode {
+            node: verified.map(|a| hex_encode(a.device_id())).unwrap_or_default(),
+            display_key: verified.map(|a| hex_encode(a.device_id())).unwrap_or_default(),
+            peer_mac: Some(peer),
+            bearer: if via_now {"now"}else{"nan"}.into(),
+            fields: fields.join(" "),
+        });
+    }
+}
+
+fn exchange_discovery_nodes(peer: SocketAddr, record: &[u8]) -> Result<Vec<u8>, String> {
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    runtime.block_on(crate::node_client::request_udp(
+        udp_bind_for_peer(peer), peer, record, Duration::from_secs(8),
+    )).map(|response| response.bytes)
 }
 
 /// Exchange one direct record from the fixed dmesh-cli UDP source port.
@@ -1975,5 +1982,68 @@ mod native_uart_routing_tests {
             ("udp://[::1]:3339",true),("tcp://host:5226",false),("http://host:18480",false)] {
             assert_eq!(super::native_control_command(&[target.into(),"wifi.status".into()]),expected,"{target}");
         }
+    }
+}
+
+#[cfg(test)]
+mod live_observation_tests {
+    use super::*;
+    use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+    use sha2::{Digest, Sha256};
+
+    pub(super) fn signed_announcement() -> (Vec<u8>, Vec<u8>) {
+        let key = SigningKey::from_slice(&[7;32]).unwrap();
+        let public = key.verifying_key().to_sec1_point(true);
+        let digest = Sha256::digest(public.as_bytes());
+        let id: [u8;16] = digest[..16].try_into().unwrap();
+        let mut a = announce::Announce::discovery(id, 8, 0);
+        assert!(a.set_public_key(public.as_bytes()));
+        let mut bytes = [0;512];
+        let n = announce::signing_bytes(a, &mut bytes).unwrap();
+        let signature: Signature = key.sign(&bytes[..n]);
+        assert!(a.set_signature(&signature.to_bytes()));
+        let n = announce::encode(a, &mut bytes).unwrap();
+        (bytes[..n].to_vec(), a.device_id().to_vec())
+    }
+    fn sequence(payload: &[u8]) -> Vec<u8> {
+        let mut e = minicbor::Encoder::new(Vec::new());
+        e.map(7).unwrap().u8(0).unwrap().u8(1).unwrap()
+            .u8(1).unwrap().bytes(&[2;6]).unwrap()
+            .u8(2).unwrap().i8(-43).unwrap().u8(3).unwrap().u8(6).unwrap()
+            .u8(4).unwrap().u64(100).unwrap().u8(5).unwrap().bool(false).unwrap()
+            .u8(6).unwrap().bytes(payload).unwrap();
+        e.map(1).unwrap().u8(0).unwrap().u8(0).unwrap();
+        e.into_writer()
+    }
+    #[test]
+    fn live_sequence_verifies_original_signature_and_rejects_truncation() {
+        let (mut payload, id) = signed_announcement();
+        let wire = sequence(&payload);
+        let nodes = observed_nodes(&wire).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node, hex_encode(&id));
+        assert!(nodes[0].fields.contains("authenticated=true"));
+        assert!(nodes[0].fields.contains("rssi_dbm=-43"));
+        for n in 0..wire.len() { assert!(live_observed_nodes(&wire[..n]).is_none()); }
+        let mut trailing = wire.clone(); trailing.push(0);
+        assert!(live_observed_nodes(&trailing).is_none());
+        // Corrupt only the signature's last byte; no observer-provided identity
+        // or name is promoted when verification fails.
+        let signature = announce::decode_announce(&payload).unwrap();
+        let at = payload.windows(signature.signature().len())
+            .position(|b| b == signature.signature()).unwrap();
+        payload[at] ^= 1;
+        let nodes = observed_nodes(&sequence(&payload)).unwrap();
+        assert!(nodes[0].node.is_empty());
+        assert!(nodes[0].fields.contains("authenticated=false"));
+    }
+    #[test]
+    fn empty_window_and_unidentified_radio_observations_are_explicit() {
+        assert!(observed_nodes(&[0xa1,0,0]).unwrap().is_empty());
+        let nodes = observed_nodes(&sequence(b"opaque subscription")).unwrap();
+        assert!(nodes[0].node.is_empty());
+        assert_eq!(nodes[0].peer_mac, Some([2;6]));
+        let request = [0xa4,1,6,2,9,3,1,5,0xa0];
+        assert_eq!(stream_request_timeout(&request).unwrap(), Duration::from_secs(8));
     }
 }

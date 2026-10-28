@@ -5,3 +5,10 @@
 [workspace]
 members = ["xip-abi", "xip-runtime-esp", "xip-runtime-host", "dmesh-cli"]
 resolver = "2"
+
+# Local cross-repository protocol development; refresh Git pins after publication.
+[patch."https://github.com/costinm/dmesh"]
+dmesh-server = { path = "../../dmesh/crates/dmesh-server" }
+quic-lite = { path = "../../dmesh/crates/quic-lite" }
+uart-codec = { path = "../../dmesh/crates/uart-codec" }
+dmesh-rawnan = { path = "../../dmesh/crates/rawnan" }

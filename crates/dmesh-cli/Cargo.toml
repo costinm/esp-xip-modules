@@ -27,5 +27,7 @@ serde_json = "1.0"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+dmesh-discovery = { path = "../../../dmesh/crates/dmesh-discovery" }
+p256 = { version = "=0.14.0-rc.7", features = ["ecdsa"] }
 tokio = { version = "1", features = ["time"] }
 tempfile = "3"

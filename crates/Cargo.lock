@@ -572,12 +572,14 @@ name = "dmesh-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dmesh-discovery",
  "dmesh-rawnan",
  "dmesh-server",
  "glob",
  "libc",
  "mesh",
  "minicbor",
+ "p256 0.14.0-rc.7",
  "quic-lite",
  "serde",
  "serde_json",
@@ -590,9 +592,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dmesh-discovery"
+version = "0.1.0"
+dependencies = [
+ "dmesh-server",
+ "libc",
+ "p256 0.14.0-rc.7",
+ "serde_json",
+ "sha2",
+ "tracing",
+]
+
+[[package]]
 name = "dmesh-rawnan"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=ab109bf1836bbe1be117b859f60ac90ec3cb9010#ab109bf1836bbe1be117b859f60ac90ec3cb9010"
 dependencies = [
  "anyhow",
 ]
@@ -600,7 +613,6 @@ dependencies = [
 [[package]]
 name = "dmesh-server"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=ab109bf1836bbe1be117b859f60ac90ec3cb9010#ab109bf1836bbe1be117b859f60ac90ec3cb9010"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1389,7 +1401,6 @@ dependencies = [
 [[package]]
 name = "quic-lite"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=ab109bf1836bbe1be117b859f60ac90ec3cb9010#ab109bf1836bbe1be117b859f60ac90ec3cb9010"
 dependencies = [
  "libc",
  "smallvec",
@@ -2083,7 +2094,6 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "uart-codec"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=ab109bf1836bbe1be117b859f60ac90ec3cb9010#ab109bf1836bbe1be117b859f60ac90ec3cb9010"
 dependencies = [
  "libc",
  "mesh-api",

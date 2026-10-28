@@ -18,7 +18,7 @@ _Static_assert(sizeof(xip_spi_config) == 44, "xip_spi_config layout");
 _Static_assert(sizeof(xip_dmod_header) == 64, "xip_dmod_header layout");
 _Static_assert(sizeof(xip_wifi_intent) == 216, "xip_wifi_intent layout");
 _Static_assert(sizeof(xip_wifi_state) == 68, "xip_wifi_state layout");
-_Static_assert(sizeof(xip_wifi_tuning) == 20, "xip_wifi_tuning layout");
+_Static_assert(sizeof(xip_wifi_tuning) == 24, "xip_wifi_tuning layout");
 _Static_assert(sizeof(xip_link_info) == 60, "xip_link_info layout");
 _Static_assert(sizeof(xip_wifi_monitor) == 8, "xip_wifi_monitor layout");
 _Static_assert(sizeof(xip_wifi_ap) == 42, "xip_wifi_ap layout");

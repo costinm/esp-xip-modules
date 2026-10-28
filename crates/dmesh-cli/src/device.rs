@@ -8,19 +8,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Tracked lab fixture, read after the operator's own records.
-pub const DEFAULT_NODES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/nodes");
 pub const DEFAULT_UDP_PORT: u16 = 3339;
 
 /// The CLI's device records: `DMESH_NODES_DIR` / `DMESH_PAIRED_DEVICES_DIR` when set, else the
-/// user's `~/.config/dmesh/nodes` followed by the tracked fixture. The first directory is written.
+/// user's `~/.config/dmesh/nodes`. The first directory is written.
 pub fn store() -> DeviceStore {
-    if std::env::var_os(DeviceStore::NODES_ENV).is_some()
-        || std::env::var_os(DeviceStore::PAIRED_ENV).is_some()
-    {
-        return DeviceStore::from_env(None);
-    }
-    DeviceStore::from_env(None).also_read(DEFAULT_NODES_DIR)
+    DeviceStore::from_env(None)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

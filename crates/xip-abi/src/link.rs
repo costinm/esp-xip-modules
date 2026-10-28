@@ -107,6 +107,9 @@ pub const PORT_QUIC_ENDPOINT: u32 = 0xf4;
 /// Multicast port: bound by a module's manifest (key 9), the runtime's discovery UDP port delivers datagrams of the DMesh discovery group
 /// (IPv6 `ff02::5227`, IPv4 later) here, with their source in the deliver (`call.src`); the module answers with `udp_send` on the socket handle it received on `call.from`.
 pub const PORT_MC: u32 = 0xfa;
+/// The wire UDP port of the DMesh discovery sweep (the mc socket's bind and the raw ingress classifier). Distinct from `PORT_MC`: that is
+/// the module registry port the datagrams fan out to, this is the number on the wire.
+pub const MC_UDP_PORT: u32 = 5227;
 /// Handle space of a runtime-owned UDP socket: `ADDR_UDP + fd`. Modules never parse it — a
 /// datagram receive carries it on `call.from`, and a module sends with `udp_send` back on it.
 pub const ADDR_UDP: u32 = 0x60000000;

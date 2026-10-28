@@ -301,6 +301,16 @@ pub const TUNE_ON: u8 = 1;
 /// A switch of [`WifiTuning`]: disabled.
 pub const TUNE_OFF: u8 = 2;
 
+/// [`WifiTuning::power`]: derive the modem power save from the radio state —
+/// `NONE` with ESP-NOW or no station, `MIN` for the plain station only.
+pub const POWER_DEFAULT: u8 = 0;
+/// [`WifiTuning::power`]: force the modem awake (`WIFI_PS_NONE`) in every state.
+pub const POWER_NONE: u8 = 1;
+/// [`WifiTuning::power`]: request modem power save (`WIFI_PS_MIN_MODEM`) for
+/// the plain station. A state with ESP-NOW still forces `NONE` — ESP-NOW
+/// cannot run against a sleeping modem.
+pub const POWER_MIN: u8 = 2;
+
 /// Version of the [`WifiTuner`] table.
 pub const WIFI_TUNING_VERSION: u32 = 1;
 
@@ -327,6 +337,11 @@ pub struct WifiTuning {
     pub raw_tx_rate: u8,
     /// Espressif long-range protocol alongside 11b/g/n. Default: off.
     pub lr: u8,
+    /// Modem power save override: `POWER_DEFAULT` derives it from the state
+    /// (`NONE` with ESP-NOW or without a station, `MIN` for the plain
+    /// station), `POWER_NONE` forces the modem awake, `POWER_MIN` requests
+    /// modem save for the plain station. ESP-NOW always forces `NONE`.
+    pub power: u8,
     /// Zero.
     pub reserved: u8,
     /// Static receive buffers, 2..64 (the `wl` settings give the boot default).
@@ -345,14 +360,15 @@ impl Default for WifiTuning {
         t
     }
 }
-const _: () = assert!(core::mem::size_of::<WifiTuning>() == 20);
+const _: () = assert!(core::mem::size_of::<WifiTuning>() == 24);
 
 impl WifiTuning {
-    /// `ERR_ARG` for a switch above `TUNE_OFF`, a buffer size out of range, or a `size` too small.
+    /// `ERR_ARG` for a switch above `TUNE_OFF`, a power mode above `POWER_MIN`, a buffer size out of range, or a `size` too small.
     pub fn validate(&self) -> Result<(), i32> {
         let ok = |v: u16, lo: u16, hi: u16| v == 0 || (lo..=hi).contains(&v);
         if (self.size as usize) < core::mem::size_of::<WifiTuning>()
             || [self.ampdu, self.rates_11b, self.raw_rx, self.driver_tx, self.bssid_check, self.lr].iter().any(|v| *v > TUNE_OFF)
+            || self.power > POWER_MIN
             || !(ok(self.rx_static, 2, 64) && ok(self.rx_dynamic, 2, 128) && ok(self.tx_dynamic, 4, 128) && ok(self.rx_ba, 2, 64)) {
             return Err(crate::ERR_ARG);
         }

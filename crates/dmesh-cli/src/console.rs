@@ -371,6 +371,21 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn set_tuning_encodes_power_as_a_number() {
+        let req=request(&["wifi.set_tuning".into(),"--power=2".into()],7).unwrap();
+        let v=decode(&req.bytes).unwrap();
+        println!("set_tuning wire: {}", serde_json::to_string(&v).unwrap());
+        assert_eq!(v["5"]["12"], 2, "power must arrive as numeric tag 12");
+        let req=request(&["wifi.set_tuning".into(),"--power=1".into(),"--rx_ba=9".into(),"--lr=1".into()],8).unwrap();
+        let v=decode(&req.bytes).unwrap();
+        println!("combined wire: {}", serde_json::to_string(&v).unwrap());
+        let req=request(&["nan.tune".into(),"--power=2".into()],9).unwrap();
+        let v=decode(&req.bytes).unwrap();
+        println!("nan.tune wire: {}", serde_json::to_string(&v).unwrap());
+        assert_eq!(v["1"], 46);
+        assert_eq!(v["2"], 16);
+    }
+    #[test]
     fn native_wifi_preserves_numeric_strings_and_boolean_intent() {
         let req=request(&["wifi.set".into(),"--radio=true".into(),
             "--sta=true".into(),"--now=false".into(),"--sta_ssid=00123".into(),
