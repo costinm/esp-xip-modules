@@ -8,13 +8,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dmod  # noqa: E402
 import mkmod  # noqa: E402
-import flash_upload  # noqa: E402
 
 
 def read(*path):
@@ -75,7 +75,7 @@ class Dmod(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             for text in ("a 1\nb 1\n", "a 1\na 2\n", "a 16\n", "a\n"):
                 path = os.path.join(d, "SLOTS")
-                open(path, "w").write(text)
+                Path(path).write_text(text)
                 with self.assertRaises(ValueError):
                     mkmod.read_slots(path)
 
@@ -153,7 +153,7 @@ class Slots(unittest.TestCase):
 class Packages(unittest.TestCase):
     """The package format of the upload port (docs/development.md, "Formats"): key (65) | signature (64) | header (216) | block table | image.
     The committed vectors were made once by the frozen loader tools; mod_flash's own tests verify and install them."""
-    DATA = os.path.join(ROOT, "tests", "data")
+    DATA = os.path.join(ROOT, "modules", "mod_flash", "tests", "data")
 
     def parts(self, pkg):
         key, sig, header = pkg[:65], pkg[65:129], pkg[129:345]
@@ -170,17 +170,12 @@ class Packages(unittest.TestCase):
         return key, sig, header[84], header[88:88 + header[84]], target, version, image
 
     def test_vectors_of_the_signed_package(self):
-        key, sig, _, name, target, version, image = self.parts(open(os.path.join(self.DATA, "module-lora-esp32c6.pkg"), "rb").read())
+        key, sig, _, name, target, version, image = self.parts(Path(self.DATA, "module-lora-esp32c6.pkg").read_bytes())
         self.assertEqual((key[0], name, target), (4, b"lora", 4))
         self.assertNotEqual(sig, bytes(64))
-        _, _, _, _, target, version, image = self.parts(open(os.path.join(self.DATA, "loader-esp32c6.pkg"), "rb").read())
+        _, _, _, _, target, version, image = self.parts(Path(self.DATA, "loader-esp32c6.pkg").read_bytes())
         self.assertEqual((target, version, image[0]), (2, 9, 0xe9))
 
-    def test_the_unsigned_package_of_flash_upload_has_the_same_layout(self):
-        image = dmod.pack(os.urandom(5000), 0x44, 2, static_addr=dmod.STATIC_BASES["esp32c6"])
-        key, sig, _, name, target, version, body = self.parts(flash_upload.package(image, 4, b"test", 13, 9)[16:])
-        self.assertEqual((key, sig, name, target, version, body), (bytes(65), bytes(64), b"test", 4, 9, image))
-        self.assertEqual(flash_upload.package(image, 4, b"test", 13, dry=True)[5], 2)
 
 
 def cbor_decode(data, pos=0):
@@ -212,7 +207,7 @@ def cbor_decode(data, pos=0):
 
 
 class Manifest(unittest.TestCase):
-    DEMO = open(os.path.join(ROOT, "tests", "data", "manifest-demo.hex")).read().strip()
+    DEMO = Path(ROOT, "tests", "data", "manifest-demo.hex").read_text().strip()
 
     def test_the_manifest_is_the_one_ssh_mesh_writes(self):
         """mkmod adds what only the build knows to the manifest mesh-api-gen wrote (crates/mesh-api-gen/tests/data there)."""
@@ -220,7 +215,7 @@ class Manifest(unittest.TestCase):
         base = bytes.fromhex(self.DEMO)
         self.assertEqual(mkmod.manifest_with(base), base)
         self.assertEqual(mkmod.manifest_with(base, autostart="").hex(),
-                         open(os.path.join(data, "manifest-demo-autostart.hex")).read().strip())
+                         Path(data, "manifest-demo-autostart.hex").read_text().strip())
         m, _ = cbor_decode(mkmod.manifest_with(base, autostart="serve"))
         self.assertEqual(m[6], "serve")
         self.assertEqual(m[4][0][0], "Row")
@@ -246,7 +241,7 @@ class Manifest(unittest.TestCase):
         image_path = os.path.join(ROOT, "target", "out", "esp32c6", "modules", "mod_rtest.dmod")
         if not os.path.exists(image_path):
             self.skipTest("no built image (scripts/build.sh)")
-        m, _ = cbor_decode(dmod.manifest_of(open(image_path, "rb").read()))
+        m, _ = cbor_decode(dmod.manifest_of(Path(image_path).read_bytes()))
         self.assertEqual((m[1], m[2]), ("test", 2))
         self.assertIn("echo", [x[2] for x in m[3]])
 
@@ -273,7 +268,7 @@ class GenVtables(unittest.TestCase):
         abi, mod = os.path.join(directory, "abi.rs"), os.path.join(directory, "mod.rs")
         subprocess.run([sys.executable, os.path.join(ROOT, "tools/gen_vtables.py"), "--api", api, "--types", types,
                         "--abi-out", abi, "--module-out", mod], check=True, capture_output=True, cwd=ROOT)
-        return open(abi).read(), open(mod).read()
+        return Path(abi).read_text(), Path(mod).read_text()
 
     def test_the_checked_in_files_are_what_the_tool_writes(self):
         with tempfile.TemporaryDirectory() as d:
@@ -287,7 +282,7 @@ class GenVtables(unittest.TestCase):
             subprocess.run([sys.executable, os.path.join(ROOT, "tools/gen_vtables.py"),
                             "--api", "modules/mod_nan/API.md", "--types", "crates/xip-abi/src/power.rs",
                             "--dispatch-only", "--methods", "powerinfo,powersleep,dump_locks", "--module-out", mod], check=True, capture_output=True, cwd=ROOT)
-            glue = open(mod).read()
+            glue = Path(mod).read_text()
         self.assertEqual(glue, read("modules", "mod_nan", "src", "power_gen.rs"))
         self.assertIn("w.map(27)", glue)
         self.assertNotIn("r.phase", glue)
@@ -310,7 +305,7 @@ class GenVtables(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             api = os.path.join(d, "API.md")
             shutil.copy(os.path.join(ROOT, "modules/mod_ble/API.md"), api)
-            open(os.path.join(d, "API.local.md"), "w").write("## `peek` \u2014 Read a word\n\nLocal use only.\n\n**C function:** `(addr: u32, out: *mut u8)`\n")
+            Path(d, "API.local.md").write_text("## `peek` \u2014 Read a word\n\nLocal use only.\n\n**C function:** `(addr: u32, out: *mut u8)`\n")
             abi, mod = self.run_tool(api, os.path.join(ROOT, "crates/xip-abi/src/ble.rs"), d)
         self.assertIn("pub peek: Option<unsafe extern \"C\" fn(ctx: *mut c_void, addr: u32, out: *mut u8) -> c_int>,", abi)
         self.assertLess(abi.index("pub resume:"), abi.index("pub peek:"), "local methods follow the remote ones")
@@ -321,7 +316,7 @@ class GenVtables(unittest.TestCase):
     def test_a_field_without_a_matching_struct_field_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             types = os.path.join(d, "ble.rs")
-            open(types, "w").write(read("crates", "xip-abi", "src", "ble.rs").replace("pub paired: u8,", "pub renamed: u8,"))
+            Path(types).write_text(read("crates", "xip-abi", "src", "ble.rs").replace("pub paired: u8,", "pub renamed: u8,"))
             r = subprocess.run([sys.executable, os.path.join(ROOT, "tools/gen_vtables.py"), "--api", os.path.join(ROOT, "modules/mod_ble/API.md"),
                                 "--types", types, "--abi-out", os.path.join(d, "a.rs"), "--module-out", os.path.join(d, "m.rs")], capture_output=True, text=True)
             self.assertNotEqual(r.returncode, 0)

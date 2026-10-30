@@ -46,7 +46,7 @@ impl Discovery {
             r.path == path
                 && r.fingerprint == fingerprint
                 && r.len == packet.len()
-                && now.saturating_sub(r.at) < 2 * crate::protocol::WINDOW_US
+                && now.saturating_sub(r.at) < 2 * crate::runtime::protocol::WINDOW_US
         }) {
             return false;
         }
@@ -81,7 +81,7 @@ impl Discovery {
         *slot = Some(Pending {
             token: self.next_token,
             path,
-            until: now + 2 * crate::protocol::WAKE_PERIOD_US,
+            until: now + 2 * crate::runtime::protocol::WAKE_PERIOD_US,
         });
         Ok(self.next_token)
     }
@@ -115,7 +115,7 @@ mod tests {
         assert!(!p.admit_request(path, b"request", 200));
         assert!(p.admit_request(path, b"other", 200));
         assert!(p.admit_request(ReturnPath { now: true, ..path }, b"request", 200));
-        assert!(p.admit_request(path, b"request", 100 + crate::protocol::WAKE_PERIOD_US));
+        assert!(p.admit_request(path, b"request", 100 + crate::runtime::protocol::WAKE_PERIOD_US));
     }
     #[test]
     fn replies_expire_and_old_activation_tokens_do_not_match_replacement() {
@@ -133,7 +133,7 @@ mod tests {
         assert!(old.take(token, 102).is_none());
         let token = old.reserve(path, 500).unwrap();
         assert!(old
-            .take(token, 500 + 2 * crate::protocol::WAKE_PERIOD_US)
+            .take(token, 500 + 2 * crate::runtime::protocol::WAKE_PERIOD_US)
             .is_none());
     }
 }

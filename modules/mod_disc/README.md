@@ -21,29 +21,24 @@ updating. Publication reports success after NAN's acknowledgement. It does not
 prove radio delivery; test discovery from the receiver. Stop `disc` to free all
 supplier state; NAN keeps its independent cached publication.
 
-It also answers the runtime's UDP multicast discovery. The runtime's `xip_mc`
-listener (on while there is an IP) joins the link-local group `ff02::5227` on
-port 5227 and delivers each request to this module's port; the module replies
-with the cached signed record correlated to the request's id and to the source
-it came from. This is how `dmesh-cli discover` finds a companion-less device:
-it needs no radio beyond the Wi-Fi link and reuses the signed cache, so a sweep
-signs nothing.
+`dmesh-cli discover` finds a companion-less device over its Wi-Fi connection.
+Responses reuse the cached signed announcement.
 
 A companion can skip this module and call `nan.set_announce` directly. No
-certificate-chain protocol is implemented here yet; see [API.md](API.md), the
-[NAN guide](../../notes/ai/nan/README.md) and
-[module troubleshooting](../../notes/ai/modules/TROUBLESHOOTING.md).
+certificate-chain protocol is implemented here yet. See [API.md](API.md) for commands.
 
-## Retained state
+## Active route experiment
 
-The 8-byte state block contains the running-context pointer. While started,
-the context retains a 255-byte local signed publication buffer, channel,
-request sequence, one pending transaction and twelve relay link handles. The
-publication is required to answer discovery without signing on each reply;
-this is local publication state, not an observed-peer inventory. Stop cancels
-alarms, releases links, clears NAN's publication and frees the context. Disable
-this optional supplier when its publication/relay policy is not needed.
+Enable participation on each device, then request a target STA MAC from any one:
 
-Verify the declared state/stack budget with `python3 scripts/check-module-memory.py`
-from the repository root. For device heap/packet lifetime measurements, use the
-[common measurement procedure](../README.md#measuring-retained-ram).
+```sh
+dmesh-cli console SERIAL disc.routing --enabled=true
+dmesh-cli console SERIAL disc.discover --target=hex:001122334455 --hop_limit=4
+dmesh-cli console SERIAL disc.routes
+dmesh-cli console SERIAL disc.routing --enabled=false
+```
+
+Discovery uses NAN and NOW datagrams. It can wake sleeping participants for four
+seconds and is limited to one local attempt per minute. Returned routes are
+experimental candidates; this does not install forwarding. Use `nan.datagrams`
+and `disc.routing` for progress. See [API.md](API.md) for timing and limits.

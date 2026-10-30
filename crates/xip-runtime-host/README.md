@@ -37,5 +37,4 @@ Run checks with `scripts/test-host.sh generated` and `scripts/test-host.sh ci-ru
 
 To test a module from Rust, use `Runtime::load_module`, `Instance::request` and
 `Runtime::run_realtime`. `Runtime::run(ms)` provides deterministic time for
-fixtures. See [console examples](tests/console.rs), [network examples](tests/network.rs)
-and [the protocol guide](../../notes/docs/protocol.md).
+fixtures. See [console examples](tests/console.rs) and [network examples](tests/network.rs).

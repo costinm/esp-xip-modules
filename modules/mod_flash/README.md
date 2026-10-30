@@ -26,7 +26,7 @@ Set NV `flash.auth` to `unsigned` for development uploads across reboots, or
 `strict` to require signatures. An empty NV value removes the override and
 restores `strict`. The setting takes effect when `flash` next starts; stop/start
 it to apply immediately. Explicit start requests override NV for that activation.
-See the flashing guide below for the binary console commands and signing tools.
+Use `dmesh-cli flash --help` for upload options.
 
 A module upload requires a version higher than the installed one (`ERR 9
 rollback` otherwise). It uses consecutive 64 KiB pages according to the image's
@@ -43,23 +43,6 @@ Uploads cannot replace the executing application or this running flash module.
 Use the loader or [serial flasher](../../scripts/flash-serial.sh) where needed;
 Main, loader and Stage2 updates require a restart.
 
-See [the flashing guide](../../notes/docs/flashing.md) for package preparation
-and upload steps, and [module troubleshooting](../../notes/ai/modules/TROUBLESHOOTING.md)
-for placement, inspection and recovery.
-
-QUIC upload commands: [UART, UDP and NOW relay](../../notes/ai/quic/quic_flash.md).
-
-## Retained state
-
-The 128-byte state block retains authentication policy (including an optional
-65-byte development key), listener/status flags, a connection pointer and an
-alarm handle while started. An upload connection, signed header, journal
-operations, page inventory and upload packet leases exist only for a session
-and are disposed on completion/error/timeout/stop. The autostarted listener and
-its polling alarm still cost runtime RAM while waiting; unloading the module
-is required to remove that baseline. Upload buffers are not permanent Main
-buffers.
-
-Verify the declared state/stack budget with `python3 scripts/check-module-memory.py`
-from the repository root. For device heap/packet lifetime measurements, use the
-[common measurement procedure](../README.md#measuring-retained-ram).
+Upload a module with `dmesh-cli flash DEVICE mod_NAME.dmod --module NAME --chip esp32c6`.
+Select the actual chip and use `--unsigned` only when the running flash service
+allows development uploads. Check `console.status` after the upload and restart.

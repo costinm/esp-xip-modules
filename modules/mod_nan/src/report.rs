@@ -1,6 +1,6 @@
 //! Live best-effort observations; no subscriptions, peer cache or output queue.
 use xip_abi::{cbor::Writer, *};
-use crate::protocol::Plan;
+use crate::runtime::protocol::Plan;
 
 /// UART report port; BLE carries the same map as an unsolicited nan.report result.
 pub const PORT: i32 = PORT_NAN_REPORT as i32;
@@ -51,7 +51,7 @@ impl Reports {
     }
     /// Startup/off-channel retry paths keep a heartbeat when no radio clock is available.
     pub fn offline(&mut self, now: u64, out: &mut [u8]) -> Option<usize> {
-        let cycle=now/(16*crate::protocol::PERIOD_US);
+        let cycle=now/(16*crate::runtime::protocol::PERIOD_US);
         if cycle==0 || self.offline_cycle==Some(cycle) {return None;}
         self.offline_cycle=Some(cycle);
         let mut w=Writer::new(out);
@@ -77,7 +77,7 @@ pub fn emit(hw: &Hw, record: &[u8]) {
     let mut status=BleStatus::default();
     let ble=hw.nimble().and_then(|n|n.status).is_some_and(|f|unsafe {f(hw.ctx(),&mut status)}==0 && status.coc_connected!=0);
     let name=if ble {c"ble"}else{c"serial"};
-    let Ok(link)=crate::link(hw,name) else {return;};
+    let Ok(link)=crate::runtime::link(hw,name) else {return;};
     if ble {
         // The CoC link carries QUIC datagrams. Keep its normal native CBOR
         // envelope framing: a nan.report event with no request ID, not a request.
@@ -157,7 +157,7 @@ mod tests {
     }
     #[test]
     fn no_clock_still_reports_at_an_eight_second_cadence() {
-        let mut r=Reports::default();let mut out=[0;32];let period=16*crate::protocol::PERIOD_US;
+        let mut r=Reports::default();let mut out=[0;32];let period=16*crate::runtime::protocol::PERIOD_US;
         assert!(r.offline(period-1,&mut out).is_none());
         assert!(r.offline(period,&mut out).is_some());
         assert!(r.offline(period+1,&mut out).is_none());
@@ -167,7 +167,7 @@ mod tests {
     fn service_info_from_pub_sub_and_followup_is_preserved() {
         for control in [0x10,0x11,0x12] {
             let mut frame=[0;512];
-            let n=crate::frames::sdf(&mut frame,[2;6],[0xff;6],[0x50,0x6f,0x9a,1,2,3],1,0,control,b"opaque").unwrap();
+            let n=crate::runtime::frames::sdf(&mut frame,[2;6],[0xff;6],[0x50,0x6f,0x9a,1,2,3],1,0,control,b"opaque").unwrap();
             let descriptors=dmesh_rawnan::service_descriptors(&frame[..n]);
             assert_eq!(descriptors.len(),1);
             assert_eq!(payload(&frame[..n],&descriptors[0].descriptor),b"opaque");

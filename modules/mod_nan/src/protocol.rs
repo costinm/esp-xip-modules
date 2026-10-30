@@ -1,5 +1,5 @@
 //! NAN state/wire behavior, independent of ESP-IDF and the firmware adapter.
-use crate::diagnostics::Stats;
+use crate::runtime::diagnostics::Stats;
 use alloc::{boxed::Box, vec::Vec};
 use dmesh_rawnan::{self as wire, MacAddr, NanState, RxFrame};
 
@@ -255,6 +255,10 @@ impl Engine {
     }
     /// The capture/sleep scheduler obtains the next TSF-aligned discovery windows.
     pub fn plan(&self, now: u64) -> Plan {
+        self.plan_with_cadence(now, self.wake_dw)
+    }
+    /// Additional bounded solicitations share the existing TSF scheduler.
+    pub fn plan_with_cadence(&self, now: u64, cadence: u64) -> Plan {
         if self.acquiring {
             return Plan {
                 capture: true,
@@ -279,7 +283,7 @@ impl Engine {
                 acquiring: true,
             };
         };
-        let wake_period = self.wake_dw * PERIOD_US;
+        let wake_period = cadence * PERIOD_US;
         let clock = tsf.saturating_add(now.saturating_sub(at));
         let phase = clock % wake_period;
         let slot = clock / PERIOD_US;

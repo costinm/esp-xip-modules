@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Tests that need no board. CI uses only generated, ci-runtime and cli (no root tests/ dependency).
+# Tests that need no board. Source env.sh; device tests use tests/e2e/run.py.
 #   scripts/test-host.sh [all|abi|generated|c|rust|runtime|ci-runtime|cli|python]     (default: all)
-# `c` and `python` need gcc; the module build tests also need the ESP toolchains (. ./env.sh).
+# C/native regressions need gcc; Python checks need Python 3.11+. Runtime tests build native modules.
 # The abi/all group compares generated files before/after regeneration in the current tree (not Git HEAD).
 # Most failures stop immediately; CLI test failures are collected so all can still run Python checks.
 # Any collected failure still makes the script exit nonzero.
@@ -13,7 +13,7 @@ case "$what" in
     all|abi|generated|c|rust|runtime|ci-runtime|cli|python) ;;
     *) echo "usage: scripts/test-host.sh [all|abi|generated|c|rust|runtime|ci-runtime|cli|python]" >&2; exit 2 ;;
 esac
-KNOWN_FAILURES=0
+FAILURES=0
 mkdir -p target
 if [[ $what == abi || $what == all ]]; then
     python3 tests/test_dependencies.py
@@ -75,59 +75,34 @@ if [[ $what == c || $what == all ]]; then
     # NOW framing native tests remain local to crates/xip-runtime-esp/tests/.
 fi
 if [[ $what == ci-runtime || $what == all ]]; then
-    python3 -m unittest discover -s tools -p test_partition_layout.py
+    [[ $what != ci-runtime ]] || python3 tests/test_partition_layout.py
     cargo test --quiet --locked --manifest-path crates/Cargo.toml -p xip-abi --features global-alloc --lib heap::tests
 fi
 if [[ $what == rust || $what == runtime || $what == ci-runtime || $what == all ]]; then
     # the crates and the Rust modules: logic on a PC (the images are built by scripts/build.sh with the esp toolchain)
     module_crates=(modules/mod_system modules/mod_lora modules/mod_hw modules/mod_nan modules/mod_disc modules/mod_quic)
-    # Legacy mod_flash compatibility tests read local root tests/data fixtures.
-    # Keep them in local runtime/rust/all runs until rewritten as self-contained Rust tests.
-    [[ $what == ci-runtime ]] || module_crates+=(modules/mod_flash)
+    module_crates+=(modules/mod_flash)
     RUSTC_BOOTSTRAP=1 cargo test --quiet --manifest-path modules/mod_rtest/Cargo.toml
     for crate in "${module_crates[@]}"; do
         cargo test --quiet --manifest-path "$crate/Cargo.toml"
     done
-    if [[ $what == ci-runtime ]]; then
-        # Self-contained Rust regressions; no local root tests/data fixtures.
-        for test in activation_auth_uses_nv_and_explicit_requests_override_it \
-                    multi_page_images_protect_tails_and_require_contiguous_space \
-                    the_package_and_its_image_say_the_same_name_and_version \
-                    expanded_module_partition_admits_and_protects_high_pages \
-                    stream_upload_matches_tcp_commit_and_rejects_corruption_without_socket_reads; do
-            cargo test --quiet --manifest-path modules/mod_flash/Cargo.toml --lib \
-                "tests::$test" -- --exact
-        done
-    fi
-    if [[ $what == ci-runtime ]]; then
-        cargo test --quiet --manifest-path modules/mod_flash/Cargo.toml --lib state_tests::all_page_floors_survive_compaction_and_interruption_without_format_change -- --exact
-        cargo test --quiet --manifest-path modules/mod_flash/Cargo.toml --lib state_tests::expanded_page_journal_compacts_between_c_and_rust_readers -- --exact
-    fi
     # the host-runtime runs the modules (built for this machine) against the host table: virtual time, fixtures
     scripts/build-host-modules.sh >/dev/null
     # crates/: one workspace, one Cargo.lock (xip-abi, both runtimes, dmesh-cli)
-    if [[ $what == ci-runtime ]]; then
-        # The ESP native integration tests/fixtures are local, not checked in.
-        # Keep the tracked host integration tests and ESP library tests in CI.
-        cargo test --quiet --locked --manifest-path crates/Cargo.toml --workspace --exclude dmesh-cli --exclude xip-runtime-esp
-        cargo test --quiet --locked --manifest-path crates/Cargo.toml -p xip-runtime-esp --lib
-    else
-        cargo test --quiet --locked --manifest-path crates/Cargo.toml --workspace --exclude dmesh-cli
-    fi
+    cargo test --quiet --locked --manifest-path crates/Cargo.toml --workspace --exclude dmesh-cli
 fi
 if [[ $what == rust || $what == cli || $what == all ]]; then
-    # dmesh-cli separately: its schema tests are known to fail while the pinned dmesh-server git dep
-    # (crates/dmesh-cli/Cargo.toml) predates the newer `transport.set` fields. Report, keep going so the
-    # remaining steps still run, and fail at the end. Bumping the pin clears this.
-    if ! cargo test --quiet --locked --manifest-path crates/Cargo.toml -p dmesh-cli --lib --bins; then
-        echo "FAILED (known): dmesh-cli schema tests vs the pinned dmesh-server dep; bump the pin to clear" >&2
-        KNOWN_FAILURES=1
+    # Collect failures without hiding them behind a presumed dependency diagnosis.
+    # Integration targets compile here; hardware cases remain #[ignore].
+    if ! cargo test --quiet --locked --manifest-path crates/Cargo.toml -p dmesh-cli; then
+        echo "FAILED: dmesh-cli checks (see failure above)" >&2
+        FAILURES=1
     fi
 fi
 if [[ $what == python || $what == all ]]; then
-    python3 tests/test_tools.py      # tools, ABI generator, module build (needs the toolchains for that part)
+    python3 -m unittest discover -s tests -p 'test_*.py'
 fi
-if [[ $KNOWN_FAILURES != 0 ]]; then
-    echo "test-host: requested groups finished; dmesh-cli failures above remain (pinned dmesh-server dep)" >&2
+if [[ $FAILURES != 0 ]]; then
+    echo "test-host: requested groups finished with failures above" >&2
     exit 1
 fi

@@ -232,6 +232,60 @@
       "type": "object",
       "x-component-index": 47,
       "x-method-index": 9
+    },
+    {
+      "properties": {
+        "hop_limit": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "method": {
+          "const": "disc.discover"
+        },
+        "target": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 47,
+      "x-method-index": 10
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "disc.routes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 47,
+      "x-method-index": 11
+    },
+    {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "method": {
+          "const": "disc.routing"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 47,
+      "x-method-index": 12
     }
   ]
 }

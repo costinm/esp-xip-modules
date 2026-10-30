@@ -805,7 +805,7 @@ fn the_manifest_options_in_cargo_toml_fit_the_module() {
 /// The frozen formats, against files made by the loader project's tools / the IDF (tests/data, docs/development.md "Formats").
 #[test]
 fn the_partition_table_of_stage2_is_read() {
-    let table = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/partition-4mb.bin")).unwrap();
+    let table = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/partition-4mb.bin")).unwrap();
     let mut f = Fake::new(&module_image(), target::MODULE, false);
     f.flash[0x8000..0x8000 + table.len()].copy_from_slice(&table);
     let h = f.host();
@@ -816,7 +816,7 @@ fn the_partition_table_of_stage2_is_read() {
 #[test]
 fn a_signed_package_made_by_the_loader_tools_is_installed_over_the_socket_protocol() {
     // loader package of version 9, with the key it was signed with pinned
-    let pkg = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/loader-esp32c6.pkg")).unwrap();
+    let pkg = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/loader-esp32c6.pkg")).unwrap();
     let mut f = Fake::new(&module_image(), target::LOADER, false);
     let mut log = StateLog::open(Raw(vec![255; 8192]));
     assert!(log.append(state::REC_PIN, &pkg[..65]));

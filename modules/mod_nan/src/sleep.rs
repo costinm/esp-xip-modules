@@ -1,5 +1,5 @@
 //! Module policy only: the runtime owns UART, radio teardown and sleep entry.
-use crate::protocol::Plan;
+use crate::runtime::protocol::Plan;
 use xip_abi::*;
 
 // Same conservative cold C6/S3 margin as FW. Subsequent slow restarts grow it.

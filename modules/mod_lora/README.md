@@ -67,8 +67,7 @@ DMesh's `fw/main/src/modules.rs` routes event 10 of the `lora` module to the tra
 ## Installing
 
 Flash `mod_lora.dmod` with esptool at a page of the module partition, or upload it to a running `main` that has `mod_flash`
-(`tools/flash_upload.py HOST module lora mod_lora.dmod`, see `modules/mod_flash/README.md`). On a DMesh Main the module is `lora` (component 43); on an esp-xip-modules `main` it is the `lora` slot of `main/main.c`. A bench run, with results, is in
-[notes/ai/2026-10-11-mod-lora-on-esp-modules.md](../../notes/ai/2026-10-11-mod-lora-on-esp-modules.md).
+(`dmesh-cli flash "$TARGET" mod_lora.dmod --unsigned --module lora --chip esp32c6`, see `modules/mod_flash/README.md`). On a DMesh Main the module is `lora` (component 43); on an esp-xip-modules `main` it is the `lora` slot of `main/main.c`.
 
 ## Hardware notes
 
@@ -76,18 +75,3 @@ Flash `mod_lora.dmod` with esptool at a page of the module partition, or upload 
 - The chip reset and the optional board power rail are driven by the module (`pwr`, `pwrlvl`, `rst`).
 - `stop` powers the rail down and releases the pins; the host releases whatever the module leaves.
 - FSK uses a fixed 100 kbit/s GFSK profile on a common channel; framing beyond fixed packets is a follow-up.
-
-## Retained state
-
-The 768-byte state block embeds radio configuration, SPI/IRQ/alarm state,
-phase/counters and two MAX_PAYLOAD (255-byte) pending/current payload arrays.
-Those arrays remain reserved even when no TX is pending, including during
-radio suspension. This is an existing idle-RAM cost, not allocation-free or
-near-zero inactive storage. Suspend closes physical radio resources but keeps
-the instance; explicit radio off/unload is needed to reclaim this state and
-its runtime stack. Replacing the inline TX arrays needs a separate driver
-lifetime change; do not count suspension as memory reclamation.
-
-Verify the declared state/stack budget with `python3 scripts/check-module-memory.py`
-from the repository root. For device heap/packet lifetime measurements, use the
-[common measurement procedure](../README.md#measuring-retained-ram).

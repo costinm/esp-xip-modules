@@ -9,8 +9,9 @@ publish = false
 [workspace]
 
 [dependencies]
+esp-mod-nan = { optional = true, path = "../mod_nan", default-features = false, features = ["api-only"] }
 xip-abi = { path = "../../crates/xip-abi" }
-dmesh-server = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+dmesh-server = { optional = true, git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
 
 [dev-dependencies]
 sha2 = "0.10"
@@ -20,7 +21,11 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 mkmod = "--name disc --tag 47 --stack 8192 --state 8 --port 250"
 
 [features]
-flat-image = ["xip-abi/global-alloc"]
+default = ["runtime"]
+runtime = ["dep:esp-mod-nan", "dep:dmesh-server"]
+# Select with default-features = false to compile only the route record contract.
+api-only = []
+flat-image = ["runtime", "xip-abi/global-alloc"]
 
 [lib]
 crate-type = ["rlib"]

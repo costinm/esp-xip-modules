@@ -15,6 +15,3 @@ active link windows and images that exceed the available mapping or flash space.
 Per module name, the highest installed version is selected. Older versions remain
 shadowed for recovery and later reuse. Use [mod_flash](../../modules/mod_flash/README.md)
 for uploads; a larger image needs enough consecutive free or reusable pages.
-
-See the [current module guide](../../notes/ai/modules/README.md) and
-[inspection/recovery commands](../../notes/ai/modules/TROUBLESHOOTING.md).

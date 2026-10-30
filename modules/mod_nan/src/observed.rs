@@ -184,7 +184,7 @@ mod tests {
             assert_eq!(observed.event(&hw, 77, STREAM_FIN, true), 0);
             observed.note(&hw, [2;6], -43, 6, b"signed payload", 11, false);
             let data = &f.accepted.last().unwrap().1;
-            assert_eq!(crate::bytes(data, 6), Some(&b"signed payload"[..]));
+            assert_eq!(crate::runtime::bytes(data, 6), Some(&b"signed payload"[..]));
             assert_eq!(cbor::get_int(data, 2).unwrap(), Some(-43));
             assert!(f.packets.is_empty());
             observed.expire(&hw, WINDOW_US + 10);

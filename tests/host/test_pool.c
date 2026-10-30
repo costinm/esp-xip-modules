@@ -20,7 +20,11 @@ static uint8_t *fake_data(void *c, int s) { (void)c; return fake_mem + s * 1204;
 static uint16_t fake_size(void *c) { (void)c; return 1204; }
 static uint16_t fake_slots(void *c) { (void)c; return 4; }
 static uint16_t fake_avail(void *c) { (void)c; return (uint16_t)fake_free_count; }
-static const xip_pool_ops fake_ops = {0, fake_acquire, fake_retain, fake_release, fake_refs_of, fake_data, fake_size, fake_slots, fake_avail};
+static const xip_pool_ops fake_ops = {
+    .ctx = NULL, .acquire = fake_acquire, .retain = fake_retain, .release = fake_release,
+    .refs = fake_refs_of, .data = fake_data, .slot_size = fake_size,
+    .slots = fake_slots, .available = fake_avail,
+};
 
 static xip_pool *shared;
 static int taken[2000];

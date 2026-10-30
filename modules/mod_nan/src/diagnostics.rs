@@ -1,5 +1,5 @@
 //! Optional, activation-owned diagnostics. No counters/ring exist when disabled.
-use crate::protocol::Plan;
+use crate::runtime::protocol::Plan;
 use xip_abi::cbor::Writer;
 const SAMPLES: usize = 8;
 #[derive(Clone, Copy, Default)]
@@ -57,7 +57,7 @@ impl Stats {
     pub fn new(wait_us: u64) -> Self {
         Self {
             wait_us,
-            lead_us: crate::protocol::LEAD_US,
+            lead_us: crate::runtime::protocol::LEAD_US,
             ..Default::default()
         }
     }

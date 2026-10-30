@@ -295,6 +295,19 @@
       "type": "object",
       "x-component-index": 46,
       "x-method-index": 16
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "nan.datagrams"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 46,
+      "x-method-index": 19
     }
   ]
 }

@@ -21,8 +21,7 @@ saved network credentials and Wi-Fi tuning through the console API.
 
 See [the module ABI](../../include/xip.h), [Wi-Fi](../../api/wifi.API.md),
 [NAN power methods](../../modules/mod_nan/API.md#13-powerinfo--the-power-state-and-the-freertos-numbers), [console control](../../modules/mod_con/API.md)
-and [ESP-NOW](ESPNOW.md) for the relevant contracts and options. Development
-notes are under [notes/](../../notes/ai/2026-10-23-runtime-implementation.md).
+and [ESP-NOW](ESPNOW.md) for the relevant contracts and options.
 
 Experimental endpoint modules use the native [QUIC packet interface](../../api/quic.API.md).
 Native TCP listeners use the normal lwIP stack and module-declared stream ports.

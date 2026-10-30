@@ -946,5 +946,73 @@
       "unavailable",
       "internal"
     ]
+  },
+  {
+    "description": "bounded module datagram scheduling status",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "nan.datagrams",
+    "outputSchema": {
+      "properties": {
+        "busy": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "uint"
+        },
+        "completed": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "enabled": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "expired": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "last_error": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "int"
+        },
+        "pending": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "refused": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        },
+        "submitted": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 46,
+    "x-method-index": 19,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
   }
 ]

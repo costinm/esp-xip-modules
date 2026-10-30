@@ -180,6 +180,76 @@ A missing route or tuple returns NOTFOUND. Other removals preserve last use.
 Returns the current RelayRoute. This does not refresh last use. Reducing the
 timeout below its current idle age closes the route on the next expiry check.
 
+## 10. `discover` — experimental active route discovery
+
+Enable `disc.routing` on each participant first. Sends a request immediately over
+NOW, in the current/next NAN DW and in DW0/DW8. Nodes flood the first admitted
+copy and retain a reverse path; only the target replies. No stream or master is used.
+
+### Request
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `target` | `bytes` | Required six-byte target STA MAC, different from origin. |
+| 2 | `hop_limit` | `uint` | Default 4; 1..8. |
+
+### Response
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `request_id` | `uint` | Origin sequence, correlated with candidate records. |
+| 2 | `session` | `uint` | Random per-routing-activation session. |
+| 3 | `timeout_ms` | `uint` | Origin receive hold and reply lifetime: 4000 + 18000 * hop_limit. |
+
+Returns after NAN admits the solicitation. Admission is not transmission or
+reachability. Poll `disc.routes` for a matching session/request. One local attempt
+per minute; BUSY during an outstanding admission.
+
+## 11. `routes` — experimental route candidates
+
+Returns `{1: routes}` with at most eight RouteCandidate records. Expired records
+are omitted. These unauthenticated observations do not install relays or prove
+current bidirectional data delivery. Reads do not refresh lifetime.
+
+### Response
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `routes` | `RouteCandidate[]` | Unexpired candidates, at most eight. |
+
+## 12. `routing` — opt in or query active discovery participation
+
+### Request
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `enabled` | `bool` | Omit to query; true subscribes to NAN datagrams; false cancels work and frees routing state. |
+
+### Response
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `enabled` | `bool` | Participation acknowledged by NAN. |
+| 2 | `mac` | `bytes` | Local STA MAC used as the experiment node identifier. |
+| 3 | `accepted` | `uint` | Distinct received requests admitted for four-second holds. |
+| 4 | `duplicates` | `uint` | Request/reply duplicates suppressed across bearers. |
+| 5 | `dropped` | `uint` | Ingress or downstream admission failures. |
+| 6 | `last_error` | `int` | Most recent local/downstream error. |
+| 7 | `routes` | `uint` | Unexpired candidate count. |
+| 8 | `requests` | `uint` | Unexpired request count. |
+
+Enable/disable waits up to two seconds for NAN. Stop disables the subscription,
+cancels pending admission and frees routing state. An ambiguous timeout requires
+querying NAN datagram status or retrying disable before assuming teardown completed.
+
+Each accepted new request over NAN or NAN-over-NOW extends shared awake time by
+4000 ms, without shortening an existing hold. Duplicates do not renew it. Admission
+is bounded to four received requests per minute and eight retained request records;
+full tables never evict live deduplication entries. Reverse requests and candidates
+expire after 180 seconds; origin requests use timeout_ms. The first path is fixed
+for each request, with hop count as cost and 0..31 ms jitter on forwarded broadcasts. Passive root trees, root search,
+intermediate cached replies, route improvement and automatic forwarding are future work.
+
 # Types
 
 ## `RelayHop`
@@ -213,3 +283,33 @@ routes explicitly. Endpoint bindings unwrap `0x40 DCID 0x00 opaque_packet` and
 expose the complete packet on native link relay; their next hops are the reverse
 path. The CLI selects only the first-hop DCID with --via FIRST_HOP:DCID.
 Signed remote relay requests remain a future policy extension.
+
+## `RouteCandidate`
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `target` | `bytes` | Target STA MAC. |
+| 2 | `next_hop` | `bytes` | Immediate radio peer that supplied the reply. |
+| 3 | `hops` | `uint` | Reply path hop count, 1..8. |
+| 4 | `remaining_ms` | `uint` | Candidate lifetime remaining. |
+| 5 | `channel` | `uint` | Receive channel. |
+| 6 | `rssi` | `int` | Signed receive RSSI. |
+| 7 | `now` | `bool` | Reply arrived over NOW rather than NAN. |
+| 8 | `request_id` | `uint` | Origin request sequence. |
+| 9 | `session` | `uint` | Origin routing-activation session. |
+
+## Experiment radio contract
+
+`src/api.rs` owns the bounded route-record codec. It is a CBOR map with tags
+0=magic/version 0x485701, 1=kind (1 request, 2 reply), 2=origin STA MAC,
+3=origin session, 4=origin sequence, 5=target STA MAC, 6=hops traversed,
+7=hop limit and 8=reserved flags (zero). Requests and replies start with hops=0;
+receivers add one. Invalid, duplicate-key, unsupported or trailing records are rejected.
+
+The NAN-owned Rust contract is `esp_mod_nan::api`. Consumers select
+`default-features = false, features = ["api-only"]` on the `esp-mod-nan`
+dependency. Notification method -120 accepts `Received` records only from NAN
+module messages, never remote envelopes.
+
+Route-record consumers can likewise depend on `esp-mod-disc` with
+`default-features = false, features = ["api-only"]` and use `esp_mod_disc::api`.

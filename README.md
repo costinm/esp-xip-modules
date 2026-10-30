@@ -32,7 +32,7 @@ cargo run --manifest-path crates/xip-runtime-host/Cargo.toml --bin xip-host
 ```
 
 `xip-host` runs the console and an echo module on loopback TCP and UDP; see
-[the host runtime](crates/xip-runtime-host/README.md). `scripts/test-host.sh generated` and `scripts/test-host.sh ci-runtime` run the maintained host checks without the local root `tests/` tree.
+[the host runtime](crates/xip-runtime-host/README.md). `scripts/test-host.sh generated` and `scripts/test-host.sh ci-runtime` run the maintained Rust host checks. `scripts/test-host.sh c` and `scripts/test-host.sh python` run the C and Python regressions. See [device tests](tests/e2e/README.md) for discovered C Main scenarios.
 
 `main.bin` includes BLE by default; `loader.bin` is the recovery runtime without
 BLE. `XIP_BLE_PROFILE=off` builds Main without BLE too. `main-rs/build.sh CHIP`

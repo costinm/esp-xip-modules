@@ -77,7 +77,7 @@ selects the PPP port (default 247, 0xf7, the QUIC port: every request is an enve
 (default 6). Results are JSON with numeric CBOR keys preserved and bytes rendered
 as `hex:`; console's module list is `.result["4"]`. A scan returning -5 is still
 busy: poll again about a second later. Use `--watch` for boot/platform logs.
-The old text console command path is removed. See [module troubleshooting](../../notes/ai/modules/TROUBLESHOOTING.md).
+The old text console command path is removed.
 
 ## Find and inspect devices
 
@@ -241,7 +241,7 @@ commands, probes and NAN streams. Create/edit/list/remove routes with
 `disc.relay_create`, `disc.relay_add`, `disc.relay_remove_hop`,
 `disc.relay_list` and `disc.relay_remove`. Create takes one destination and
 returns its incoming DCID. Commands activate their module automatically; routes
-expire after 60 seconds of inactivity by default. See [relay commands](../../notes/docs/relay.md).
+expire after 60 seconds of inactivity by default.
 Firmware/recovery updates use the existing TCP `mod_flash` protocol or the
 [serial flasher](../../scripts/flash-serial.sh).
 
@@ -287,7 +287,6 @@ Normal API calls use tagged service streams over QUIC, including relay paths.
 The direct tagged control record is reserved for bootstrap diagnostics.
 
 Heap and task diagnostics are available through the [console API](../../modules/mod_con/API.md).
-Detailed measurements are kept in [notes/](../../notes/ai/2026-10-23-serial-memory.md).
 
 ## Native C Main control
 
@@ -299,14 +298,12 @@ selects the saved cadence immediately, bypassing activity grace. `nv cadence=8`
 saves a setting and `nv cadence` reads it. `dmesh-cli lora1 wake lora2` wakes the
 UART companion first and submits a targeted NOW wake for the remote device.
 No `console`, port selection or duration parameter is needed. The old native
-`console` command remains a compatibility alias. See
-[the sleep/wake guide](../../notes/docs/sleep_wakeup.md) for policy and USB behavior.
+`console` command remains a compatibility alias.
 
 For QUIC probe counters, add `--stats`; the host emits a structured snapshot
 before closing the association. Optional ESP recording is controlled through
 `quic.stats --enabled=true`, read with `quic.stats`, and freed with
-`quic.stats --enabled=false`. See [probe commands](../../notes/docs/probes.md).
-
+`quic.stats --enabled=false`.
 
 `discovery.nodes` on C Main/NAN collects a five-second live CBOR observation
 sequence, with an eight-second default client timeout. The stream triggers
@@ -315,7 +312,6 @@ inventory/wake discovery decodes each original announcement and checks its
 signature before using a node identity; invalid or unsigned records remain
 radio facts only. Older observer inventory responses remain readable. See the
 [NAN stream contract](../../modules/mod_nan/API.md#discovery-observation-stream-component-6-method-9).
-
 
 `discovery.nodes --duration_ms=0` reads retained records only on Linux/Android.
 `--retained=false` requests only fresh observations; `--active=false` listens

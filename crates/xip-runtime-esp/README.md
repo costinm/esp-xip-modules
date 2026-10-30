@@ -21,10 +21,7 @@ Build from the repository root:
 main-rs/build.sh esp32c6
 ```
 
-For the DMesh firmware application, use `fw/build.sh esp32c6` instead. Both need
-the ESP toolchain selected by `env.sh`; portable dependencies are pinned in the
-firmware manifests.
+Use the ESP toolchain selected by `env.sh`.
 
-See [the C runtime](../../components/xip_runtime/README.md),
-[the ABI](../xip-abi/README.md) and
-[development notes](../../notes/ai/2026-10-23-runtime-implementation.md).
+See [the C runtime](../../components/xip_runtime/README.md) and
+[the ABI](../xip-abi/README.md).

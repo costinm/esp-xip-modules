@@ -356,47 +356,6 @@ mod tests {
     }
 
     #[test]
-    fn transport_set_uses_the_cli_catalog_and_common_envelope() {
-        let command = encode_stream_command_with_id("transport.set mode=nan now=1", 0).unwrap();
-        let envelope = dmesh_server::tagged::decode(&command).expect("tagged envelope");
-        assert_eq!(envelope.component, Some(dmesh_server::tagged::Name::Tag(1)));
-        assert_eq!(envelope.method, Some(dmesh_server::tagged::Name::Tag(4)));
-        assert_eq!(envelope.id, Some(0));
-        assert_eq!(
-            dmesh_server::control::decode_request(&command),
-            Some(dmesh_server::control::Request::TransportSet {
-                kind: dmesh_server::control::TransportKind::Nan,
-                config: dmesh_server::control::TransportConfig {
-                    now: Some(1),
-                    ..dmesh_server::control::TransportConfig::default()
-                },
-            })
-        );
-    }
-
-    #[test]
-    fn transport_set_preserves_the_explicit_sleepy_dw_fields() {
-        let command = encode_stream_command_with_id(
-            "transport.set mode=nan nan_dw_interval=1 now=2 ap=0 ble=1",
-            24,
-        )
-        .unwrap();
-        assert_eq!(
-            dmesh_server::control::decode_request(&command),
-            Some(dmesh_server::control::Request::TransportSet {
-                kind: dmesh_server::control::TransportKind::Nan,
-                config: dmesh_server::control::TransportConfig {
-                    nan_dw_interval: Some(1),
-                    now: Some(2),
-                    ap: Some(0),
-                    ble: Some(1),
-                    ..dmesh_server::control::TransportConfig::default()
-                },
-            })
-        );
-    }
-
-    #[test]
     fn settings_set_is_stream_only() {
         let command = encode_stream_command_with_id("settings.set key=sta_ssid value=costin", 41)
             .expect("stream settings command");

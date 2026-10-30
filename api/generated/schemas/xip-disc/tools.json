@@ -449,5 +449,166 @@
       "unavailable",
       "internal"
     ]
+  },
+  {
+    "description": "experimental active route discovery",
+    "inputSchema": {
+      "properties": {
+        "hop_limit": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "target": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "disc.discover",
+    "outputSchema": {
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "uint"
+        },
+        "session": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "uint"
+        },
+        "timeout_ms": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 47,
+    "x-method-index": 10,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "experimental route candidates",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "disc.routes",
+    "outputSchema": {
+      "properties": {
+        "routes": {
+          "type": "array",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "RouteCandidate[]"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 47,
+    "x-method-index": 11,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "opt in or query active discovery participation",
+    "inputSchema": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "disc.routing",
+    "outputSchema": {
+      "properties": {
+        "accepted": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "uint"
+        },
+        "dropped": {
+          "type": "string",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "uint"
+        },
+        "duplicates": {
+          "type": "string",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "uint"
+        },
+        "enabled": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "last_error": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "int"
+        },
+        "mac": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "bytes"
+        },
+        "requests": {
+          "type": "string",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "uint"
+        },
+        "routes": {
+          "type": "string",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "uint"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 47,
+    "x-method-index": 12,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
   }
 ]

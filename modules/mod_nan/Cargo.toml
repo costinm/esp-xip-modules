@@ -11,8 +11,8 @@ publish = false
 
 [dependencies]
 xip-abi = { path = "../../crates/xip-abi" }
-dmesh-server = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
-dmesh-rawnan = { git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+dmesh-server = { optional = true, git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+dmesh-rawnan = { optional = true, git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
 
 [dev-dependencies]
 sha2 = "0.10"
@@ -23,7 +23,11 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 mkmod = "--name nan --tag 46 --stack 12288 --state 128 --port 246 --autostart --components nan --envelopes 1"
 
 [features]
-flat-image = ["xip-abi/global-alloc"]
+default = ["runtime"]
+runtime = ["dep:dmesh-server", "dep:dmesh-rawnan"]
+# Select with default-features = false; excludes implementation and radio dependencies.
+api-only = []
+flat-image = ["runtime", "xip-abi/global-alloc"]
 
 [lib]
 crate-type = ["rlib"]

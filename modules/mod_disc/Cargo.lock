@@ -190,8 +190,16 @@ name = "esp-mod-disc"
 version = "0.1.0"
 dependencies = [
  "dmesh-server",
+ "esp-mod-nan",
  "p256",
  "sha2 0.10.9",
+ "xip-abi",
+]
+
+[[package]]
+name = "esp-mod-nan"
+version = "0.1.0"
+dependencies = [
  "xip-abi",
 ]
 

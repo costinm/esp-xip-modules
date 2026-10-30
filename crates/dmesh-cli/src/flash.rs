@@ -164,6 +164,11 @@ mod tests {
         image[64..64 + manifest.len()].copy_from_slice(&manifest);
         let package = unsigned_module(&image, "hw", 13, true).unwrap();
         assert_eq!(&package[..6], b"WLU1\x01\x02");
+        assert_eq!(&package[16..145], &[0u8; 129]);
+        assert_eq!(package[150], 13);
+        assert_eq!(package[151], 4);
+        assert_eq!(package[229], 2);
+        assert_eq!(&package[233..235], b"hw");
         assert_eq!(u32::from_le_bytes(package[153..157].try_into().unwrap()), 9);
         assert_eq!(
             u32::from_le_bytes(package[157..161].try_into().unwrap()),

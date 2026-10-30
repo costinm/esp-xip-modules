@@ -31,6 +31,11 @@ jobs:
           command -v cbindgen
           command -v mesh-api-gen
           scripts/test-host.sh generated
+      - name: C and Python host regressions
+        run: |
+          . ./env.sh
+          scripts/test-host.sh c
+          scripts/test-host.sh python
       - name: Rust runtime and module tests
         run: |
           . ./env.sh

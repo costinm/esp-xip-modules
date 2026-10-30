@@ -337,6 +337,25 @@ result envelope `{1:46,2:12,6:report}` in a native `0x444d0002` datagram. There 
 no request ID on these unsolicited reports. Android consumers should recognize
 that form separately from correlated request responses.
 
+## 19. `datagrams` — bounded module datagram scheduling status
+
+Methods 17/18 are local module calls defined in [API.local.md](API.local.md).
+
+### Response
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `enabled` | `bool` | A module consumer is registered. |
+| 2 | `pending` | `uint` | Pending transmission schedules, at most four. |
+| 3 | `completed` | `uint` | Schedules whose immediate, ordinary-DW and DW0/DW8 copies were queued. |
+| 4 | `expired` | `uint` | Schedules that expired before queuing all copies. |
+| 5 | `last_error` | `int` | Last scheduling/admission or owned packet submission failure. |
+| 6 | `submitted` | `uint` | Copies accepted by the native link; no remote delivery guarantee. |
+| 7 | `refused` | `uint` | Copies consumed on terminal refusal or dropped at local queue expiry. |
+| 8 | `busy` | `uint` | Retry refusals retaining the same exact lease. |
+
+Counters reset when the consumer unsubscribes. Queuing does not prove radio delivery.
+
 # Types
 
 ## `Report`

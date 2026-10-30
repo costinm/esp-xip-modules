@@ -42,5 +42,3 @@ default PSM, the scan filter and the SDU size and buffer count of the CoC pool a
 | Compiled in, never started | about 50 KB less free heap and 30 KB more IRAM than `off`, about 390 KB of flash |
 | Started, one peer connected | about 34 KB of heap more (classic ESP32, free heap 93 KB afterwards) |
 | Kconfig | `XIP_BLE`, `XIP_BLE_COC` (`_MTU` and `_BUFS` are upper limits; the module chooses at start), `XIP_BLE_SCAN_CACHE`, `XIP_BLE_LOG_LEVEL`, `XIP_BLE_RELEASE_WHEN_OFF` |
-
-Troubleshooting, manual testing and the measured numbers: `notes/ai/ble/TROUBLESHOOTING.md`.

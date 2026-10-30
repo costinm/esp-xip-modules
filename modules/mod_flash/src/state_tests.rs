@@ -1,5 +1,5 @@
 //! The state log (the loader's journal) against an in-memory flash: a state area written by the C loader's code is read back, compaction and
-//! power loss keep one readable copy, and packages made by the frozen loader tools verify (`tests/data`). Compatibility tests: the formats must not change.
+//! power loss keep one readable copy, and packages made by the frozen loader tools verify (`tests/data` in this module). Compatibility tests: the formats must not change.
 
 use alloc::vec::Vec;
 use std::vec;
@@ -53,7 +53,7 @@ fn state_log_reads_what_the_c_loader_wrote() {
     let mut mem = Mem::blank();
     mem.data = std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/data/state.bin"
+        "/tests/data/state.bin"
     ))
     .unwrap();
     let log = StateLog::open(mem);
@@ -156,11 +156,11 @@ fn power_loss_during_compaction_keeps_one_readable_copy() {
 #[test]
 fn signed_packages_made_by_the_loader_tools_parse_and_verify() {
     // Made once by the frozen loader tools (docs/development.md, "Formats"): the package format must stay byte compatible.
-    let loader = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/loader-esp32c6.pkg")).unwrap();
+    let loader = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/loader-esp32c6.pkg")).unwrap();
     let p = Package::parse(&loader).unwrap();
     assert_eq!(p.verify(), None);
     assert_eq!((p.header.target, p.header.cpu, p.header.version), (target::LOADER, cpu::ESP32C6, 9));
-    let module = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/module-lora-esp32c6.pkg")).unwrap();
+    let module = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/module-lora-esp32c6.pkg")).unwrap();
     let p = Package::parse(&module).unwrap();
     assert_eq!((p.verify(), p.header.name()), (None, &b"lora"[..]));
     assert_eq!(p.header.target, target::MODULE);

@@ -463,7 +463,7 @@ mod tests {
             next_id: 0,
             pending: None,
             relay_links: [0; 12],
-            relay_alarm: 0,
+            relay_alarm: 0, routing:None,
         };
         let mut b = [0; 128];
         let mut w = Writer::new(&mut b);
