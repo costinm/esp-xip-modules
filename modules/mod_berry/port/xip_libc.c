@@ -5,12 +5,14 @@
  * `longjmp`, which come from the toolchain's libc object (be_exec.c unwinds through them, and the
  * toolchain's version is the one whose register handling matches the firmware's ABI).
  *
- * This file defines no libc names on the host: the host .so runs against the real libc, and defining
- * memcpy or snprintf inside a shared object would interpose them for the whole process. The
+ * This file defines no libc names on the host: the host build (crates/berry-c) runs against the
+ * real libc, and defining memcpy or snprintf in the linked archive would interpose them for the
+ * whole process. The
  * formatter core below is the exception - it is compiled on the host too, under its own name
  * (xip_fmt_vsnprintf), so the host tests exercise the same code a device image carries.
  *
- * What the retained Berry sources ask for (scripts/build-host-c-modules.sh keeps the same skip
+ * What the retained Berry sources ask for (crates/berry-c/build.rs and tools/build_c_mod.py keep
+ * the same skip
  * list): the string and memory functions, `abs`, `tolower`/`toupper`, the ctype tests, `fmod` (the
  * VM's % on reals), and `snprintf` (the interpreter's value-to-text and string.format). `snprintf`
  * covers the conversions Berry produces - %c %d %i %u %o %x %X %s %p %f %e %g F/E/G %% with flags,
@@ -186,7 +188,7 @@ double fmod(double x, double y)
     if (ax < ay)
         return x;
     double s = ay;
-    while (s <= ax && s < DBL_MAX)
+    while (s <= ax && s <= DBL_MAX / 2)         /* doubling past DBL_MAX would make s infinite and the next loop endless */
         s += s;
     while (s >= ay) {
         if (ax >= s)
@@ -205,6 +207,7 @@ double fmod(double x, double y)
  * the end of the file hands it out under the libc names. */
 
 #define XIP_FMT_PREC_MAX 30                     /* a longer fraction than this is noise */
+#define XIP_FMT_BUF_MAX  384                    /* %f of 1e308 is 309 digits, of 1e-320 is 319 zeros, plus 30 of precision */
 #define XIP_FMT_DIG_MAX  46                     /* digits generated per number, buffer bound */
 
 typedef struct {
@@ -420,7 +423,7 @@ static size_t xip_ftoa(double v, char conv, int prec, bool has_prec, bool alt, c
 static void xip_fmt_float(xip_sink *o, double v, char conv, int prec, bool has_prec, bool alt,
                           int width, bool left, char pad, bool plus, bool space)
 {
-    char buf[80];
+    char buf[XIP_FMT_BUF_MAX];
     size_t n = 0;
     char sign = 0;
     bool upper = conv == 'E' || conv == 'F' || conv == 'G';

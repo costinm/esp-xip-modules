@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Map a module image from flash, run it on its own task, stop it, report on it.
  *
- * Where the code runs depends on the chip:
- *  - ESP32 and ESP32-S3 (Xtensa): the toolchain cannot make position independent code, so each module
- *    is linked for one fixed address (code_base + its window slot, the index of its RAM cell, 64 KiB each) and the loader maps the
- *    flash page it was found on at exactly that address in both the instruction and the data alias (literals are data loads).
- *    The image may sit on any flash page. That needs the HAL MMU calls: esp_partition_mmap() never lets the caller choose the address.
- *  - ESP32-C6 (RISC-V): the image is position independent; esp_partition_mmap() is enough.
+ * Where the code runs depends on the chip, but the address is always the module's own: each image is
+ * linked for one fixed address (code_base + its window slot, the index of its RAM cell, 64 KiB each)
+ * and the loader maps the flash page it was found on at exactly that address, in every chip's
+ * instruction and data address space. The image may sit on any flash page. That needs the HAL MMU
+ * calls: esp_partition_mmap() never lets the caller choose the address. Xtensa maps the pages twice
+ * (code and the data-bus alias, because literals are data loads); ESP32-C6 has one linear region
+ * that both buses read, so its code and data window are the same pages once mapped.
  * The fixed-address part is the proven code of DMesh's module loader (docs/architecture.md). */
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,7 +19,7 @@
 #include "freertos/task.h"
 #include "internal.h"
 #include "xip_module_ram.h"
-#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32
+#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32C6
 #include "esp_cache.h"
 #include "hal/mmu_hal.h"
 #include "hal/mmu_types.h"
@@ -44,6 +45,14 @@ xip_loader_t em;
 /* Above Main's own IROM (0x400d0000..) and DROM. */
 #define XIP_CODE_BASE 0x40300000u
 #define XIP_DATA_BASE 0x3f700000u
+#define XIP_WINDOW_BYTES (XIP_DMOD_STATIC_SLOTS * XIP_DMOD_WINDOW_SLOT_BYTES)
+#elif CONFIG_IDF_TARGET_ESP32C6
+#define XIP_FIXED 1
+/* One linear flash region serves both buses (SOC_IRAM0/DRAM0 share the vaddr range, 64 KiB MMU pages),
+ * so code_base == data_base. The window sits above the pages Stage2 maps for Main or loader
+ * (Main ends at 0x42280000) and inside the 8 MiB of linear space the MMU covers. */
+#define XIP_CODE_BASE 0x42400000u
+#define XIP_DATA_BASE 0x42400000u
 #define XIP_WINDOW_BYTES (XIP_DMOD_STATIC_SLOTS * XIP_DMOD_WINDOW_SLOT_BYTES)
 #else
 #define XIP_FIXED 0
@@ -122,20 +131,21 @@ static esp_err_t map_fixed(int slot, const xip_dmod_header *h, fixed_map_t *m)
     map_aliases_esp32(paddr, h->image_size, h->code_vma, h->data_vma, &code_len, &data_len);
 #else
     mmu_hal_map_region(id, MMU_TARGET_FLASH0, h->code_vma, paddr, h->image_size, &code_len);
-    mmu_hal_map_region(id, MMU_TARGET_FLASH0, h->data_vma, paddr, h->image_size, &data_len);
+    if (h->data_vma == h->code_vma) data_len = code_len;    /* C6: one linear region, one mapping */
+    else mmu_hal_map_region(id, MMU_TARGET_FLASH0, h->data_vma, paddr, h->image_size, &data_len);
 #endif
     if (code_len < rounded || data_len < rounded) {
         mmu_hal_unmap_region(id, h->code_vma, code_len);
-        mmu_hal_unmap_region(id, h->data_vma, data_len);
+        if (h->data_vma != h->code_vma) mmu_hal_unmap_region(id, h->data_vma, data_len);
         return ESP_FAIL;
     }
 #if !CONFIG_IDF_TARGET_ESP32
     /* A previous module may have occupied either alias: drop stale cache lines. */
     esp_err_t e = esp_cache_msync((void *)h->code_vma, code_len, ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST);
-    if (e == ESP_OK) e = esp_cache_msync((void *)h->data_vma, data_len, ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+    if (e == ESP_OK && h->data_vma != h->code_vma) e = esp_cache_msync((void *)h->data_vma, data_len, ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
     if (e != ESP_OK) {
         mmu_hal_unmap_region(id, h->code_vma, code_len);
-        mmu_hal_unmap_region(id, h->data_vma, data_len);
+        if (h->data_vma != h->code_vma) mmu_hal_unmap_region(id, h->data_vma, data_len);
         return e;
     }
 #endif
@@ -146,7 +156,7 @@ static esp_err_t map_fixed(int slot, const xip_dmod_header *h, fixed_map_t *m)
 static void unmap_fixed(const fixed_map_t *m)
 {
     mmu_hal_unmap_region(mmu_id(), m->code_vaddr, m->mapped);
-    mmu_hal_unmap_region(mmu_id(), m->data_vaddr, m->mapped);
+    if (m->data_vaddr != m->code_vaddr) mmu_hal_unmap_region(mmu_id(), m->data_vaddr, m->mapped);
 }
 #endif
 

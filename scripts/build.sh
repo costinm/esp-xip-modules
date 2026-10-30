@@ -78,7 +78,15 @@ for cpu in $cpus; do
         mod=$(basename $dir)
         version=0
         for kv in ${XIP_MODULE_VERSIONS:-}; do [[ ${kv%%=*} == $mod ]] && version=${kv#*=}; done
-        python3 tools/build_mod.py $dir --chip $cpu --out $out/modules --version $version
+        if [ -f $dir/Cargo.toml ]; then
+            python3 tools/build_mod.py $dir --chip $cpu --out $out/modules --version $version
+        else
+            rc=0
+            python3 tools/build_c_mod.py $dir --chip $cpu --out $out/modules/$mod.dmod --version $version || rc=$?
+            # exit 3: the module declares other chips (modules/C-MODULES); it takes no page here.
+            if [ $rc == 3 ]; then continue; fi
+            [ $rc == 0 ] || exit $rc
+        fi
         echo "$mod $offset $(python3 -c "import sys; sys.path.insert(0, 'tools'); import mkmod; print(mkmod.read_slots()['$mod'])")" >> $out/modules.txt
         image_bytes=$(stat -c %s "$out/modules/$mod.dmod")
         offset=$((offset + ((image_bytes + 65535) / 65536) * 65536))

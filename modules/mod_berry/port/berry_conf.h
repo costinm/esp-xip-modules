@@ -62,7 +62,7 @@ void xip_be_exit(int status);
 
 /* Built-in modules: pure Berry-side libraries only. `math` needs libm, `time`/`os` need the operating
  * system, `json`/`solidify` pull in big formatters, and their sources are not even compiled - see
- * scripts/build-host-c-modules.sh. */
+ * crates/berry-c/build.rs and tools/build_c_mod.py. */
 #define BE_USE_STRING_MODULE            1
 #define BE_USE_JSON_MODULE              0
 #define BE_USE_MATH_MODULE              0

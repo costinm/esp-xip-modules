@@ -29,7 +29,9 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 CHIPS = {
     "esp32":   dict(prefix="xtensa-esp32-elf", fixed=True, code_base=0x40300000, data_base=0x3F700000, rust_target="xtensa-esp32-espidf"),
     "esp32s3": dict(prefix="xtensa-esp32s3-elf", fixed=True, code_base=0x43000000, data_base=0x3D000000, rust_target="xtensa-esp32s3-espidf"),
-    "esp32c6": dict(prefix="riscv32-esp-elf", fixed=False, code_base=0, data_base=0,
+    # C6 has one linear flash region that both buses read (SOC_IRAM0/DRAM0 share the vaddrs), so the
+    # data window is the code window; it starts above the pages Stage2 maps for Main (<= 0x42280000).
+    "esp32c6": dict(prefix="riscv32-esp-elf", fixed=True, code_base=0x42400000, data_base=0x42400000,
                     rust_target="riscv32imac-unknown-none-elf"),
 }
 
@@ -239,7 +241,8 @@ def cargo_link(cfg, cargo, window, link_script, tmp, static_addr):
     """Return link(data_vma) -> elf for a Rust module: `cargo rustc` of the bin with the module linker script.
 
     cargo = (manifest, bin, features). Needs the Rust toolchain with the ESP targets on the PATH (rust-src for
-    -Zbuild-std). Xtensa Rust cannot produce PIC: it is linked at the page's fixed address (like C).
+    -Zbuild-std). Fixed-window chips link like C (relocation-model=static); only a PIC chip uses
+    relocation-model=pic.
     """
     manifest, binname, features = cargo
     features = ",".join(filter(None, [features, "xip-abi/global-alloc", "xip-abi/allocator-api"]))
@@ -299,8 +302,9 @@ def module_manifest(cargo, name=None, tag=None, autostart=None, port=0, stream=0
 
 def build(chip, out, name=None, tag=None, slot=0, stack=8192, state=0, keep_elf=None, cargo=None,
           autostart=None, port=0, stream=0, version=0, components=(), envelopes=()):
-    """`slot` selects the module's RAM cell on every chip. Xtensa also links code for code_base + slot * 64 KiB; the image can then be
-    installed on any flash page, the loader maps that page at the module's window slot. PIC code needs no window."""
+    """`slot` selects the module's RAM cell on every chip. Every chip also links code for code_base + slot * 64 KiB; the image can then be
+    installed on any flash page, the loader maps that page at the module's window slot. (PIC linking stays
+    available for a chip without fixed windows; nothing ships PIC today.)"""
     cfg = CHIPS[chip]
     static_addr = static_address(chip, slot)
     module_key = os.path.basename(os.path.dirname(cargo[0])) if cargo else ""

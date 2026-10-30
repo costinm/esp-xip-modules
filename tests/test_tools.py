@@ -126,7 +126,8 @@ class Slots(unittest.TestCase):
     def test_chip_windows_match_the_loader(self):
         loader = read("components", "xip_loader", "src", "loader.c")
         for chip, ifdef in (("esp32s3", "#if CONFIG_IDF_TARGET_ESP32S3\n#define XIP_FIXED"),
-                            ("esp32", "#elif CONFIG_IDF_TARGET_ESP32\n#define XIP_FIXED")):
+                            ("esp32", "#elif CONFIG_IDF_TARGET_ESP32\n#define XIP_FIXED"),
+                            ("esp32c6", "#elif CONFIG_IDF_TARGET_ESP32C6\n#define XIP_FIXED")):
             block = loader[loader.index(ifdef):]
             code = int(re.search(r"XIP_CODE_BASE (0x[0-9a-fA-F]+)u", block).group(1), 16)
             data = int(re.search(r"XIP_DATA_BASE (0x[0-9a-fA-F]+)u", block).group(1), 16)

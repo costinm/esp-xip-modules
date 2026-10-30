@@ -1,0 +1,16 @@
+# C modules (no Cargo.toml): built for a device by tools/build_c_mod.py (a .dmod); for the host a
+# thin crate compiles the same sources into the test binary (crates/berry-c builds mod_berry) and
+# xip-runtime-host runs it as a natively linked handler (Runtime::add_handler) - Rust modules reach
+# the host as wasm (modules/WASM.md), a C module is linked in. Both builders compile the same
+# sources: mod_<name>/mod_<name>.c,
+# everything in mod_<name>/port/ and, when present, the vendored tree in mod_<name>/berry/ minus the
+# libraries the port's berry_conf.h switches off (the skip list is kept in both builders).
+# Format: name:component_number:state_bytes[:chips]. The slot is modules/SLOTS, the stack
+# modules/retained-memory.json. The optional chips column lists what a device build supports
+# (default: every chip); tools/build_c_mod.py exits 3 for the rest and scripts/build.sh skips them.
+# The component number must be free (used: 0 host, 1 transport, 2 test, 10 wifi, 13 quic, 14 stream,
+# 20 console, 43..49, 50 berry, 104 ble).
+# Every chip links modules at fixed windows (mkmod.CHIPS, checked against loader.c by tests), so a C
+# const table that points into its own image - Berry's precompiled objects - survives: the loader maps
+# each module's flash pages at exactly its link addresses.
+berry:50:1696:esp32,esp32s3,esp32c6

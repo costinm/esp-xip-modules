@@ -50,6 +50,15 @@ static int berry_compile(bvm *vm, const char *name, const char *src, size_t len)
     return be_loadbuffer(vm, name, src, len);
 }
 
+/* The result's text, made inside a protected call: be_tostring runs a class's own tostring(), which
+ * may raise, and a throw outside any pcall ends in xip_be_abort - one script would kill the module. */
+static int berry_tostring(bvm *vm)
+{
+    be_tostring(vm, 1);
+    be_pushvalue(vm, 1);
+    be_return(vm);
+}
+
 /* Run one piece of source on the VM. The interpreter's own writing (print, errors) lands in
  * st->out; the return value of the script, converted to text, is returned - valid until the next
  * Berry allocation, so the caller copies it into the answer first. */
@@ -70,8 +79,17 @@ static const char *berry_run(berry_state *st, const char *name, const char *src,
         return NULL;
     }
     if (be_isnil(vm, -1)) { be_pop(vm, 1); return NULL; }
-    const char *result = be_tostring(vm, -1);
-    be_pop(vm, 1);
+    be_pushntvfunction(vm, berry_tostring);
+    be_pushvalue(vm, -2);
+    if (be_pcall(vm, 1)) {                     /* tostring() raised: report it like any runtime error */
+        *status = 2;
+        be_dumpexcept(vm);
+        be_pop(vm, 1);                         /* the value itself */
+        return NULL;
+    }
+    be_pop(vm, 1);                             /* the argument; the text is below it, then the value */
+    const char *result = be_tostring(vm, -1);  /* already a string: nothing runs */
+    be_pop(vm, 2);
     return result;
 }
 

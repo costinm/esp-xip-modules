@@ -1,4 +1,8 @@
 {
+  "mod_berry": {
+    "state_bytes": 1696,
+    "stack_bytes": 8192
+  },
   "mod_ble": {
     "state_bytes": 128,
     "stack_bytes": 4096

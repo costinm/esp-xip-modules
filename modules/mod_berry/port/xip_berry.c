@@ -11,8 +11,10 @@
 #include "xip_module.h"
 #include "xip_berry.h"
 
-/* Host build: one cell per instance, because the runtime maps each instance's copy of the .so
- * separately. A packed image replaces XIP_CELL with an absolute address and compiles out this. */
+/* Host build: one cell for the whole binary. The module was written for a runtime that serves one
+ * module call at a time, and that is how a linked build keeps it: crates/berry-c holds a lock
+ * around each call to xip_handle, so one call - one instance's cell - is live at a time, as on a
+ * device. A packed image replaces XIP_CELL with an absolute address and compiles out this. */
 #ifndef XIP_CELL_ADDR
 void *xip_cell[4];
 #endif

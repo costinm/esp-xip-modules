@@ -16,7 +16,7 @@ typedef struct {
     uint32_t static_addr;       /* identity from the image, never its discovery index */
     bool starting;             /* claims the cell before an instance is created */
     xip_instance_t *inst;      /* NULL when not running */
-#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C6
     fixed_map_t fixed;
 #else
     esp_partition_mmap_handle_t mmap;

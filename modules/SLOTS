@@ -14,3 +14,4 @@ mod_rtest  5
 mod_ble    6
 mod_quic   9 4
 mod_system 13
+mod_berry  14 2

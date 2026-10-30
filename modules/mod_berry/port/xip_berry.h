@@ -10,10 +10,10 @@
  * a packed module reaches its writable word through 16 bytes of platform RAM reserved for its slot at
  * a fixed address - the same arena and the same trick crates/xip-abi/src/heap.rs uses for a Rust
  * module's allocator binding. The packer hands that address to the C compiler as
- * -DXIP_CELL_ADDR=0x... (see tools/dmod.py static_address). A host or linked build keeps the cell in
- * a static instead: the host runtime maps each instance's copy of the .so separately, so each
- * instance owns its cell. Word 0 points at the state block of the call being served; the rest is
- * free. */
+ * -DXIP_CELL_ADDR=0x... (see tools/dmod.py static_address). A host or linked build keeps the cell
+ * in a static: one binary can serve several runtimes (the tests), and the entry is serialized by
+ * crates/berry-c - one call live at a time, exactly as the device runtime serves them. Word 0
+ * points at the state block of the call being served; the rest is free. */
 #ifdef XIP_CELL_ADDR
 #define XIP_CELL ((void **)(uintptr_t)(XIP_CELL_ADDR))
 #else

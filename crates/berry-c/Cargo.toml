@@ -1,0 +1,13 @@
+[package]
+name = "berry-c"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "modules/mod_berry compiled by build.rs into the host test binary: xip-runtime-host runs the C module as a natively linked handler (Runtime::add_handler)"
+publish = false
+
+[dependencies]
+xip-abi = { path = "../xip-abi" }
+
+[build-dependencies]
+cc = "1"

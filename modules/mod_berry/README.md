@@ -45,21 +45,29 @@ CBOR answer (`berry_state` in `port/xip_berry.h`, size-asserted in `mod_berry.c`
 memory - heap, VM stack, strings - is a host `mem_alloc` block with a 16-byte head, through the
 `BE_EXPLICIT_*` shims in `port/xip_berry.c`. Hooks that run without a call in hand (`be_writebuffer`,
 the allocator) reach the state block through the module cell: word 0 of a 16-byte RAM cell, which
-the handler installs on entry and restores on exit. A host build keeps that cell in a static; a
-packed image compiles it to an absolute address (`-DXIP_CELL_ADDR`, the Rust heap's trick).
+the handler installs on entry and restores on exit (the Rust heap's `enter`/`leave`, the same rule
+in `crates/xip-abi/src/heap.rs`: calls sharing an image's cell are serialized, never thread-local).
+A host build keeps that cell in one global and `crates/berry-c` holds a lock around each call - one
+call live at a time, as on a device; a packed image compiles it to an absolute address
+(`-DXIP_CELL_ADDR`).
 
 ## Build and test (host)
 
-    scripts/build-host-c-modules.sh        # target/host-modules/mod_berry.so + mod_berry.json sidecar
     cargo test --manifest-path crates/Cargo.toml -p xip-runtime-host --test c_berry
 
-The sidecar manifest is still empty (`mkmod` with no API.md); the API text lives here and in the
-module header until the module gets an API.md of its own.
+`crates/berry-c` compiles these very sources with the host cc (its `build.rs`) into the test
+binary; `c_berry.rs` registers the result with `Runtime::add_handler` - the same `xip_handle(host,
+state, call)` a device calls, with the state (1696) and component (50) `modules/C-MODULES`
+declares. Rust modules reach the host runtime as wasm (`modules/WASM.md`); a C module has no wasm
+build and is not loaded as a `.so` either: it is linked in. The manifest (`{1: name, 2: tag}`) is
+written into the device image by `tools/build_c_mod.py`; the API text lives here and in the module
+header until the module gets an API.md of its own.
 
 ## Device build
 
-    python3 tools/build_c_mod.py modules/mod_berry --chip esp32      # target/out/esp32/modules/mod_berry.dmod
-    python3 tools/build_c_mod.py modules/mod_berry --chip esp32s3    # 93,712 bytes in the two-page span
+    python3 tools/build_c_mod.py modules/mod_berry --chip esp32      # 93,552 bytes in the two-page span
+    python3 tools/build_c_mod.py modules/mod_berry --chip esp32s3    # 93,712 bytes in the same span
+    python3 tools/build_c_mod.py modules/mod_berry --chip esp32c6    # 102,736 bytes in the same span
 
 `scripts/build.sh` builds the module for the chips `modules/C-MODULES` allows. The device link is
 `-nostdlib` apart from `setjmp`/`longjmp` (the toolchain's `libc.a` is the one whose register
