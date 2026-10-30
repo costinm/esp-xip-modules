@@ -91,6 +91,6 @@ pub fn provide<T: Api>(hw: &Hw, call: &CallView, hosted: *mut Hosted, state: *mu
             set_announce: Some(v_set_announce::<T>),
             transport_set: Some(v_transport_set::<T>),
         };
-        hw.provide_table(call, core::ptr::addr_of!((*hosted).table).cast(), core::ptr::addr_of_mut!((*hosted).ctx).cast())
+        hw.provide_table(call, core::ptr::addr_of!((*hosted).table).cast(), core::ptr::addr_of_mut!((*hosted).ctx).cast(), xip_abi::schema::SCHEMA_NAN)
     }
 }

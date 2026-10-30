@@ -1,6 +1,6 @@
 use super::*;
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
-use std::{collections::HashMap, vec, vec::Vec};
+use std::{vec, vec::Vec};
 #[derive(Clone)]
 struct Raw(Vec<u8>);
 impl FlashOps for Raw {
@@ -24,8 +24,6 @@ struct Fake {
     input: Vec<u8>,
     at: usize,
     out: Vec<u8>,
-    packets: HashMap<u32, Vec<u8>>,
-    next: u32,
     job: Option<(u64, i32)>,
     busy_once: bool,
     writes: Vec<(u32, usize)>,
@@ -89,8 +87,6 @@ impl Fake {
             input,
             at: 0,
             out: Vec::new(),
-            packets: HashMap::new(),
-            next: 1,
             job: None,
             busy_once: true,
             writes: Vec::new(),
@@ -210,7 +206,7 @@ unsafe extern "C" fn write(
     if f.job.is_some() {
         return ERR_BUSY;
     }
-    let packet = f.packets.remove(&pkt).unwrap();
+    let packet = crate::psa_test::pkts::remove(pkt).unwrap();
     let a = (b + o) as usize;
     let rc = if f.fail_commit && (0xee000..0xf0000).contains(&a) {
         xip_abi::ERR_IO
@@ -224,27 +220,20 @@ unsafe extern "C" fn write(
     f.job = Some((id, rc));
     0
 }
-unsafe extern "C" fn pkt_alloc(u: *mut core::ffi::c_void, p: *mut u32) -> i32 {
-    let f = f(u);
-    *p = f.next;
-    f.packets.insert(f.next, vec![0; 256]);
-    f.next += 1;
+unsafe extern "C" fn pkt_alloc(_: *mut core::ffi::c_void, p: *mut u32) -> i32 {
+    *p = crate::psa_test::pkts::alloc();
     0
 }
 unsafe extern "C" fn pkt_buf(
-    u: *mut core::ffi::c_void,
+    _: *mut core::ffi::c_void,
     p: u32,
     out: *mut *mut u8,
     cap: *mut usize,
 ) -> i32 {
-    let f = f(u);
-    let b = f.packets.get_mut(&p).unwrap();
-    *out = b.as_mut_ptr();
-    *cap = b.len();
-    0
+    crate::psa_test::pkts::window(p, out, cap)
 }
-unsafe extern "C" fn pkt_free(u: *mut core::ffi::c_void, p: u32) -> i32 {
-    f(u).packets.remove(&p);
+unsafe extern "C" fn pkt_free(_: *mut core::ffi::c_void, p: u32) -> i32 {
+    crate::psa_test::pkts::remove(p);
     0
 }
 unsafe extern "C" fn pkt_info(_: *mut core::ffi::c_void, start: *mut u32, cap: *mut u32) -> i32 {
@@ -332,7 +321,7 @@ fn run(f: &mut Fake) -> (Connection, bool) {
         hw.pkt_free(c.rx);
         c.rx = 0;
     }
-    assert!(f.packets.is_empty());
+    assert!(crate::psa_test::pkts::is_empty());
     (c, done)
 }
 fn module_image() -> Vec<u8> {
@@ -501,7 +490,7 @@ fn raw_flash_uses_the_signed_address_and_accepts_arbitrary_bytes() {
         assert_eq!(f.out, b"OK 4115\n");
         assert_eq!(&f.flash[address as usize..address as usize+image.len()], &image);
         assert!(!f.writes.iter().any(|(a,_)| (0xee000..0xf0000).contains(a)));
-        assert!(f.packets.is_empty());
+        assert!(crate::psa_test::pkts::is_empty());
     }
     let mut dry = Fake::named(&image, target::FLASH, true, b"00009000");
     run(&mut dry);assert!(dry.writes.is_empty());
@@ -878,7 +867,7 @@ fn expanded_module_partition_admits_and_protects_high_pages() {
 unsafe extern "C" fn stream_reply(u:*mut core::ffi::c_void,_:u32,pkt:u32,len:u32,fin:u32)->i32 {
     assert_eq!(fin,1);
     let f=f(u);
-    let bytes=f.packets.remove(&pkt).expect("reply transfers exact owned packet");
+    let bytes=crate::psa_test::pkts::remove(pkt).expect("reply transfers exact owned packet");
     f.out.extend_from_slice(&bytes[..len as usize]);0
 }
 static STREAM:xip_abi::Stream=xip_abi::Stream{listen:None,version:1,size:core::mem::size_of::<xip_abi::Stream>() as u32,
@@ -913,6 +902,6 @@ fn stream_upload_matches_tcp_commit_and_rejects_corruption_without_socket_reads(
         assert_eq!(f.flash,tcp.flash,"both transports have identical durable flash and journal state");
         assert_eq!(f.rescans,tcp.rescans);
         assert_eq!(c.rx,0,"QUIC body must never allocate a socket read packet");
-        assert!(f.packets.is_empty(),"reply lease transfers once and is reclaimed");
+        assert!(crate::psa_test::pkts::is_empty(),"reply lease transfers once and is reclaimed");
     }
 }

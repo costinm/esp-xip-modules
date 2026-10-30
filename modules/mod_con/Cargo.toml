@@ -18,8 +18,8 @@ mkmod = "--stack 8192 --state 0 --autostart"
 
 [features]
 flat-image = ["xip-abi/global-alloc"]
-# the panic handler of a no_std library built as a shared object for crates/xip-runtime-host (scripts/build-host-modules.sh)
-sim = []
+# the panic handler and the global allocator of a no_std library built as wasm for crates/xip-runtime-host (scripts/build-host-modules.sh)
+sim = ["xip-abi/global-alloc"]
 
 [lib]
 crate-type = ["rlib"]

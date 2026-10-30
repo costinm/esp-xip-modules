@@ -42,9 +42,12 @@ static int open_key(mbedtls_svc_key_id_t *key)
     nvs_close(ns);
     return status == PSA_SUCCESS ? 0 : XIP_ERR_IO;
 }
-static int public_key(void *ctx, uint8_t *out)
+extern uint8_t *xip_runtime_packet_range(uint32_t pkt, uint32_t offset, uint32_t len, bool write);
+
+static int public_key(void *ctx, uint32_t pkt, uint32_t off)
 {
     (void)ctx;
+    uint8_t *out = xip_runtime_packet_range(pkt, off, 65, true);
     if (!out) return XIP_ERR_ARG;
     mbedtls_svc_key_id_t key;
     int rc = open_key(&key);
@@ -54,9 +57,11 @@ static int public_key(void *ctx, uint8_t *out)
     psa_status_t cleanup = psa_destroy_key(key);
     return status == PSA_SUCCESS && cleanup == PSA_SUCCESS && n == 65 ? 0 : XIP_ERR_IO;
 }
-static int sign_message(void *ctx, const uint8_t *data, size_t len, uint8_t *signature)
+static int sign_message(void *ctx, uint32_t pkt, uint32_t off, uint32_t len, uint32_t out_pkt, uint32_t out_off)
 {
     (void)ctx;
+    const uint8_t *data = xip_runtime_packet_range(pkt, off, len, false);
+    uint8_t *signature = xip_runtime_packet_range(out_pkt, out_off, 64, true);
     if ((!data && len) || !signature) return XIP_ERR_ARG;
     mbedtls_svc_key_id_t key;
     int rc = open_key(&key);
@@ -71,7 +76,7 @@ static int sign_message(void *ctx, const uint8_t *data, size_t len, uint8_t *sig
 }
 /* Native MPI decompression: y^2=x^3-3x+B, p=3 mod 4. SDK PSA public-key
  * import need not support SEC1 compressed points, which are the DMesh wire key. */
-static int expand_public(const uint8_t *in, size_t len, uint8_t out[65])
+int xip_identity_expand_public(const uint8_t *in, size_t len, uint8_t out[65])
 {
     if (len == 65 && in[0] == 4) { memcpy(out, in, 65); return 0; }
     if (len != 33 || (in[0] != 2 && in[0] != 3)) return XIP_ERR_ARG;
@@ -104,33 +109,10 @@ static int expand_public(const uint8_t *in, size_t len, uint8_t out[65])
     mbedtls_mpi_free(&exp); mbedtls_mpi_free(&check); mbedtls_ecp_group_free(&g);
     return rc ? XIP_ERR_ARG : 0;
 }
-static int verify_message(void *ctx, const uint8_t *public, size_t public_len,
-                          const uint8_t *data, size_t len, const uint8_t *signature)
-{
-    (void)ctx;
-    if (!public || !signature || (!data && len)) return XIP_ERR_ARG;
-    uint8_t expanded[65], hash[32]; size_t n = 0;
-    int rc = expand_public(public, public_len, expanded);
-    if (rc) return rc;
-    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_type(&attrs, PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1));
-    psa_set_key_bits(&attrs, 256); psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_VERIFY_HASH);
-    psa_set_key_algorithm(&attrs, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
-    mbedtls_svc_key_id_t key;
-    psa_status_t status = psa_import_key(&attrs, expanded, sizeof(expanded), &key);
-    psa_reset_key_attributes(&attrs);
-    if (status != PSA_SUCCESS) return XIP_ERR_ARG;
-    status = psa_hash_compute(PSA_ALG_SHA_256, data, len, hash, sizeof(hash), &n);
-    if (status == PSA_SUCCESS && n == sizeof(hash))
-        status = psa_verify_hash(key, PSA_ALG_ECDSA(PSA_ALG_SHA_256), hash, n, signature, 64);
-    else status = PSA_ERROR_GENERIC_ERROR;
-    psa_status_t cleanup = psa_destroy_key(key);
-    return status == PSA_SUCCESS && cleanup == PSA_SUCCESS ? 0 : XIP_ERR_ARG;
-}
 const xip_identity *xip_identity_component(void)
 {
     static const xip_identity table = {
-        .version = 1, .size = sizeof(xip_identity), .public_key = public_key, .sign = sign_message, .verify = verify_message,
+        .version = 1, .size = sizeof(xip_identity), .public_key = public_key, .sign = sign_message,
     };
     return &table;
 }

@@ -1,7 +1,9 @@
 # mod_con
 
-Device control for module lifecycle, status, reset and saved
-settings. Binary clients call `console.status`, `start`, `stop`, `reset`
+Debug and special handlers for module lifecycle, status, reset and saved
+settings; not a console. It has no port: requests arrive as envelopes in QUIC
+packets (UDP 3339 by default, PPP port 0xf7, `ble`, `espnow`) and the runtime
+dispatches them. Binary clients call `console.status`, `start`, `stop`, `reset`
 and `nv`. The runtime handles correlated envelope dispatch. Native
 Wi-Fi state and nonblocking scan results are encoded here from the host Wi-Fi
 table. See

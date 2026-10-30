@@ -19,7 +19,7 @@ mkmod = "--name system --tag 49 --stack 4096 --state 64 --autostart --components
 [features]
 # The runtime supplies allocator context for module calls, not the test harness.
 flat-image = ["xip-abi/global-alloc"]
-# the panic handler of a no_std library built as a shared object for crates/xip-runtime-host (scripts/build-host-modules.sh)
+# the panic handler and the global allocator of a no_std library built as wasm for crates/xip-runtime-host (scripts/build-host-modules.sh)
 sim = ["xip-abi/global-alloc"]
 
 [lib]

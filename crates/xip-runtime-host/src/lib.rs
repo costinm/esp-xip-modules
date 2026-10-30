@@ -19,50 +19,74 @@ mod link;
 mod envelope;
 mod hosted;
 pub mod quic;
+mod quic_udp;
+mod crypto;
 mod wifi;
 mod power;
 
 pub use link::NativeTx;
 pub use quic::{QuicClass, QuicHeader, QuicInfo, QuicKind, QuicPacket, QuicStats};
 pub use network::Ports;
+pub use quic_udp::{QuicUdp, DEFAULT_PORT as QUIC_UDP_PORT};
 pub use runtime::{Config, Event, Instance, MainMsg, Runtime, Trace, TraceKind};
 pub use xip_abi;
+/// Where the device identity persists (call before the first use; see `xip_psa::set_identity_dir`).
+pub use xip_psa::set_identity_dir;
+pub use xip_wasm as wasm;
+use xip_wasm::SLOTS;
 
 /// A module handler: what a module exports as `xip_handle`.
 pub type HandlerFn = unsafe extern "C" fn(*const xip_abi::Host, *mut u8, *const xip_abi::Call) -> i32;
 
-/// A module loaded from a shared object built for this host (see `scripts/build-host-modules.sh`).
+/// A module loaded from a WebAssembly file built for this host (see `scripts/build-host-modules.sh`), or a handler linked into this process.
+///
+/// A wasm module is linked at the address of its slot (`modules/WASM.md`), so the runtime needs one file per slot: for
+/// `mod_rtest.wasm` it reads `mod_rtest.s1.wasm` for the first wasm module of the runtime, `mod_rtest.s2.wasm` for the second, and so on.
 #[derive(Clone, serde::Deserialize)]
 pub struct ModuleMetadata { pub state_bytes: usize, pub manifest: Vec<u8> }
 
+pub(crate) enum Kind {
+    Native(HandlerFn),
+    Wasm { stem: std::path::PathBuf },
+}
+
 pub struct Loaded {
-    pub handler: HandlerFn,
-    _lib: Option<libloading::Library>,
+    pub(crate) kind: Kind,
     metadata: Option<ModuleMetadata>,
 }
 
 impl Loaded {
-    /// Open `path` and look up its `xip_handle`.
-    ///
-    /// Every call copies the file first: each instance gets its own copy of the module's writable statics (the allocator
-    /// binding of a Rust module is one), as an image mapped for each instance on a device would.
+    /// Find the wasm module `path` (`NAME.wasm`, with `NAME.s1.wasm` ... beside it) and its generated metadata `NAME.json`.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Loaded, String> {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let copy = std::env::temp_dir().join(format!("xip-host-{}-{}.so", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-        std::fs::copy(path.as_ref(), &copy).map_err(|e| format!("{}: {e}", path.as_ref().display()))?;
-        let lib = unsafe { libloading::Library::new(&copy) };
-        let _ = std::fs::remove_file(&copy);
-        let lib = lib.map_err(|e| format!("{}: {e}", path.as_ref().display()))?;
-        let handler = unsafe { *lib.get::<HandlerFn>(b"xip_handle\0").map_err(|e| format!("xip_handle: {e}"))? };
-        let sidecar = path.as_ref().with_extension("json");
+        let path = path.as_ref();
+        if path.extension().is_none_or(|e| e != "wasm") {
+            return Err(format!("{}: modules are WebAssembly files (.wasm)", path.display()));
+        }
+        let stem = path.with_extension("");
+        let first = slot_file(&stem, 1);
+        if !first.exists() {
+            return Err(format!("{}: missing, run scripts/build-host-modules.sh", first.display()));
+        }
+        let sidecar = path.with_extension("json");
         let metadata = if sidecar.exists() {
             Some(serde_json::from_slice(&std::fs::read(&sidecar).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?)
         } else { None };
-        Ok(Loaded { handler, _lib: Some(lib), metadata })
+        Ok(Loaded { kind: Kind::Wasm { stem }, metadata })
+    }
+    /// The same module description (metadata) with `handler`, linked into this process, instead of the wasm code: a test checks the
+    /// ABI with native Rust allocations in the place of a module.
+    pub fn with_handler(mut self, handler: HandlerFn) -> Loaded {
+        self.kind = Kind::Native(handler);
+        self
     }
     /// A handler linked into this process.
     pub fn linked(handler: HandlerFn) -> Loaded {
-        Loaded { handler, _lib: None, metadata: None }
+        Loaded { kind: Kind::Native(handler), metadata: None }
     }
+}
+
+pub(crate) fn slot_file(stem: &std::path::Path, slot: usize) -> std::path::PathBuf {
+    let mut name = stem.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".s{slot}.wasm"));
+    stem.with_file_name(name)
 }

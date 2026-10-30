@@ -318,12 +318,9 @@ fn routing<'a>(hw: &Hw, cx: &'a mut Context) -> Result<&'a mut Routing, i32> {
         if !wire::unicast(state.sta_mac) {
             return Err(ERR_ARG);
         }
-        let psa = unsafe { psa::PsaTable::from_table(hw.get_component(c"psa").cast()) }
-            .ok_or(ERR_UNSUPPORTED)?;
+        let crypto = CryptoClient::from_host(*hw).ok_or(ERR_UNSUPPORTED)?;
         let mut random = [0; 8];
-        if unsafe { (psa.psa_generate_random)(random.as_mut_ptr(), random.len()) } != 0 {
-            return Err(ERR_IO);
-        }
+        crypto.random(&mut random).map_err(|_| ERR_IO)?;
         let session = u64::from_le_bytes(random).max(1);
         let ptr = hw
             .mem_alloc(core::mem::size_of::<Routing>())

@@ -14,6 +14,7 @@ spin = { version = "0.10", default-features = false, features = ["mutex","spin_m
 mkmod = "--name quic --tag 48 --stack 32768 --state 8 --port 244"
 [features]
 flat-image = ["xip-abi/global-alloc"]
+sim = ["xip-abi/global-alloc"]
 [[bin]]
 name = "mod_quic"
 required-features = ["flat-image"]

@@ -147,6 +147,7 @@ pub struct Power {
     /// fully decodes its CBOR envelope before extending shared activity by 5 s.
     /// Broadcast, malformed or nonlocal records never vote. Returns 1 if voted,
     /// 0 if ignored; the packet is borrowed only for this call.
+    /// note=a CBOR record inline
     pub received: Option<unsafe extern "C" fn(ctx: *mut c_void, record: *const u8, len: usize, directed: u32) -> c_int>,
 
 }

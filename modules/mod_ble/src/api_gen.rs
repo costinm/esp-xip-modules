@@ -304,6 +304,6 @@ pub fn provide<T: Api>(hw: &Hw, call: &CallView, hosted: *mut Hosted, state: *mu
             suspend: Some(v_suspend::<T>),
             resume: Some(v_resume::<T>),
         };
-        hw.provide_table(call, core::ptr::addr_of!((*hosted).table).cast(), core::ptr::addr_of_mut!((*hosted).ctx).cast())
+        hw.provide_table(call, core::ptr::addr_of!((*hosted).table).cast(), core::ptr::addr_of_mut!((*hosted).ctx).cast(), xip_abi::schema::SCHEMA_BLE)
     }
 }

@@ -32,7 +32,8 @@ if [ -z "$_em_path" ]; then
 fi
 _em_cli_bin=""
 [ ! -x "$_em_target/local/dmesh-cli/bin/dmesh-cli" ] || _em_cli_bin="$_em_target/local/dmesh-cli/bin:"
-export PATH="${XIP_DEV_BIN:+$XIP_DEV_BIN:}${_em_cli_bin}/usr/bin:/bin${_em_path}:$PATH"
+# The flake's tools (its python3 among them) come before the platform's /usr/bin: the scripts need the python the flake pins, not the distribution's.
+export PATH="${XIP_DEV_BIN:+$XIP_DEV_BIN:}${_em_cli_bin}${_em_path#:}${_em_path:+:}/usr/bin:/bin:$PATH"
 unset _em_cli_bin
 unset _em_path _em_d
 # Service catalogs (tools.json per service) for `mesh` and `dmesh-cli`: the dmesh build installs them (flake.nix, dmesh-cli package).

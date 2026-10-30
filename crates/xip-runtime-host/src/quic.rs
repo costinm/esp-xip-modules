@@ -225,6 +225,8 @@ pub(crate) struct QuicState {
     pub table: BTreeMap<Vec<u8>, QuicEntry>,
     pub stats: QuicStats,
     pub short_cid_len: usize,
+    /// The module that took the endpoint with `Quic::attach`: instance, its component and the method of its received packets.
+    pub module: Option<(std::rc::Rc<crate::runtime::Inst>, i32, i32)>,
     pub names: Vec<String>,
     pub replies: Vec<Reply>,
     next_reply: usize,

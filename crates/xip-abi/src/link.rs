@@ -216,9 +216,11 @@ pub struct Link {
     /// to the route or to every subscriber, with `source`, `signal` and `time_us` (the low 32 bits of the microsecond clock when
     /// the radio received it; 0: now). The packet is consumed whether this succeeds or not (a link with nobody listening is a
     /// success). `ERR_ARG` for an address this module does not provide.
+    /// note=packet handle: ownership moves to the link
     pub rx: Option<unsafe extern "C" fn(ctx: *mut c_void, addr: u32, pkt: u32, len: usize, source: u64, signal: i32, time_us: u32) -> c_int>,
     /// Release the provider's completed TX reference. `outcome` is retained for
     /// source compatibility; no packet or callback returns to the original sender.
+    /// note=packet handle: ownership moves back
     pub tx_done: Option<unsafe extern "C" fn(ctx: *mut c_void, addr: u32, pkt: u32, outcome: c_int) -> c_int>,
     /// The provider has capacity again after refusing a frame: every subscriber gets `LINK_EVENT_READY`.
     pub ready: Option<unsafe extern "C" fn(ctx: *mut c_void, addr: u32) -> c_int>,

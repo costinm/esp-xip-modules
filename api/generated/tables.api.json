@@ -1,0 +1,2874 @@
+{
+  "components": [
+    {
+      "doc": "The `wifi` component table, from `get_component(\"wifi\")`. Valid for the firmware lifetime. The functions take no\ncontext argument and may be called from any module handler; they never block.",
+      "name": "wifi",
+      "x-c": {
+        "mode": "shims",
+        "table": "Wifi",
+        "version": "WIFI_VERSION"
+      }
+    },
+    {
+      "doc": "The `wifi-tuning` component table, from `get_component(\"wifi-tuning\")`; absent on a host without a Wi-Fi owner.\nSame rules as [`Wifi`]: `ctx` first, never blocks, valid for the firmware lifetime.",
+      "name": "wifi-tuning",
+      "x-c": {
+        "mode": "shims",
+        "table": "WifiTuner",
+        "version": "WIFI_TUNING_VERSION"
+      }
+    },
+    {
+      "doc": "The `link` component table, from `get_component(\"link\")`. Valid for the firmware lifetime; every function takes `ctx`\nfirst (the `user` of the host table) and never blocks. Results are negative `ERR_*`.",
+      "name": "link",
+      "x-c": {
+        "mode": "shims",
+        "table": "Link",
+        "version": "LINK_VERSION"
+      }
+    },
+    {
+      "doc": "The `power` component table, from `get_component(\"power\")`. The functions take no context argument other than `ctx` and never block.",
+      "name": "power",
+      "x-c": {
+        "mode": "shims",
+        "table": "Power",
+        "version": "POWER_VERSION"
+      }
+    },
+    {
+      "doc": "The `nimble` component table, from `get_component(\"nimble\")`; absent on a host without BLE. `ctx` first, never blocks, valid for the firmware\nlifetime. The order of the members is part of the ABI.",
+      "name": "nimble",
+      "x-c": {
+        "mode": "shims",
+        "table": "Nimble",
+        "version": "NIMBLE_VERSION"
+      }
+    },
+    {
+      "doc": "Native `get_component(\"stream\")`. Handles bind provider and consumer instance\ngenerations; stopping either invalidates them. No body queue lives here.",
+      "name": "stream",
+      "x-c": {
+        "mode": "shims",
+        "table": "Stream",
+        "version": "STREAM_VERSION"
+      }
+    },
+    {
+      "doc": "get_component(\"quic\"), native component 13. Functions run on the module worker.",
+      "name": "quic",
+      "x-c": {
+        "mode": "shims",
+        "table": "Quic",
+        "version": "QUIC_VERSION"
+      }
+    },
+    {
+      "doc": "`get_component(\"crypto\")`. Every packet argument is a handle the caller holds; ranges outside the payload window answer `ERR_ARG`.\nA signature that does not verify answers `ERR_AUTH`.",
+      "name": "crypto",
+      "x-c": {
+        "mode": "shims",
+        "table": "Crypto",
+        "version": "CRYPTO_VERSION"
+      }
+    },
+    {
+      "doc": "`get_component(\"identity\")`: a P-256 identity (on the ESP the existing `sec/id_p256` key; on a host `identity.p256` in the state directory).\nResults are written into packets like those of [`crate::Crypto`]. Verification is `Crypto::verify`.",
+      "name": "identity",
+      "x-c": {
+        "mode": "shims",
+        "table": "Identity",
+        "version": "IDENTITY_VERSION"
+      }
+    },
+    {
+      "doc": "The `hw` component table.",
+      "name": "hw",
+      "x-c": {
+        "mode": "host",
+        "table": "Hardware",
+        "version": "HARDWARE_VERSION"
+      }
+    },
+    {
+      "doc": "The `ble` component table.",
+      "name": "ble",
+      "x-c": {
+        "mode": "hosted",
+        "table": "Ble",
+        "version": ""
+      }
+    },
+    {
+      "doc": "The `lora` component table.",
+      "name": "lora",
+      "x-c": {
+        "mode": "hosted",
+        "table": "Lora",
+        "version": ""
+      }
+    },
+    {
+      "doc": "The `nan` component table.",
+      "name": "nan",
+      "x-c": {
+        "mode": "hosted",
+        "table": "Nan",
+        "version": ""
+      }
+    },
+    {
+      "doc": "The `system` component table.",
+      "name": "system",
+      "x-c": {
+        "mode": "hosted",
+        "table": "System",
+        "version": ""
+      }
+    }
+  ],
+  "format": "mesh-api/1",
+  "methods": [
+    {
+      "component": "wifi",
+      "doc": "Replace the intended state with `intent` (set `intent.size`); `*generation` receives the new generation. Returns 0, or\n`ERR_ARG` for an invalid intent: a name or passphrase of the wrong length, a channel above 14, or `sta` with neither\nan SSID nor a BSSID. An identical intent keeps the generation and wakes nobody. Acceptance is not completion: the\nhost joins afterwards, so read `state`. With the radio on, ESP-NOW is on: with `sta` and `ap` both 0 the radio is\nunassociated on `channel` (6 when 0) and only ESP-NOW runs (the `espnow` link of the `link` component); on the 6.0.2\ndriver that state sends but does not receive NOW (the hooks are delivered only with the AP up), so an unassociated\nreceiver sets `ap` (the AP+NOW state, ESPNOW.md \"Radio states\").",
+      "method": "set",
+      "name": "wifi.set",
+      "note": "",
+      "summary": "Replace the intended state with `intent` (set `intent.size`); `*generation` receives the new generation. Returns 0, or",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 216
+            },
+            "name": "intent",
+            "type": "*const WifiIntent"
+          },
+          {
+            "arg": {
+              "kind": "out",
+              "size": 4
+            },
+            "name": "generation",
+            "type": "*mut u32"
+          }
+        ],
+        "table": "Wifi"
+      }
+    },
+    {
+      "component": "wifi",
+      "doc": "Read the intended state and its generation (set `intent.size` first). `ERR_SIZE` if `size` is too small.",
+      "method": "get",
+      "name": "wifi.get",
+      "note": "",
+      "summary": "Read the intended state and its generation (set `intent.size` first). `ERR_SIZE` if `size` is too small.",
+      "x-c": {
+        "index": 1,
+        "params": [
+          {
+            "arg": {
+              "kind": "out",
+              "size": 216
+            },
+            "name": "intent",
+            "type": "*mut WifiIntent"
+          },
+          {
+            "arg": {
+              "kind": "out",
+              "size": 4
+            },
+            "name": "generation",
+            "type": "*mut u32"
+          }
+        ],
+        "table": "Wifi"
+      }
+    },
+    {
+      "component": "wifi",
+      "doc": "Read what is true now (set `state.size` first). Everything zero while the radio is off. `ERR_UNSUPPORTED` when the\napplication drives the radio itself and does not report it.",
+      "method": "state",
+      "name": "wifi.state",
+      "note": "",
+      "summary": "Read what is true now (set `state.size` first). Everything zero while the radio is off. `ERR_UNSUPPORTED` when the",
+      "x-c": {
+        "index": 2,
+        "params": [
+          {
+            "arg": {
+              "kind": "out",
+              "size": 68
+            },
+            "name": "state",
+            "type": "*mut WifiState"
+          }
+        ],
+        "table": "Wifi"
+      }
+    },
+    {
+      "component": "wifi",
+      "doc": "Scan for networks, for a module that reports the surroundings (a control plane decides the topology from it). **Never\nblocks**, because a scan takes seconds: the first call starts it and returns `ERR_BUSY`; call again (an alarm of about a\nsecond) until it returns the count, at most `max` entries of `out` filled (16 at most), once per scan. It works in\n**every radio mode**: from the station's idle epoch, from ESP-NOW only, with the soft AP on and while joined; with the radio\noff it is switched on for the scan only. A scan leaves the channel for about two seconds, so the `espnow` link and a soft AP\ndo not hear their channel meanwhile; the host puts the radio back on its channel when the scan is done. `ERR_BUSY` as\nwell while the driver is busy joining (try again), `ERR_IO` when it refuses. A network in range that is not listed was\nmissed; scan again.",
+      "method": "scan",
+      "name": "wifi.scan",
+      "note": "array out sized by an argument; polled (ERR_BUSY until done)",
+      "summary": "Scan for networks, for a module that reports the surroundings (a control plane decides the topology from it). **Never",
+      "x-c": {
+        "index": 3,
+        "params": [
+          {
+            "arg": {
+              "count": 1,
+              "kind": "out_array",
+              "size": 42
+            },
+            "name": "out",
+            "type": "*mut WifiAp"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "max",
+            "type": "usize"
+          }
+        ],
+        "table": "Wifi"
+      }
+    },
+    {
+      "component": "wifi",
+      "doc": "Switch **promiscuous receive** on or off, which a NAN module needs: NAN discovery-window frames are not delivered any\nother way (see `components/xip_runtime/ESPNOW.md`). The radio keeps receiving as before; the frames the driver then hands\nup also arrive on the link `promisc` of the `link` component, one packet each: `call.data` the 802.11 frame from its MAC\nheader (the radio's FCS removed), `call.id` the transmitter address ([`mac_token`](crate::mac_token)), `call.value` the\nRSSI ([`signal`](crate::signal)), `call.time_us` the receive time. The runtime applies an early receive filter (frames not for this device, or not of our networks or NAN, are dropped before they are copied) and makes **no\npower-save change**: the module decides when to switch it off again (a window of tens of milliseconds\nin a discovery window), what to do about power save, and whether to stay awake longer. `channel` pins the unassociated radio\nfirst. The state of the link is `LINK_UP` while receive is on.\n\nNeeds the radio on (`ERR_UNSUPPORTED` otherwise); a radio restart clears it, so a module that wants it re-applies it when\n`state` shows the radio again. `ERR_ARG` for a size that is too small or a channel above 13; `ERR_IO` when the driver\nrefuses.",
+      "method": "monitor",
+      "name": "wifi.monitor",
+      "note": "",
+      "summary": "Switch **promiscuous receive** on or off, which a NAN module needs: NAN discovery-window frames are not delivered any",
+      "x-c": {
+        "index": 4,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 8
+            },
+            "name": "monitor",
+            "type": "*const WifiMonitor"
+          }
+        ],
+        "table": "Wifi"
+      }
+    },
+    {
+      "component": "wifi",
+      "doc": "Enable native automatic reconnect, or disable it for module-owned retry\npolicy. Returns the previous boolean. Unsupported with an external owner.",
+      "method": "auto_reconnect",
+      "name": "wifi.auto_reconnect",
+      "note": "",
+      "summary": "Enable native automatic reconnect, or disable it for module-owned retry",
+      "x-c": {
+        "index": 5,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "enabled",
+            "type": "bool"
+          }
+        ],
+        "table": "Wifi"
+      }
+    },
+    {
+      "component": "wifi",
+      "doc": "Non-blocking bounded channel scan, same completion contract as scan.\nBits 1..14 select channels; dwell_ms 10..120 per selected channel.",
+      "method": "scan_channels",
+      "name": "wifi.scan_channels",
+      "note": "array out sized by an argument",
+      "summary": "Non-blocking bounded channel scan, same completion contract as scan.",
+      "x-c": {
+        "index": 6,
+        "params": [
+          {
+            "arg": {
+              "count": 1,
+              "kind": "out_array",
+              "size": 42
+            },
+            "name": "out",
+            "type": "*mut WifiAp"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "max",
+            "type": "usize"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "channels",
+            "type": "u16"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "dwell_ms",
+            "type": "u16"
+          }
+        ],
+        "table": "Wifi"
+      }
+    },
+    {
+      "component": "wifi-tuning",
+      "doc": "Replace the settings. `ERR_ARG` for a value out of range, `ERR_UNSUPPORTED` for a setting this host does not\nhave and that is not left at the default. An identical value changes nothing.",
+      "method": "set",
+      "name": "wifi-tuning.set",
+      "note": "",
+      "summary": "Replace the settings. `ERR_ARG` for a value out of range, `ERR_UNSUPPORTED` for a setting this host does not",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 24
+            },
+            "name": "tuning",
+            "type": "*const WifiTuning"
+          }
+        ],
+        "table": "WifiTuner"
+      }
+    },
+    {
+      "component": "wifi-tuning",
+      "doc": "Read the settings in force: switches the host has report `TUNE_ON` or `TUNE_OFF`, numbers left at the default\nreport 0, settings the host does not have report 0. Set `tuning.size` first.",
+      "method": "get",
+      "name": "wifi-tuning.get",
+      "note": "",
+      "summary": "Read the settings in force: switches the host has report `TUNE_ON` or `TUNE_OFF`, numbers left at the default",
+      "x-c": {
+        "index": 1,
+        "params": [
+          {
+            "arg": {
+              "kind": "out",
+              "size": 24
+            },
+            "name": "tuning",
+            "type": "*mut WifiTuning"
+          }
+        ],
+        "table": "WifiTuner"
+      }
+    },
+    {
+      "component": "link",
+      "doc": "Subscribe to the link `name` (created if nobody has named it yet, so the order of start does not matter): its frames\nUse method [`LINK_EGRESS`] to hold only an egress reference, without frames or events.\nKeep that reference open while caching the address, including across provider down/up.\nOtherwise frames and events arrive as calls `(component, method)` to the calling module. Returns the link's address (>= `ADDR_LINK`, positive) to\n`send` to, or `ERR_ARG` / `ERR_NOMEM` (no room for another link or subscriber). Subscribing again with the same pair changes nothing.",
+      "method": "open",
+      "name": "link.open",
+      "note": "",
+      "summary": "Subscribe to the link `name` (created if nobody has named it yet, so the order of start does not matter): its frames",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "str"
+            },
+            "name": "name",
+            "type": "*const c_char"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "component",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "method",
+            "type": "c_int"
+          }
+        ],
+        "table": "Link"
+      }
+    },
+    {
+      "component": "link",
+      "doc": "Release this module's subscriptions/egress references at `addr`. They also end with the module.\nAn address without a provider or references may be reclaimed; resolve/open it again before reuse.",
+      "method": "close",
+      "name": "link.close",
+      "note": "",
+      "summary": "Release this module's subscriptions/egress references at `addr`. They also end with the module.",
+      "x-c": {
+        "index": 1,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "addr",
+            "type": "u32"
+          }
+        ],
+        "table": "Link"
+      }
+    },
+    {
+      "component": "link",
+      "doc": "Be the provider of the link `name`: frames sent to its address arrive as calls `(component, method)` to the calling\nmodule. `mtu` is the largest frame (0: unknown). The link is `LINK_DOWN` until [`Link::set_state`]. Returns the address,\n`ERR_BUSY` if another provider has the name, or `ERR_ARG`. The provision ends with the module.",
+      "method": "provide",
+      "name": "link.provide",
+      "note": "",
+      "summary": "Be the provider of the link `name`: frames sent to its address arrive as calls `(component, method)` to the calling",
+      "x-c": {
+        "index": 2,
+        "params": [
+          {
+            "arg": {
+              "kind": "str"
+            },
+            "name": "name",
+            "type": "*const c_char"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "component",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "method",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "mtu",
+            "type": "u32"
+          }
+        ],
+        "table": "Link"
+      }
+    },
+    {
+      "component": "link",
+      "doc": "The provider received a frame: the **held** packet `pkt` (see `pkt_alloc`) with `len` bytes at its payload window goes\nto the route or to every subscriber, with `source`, `signal` and `time_us` (the low 32 bits of the microsecond clock when\nthe radio received it; 0: now). The packet is consumed whether this succeeds or not (a link with nobody listening is a\nsuccess). `ERR_ARG` for an address this module does not provide.",
+      "method": "rx",
+      "name": "link.rx",
+      "note": "packet handle: ownership moves to the link",
+      "summary": "The provider received a frame: the **held** packet `pkt` (see `pkt_alloc`) with `len` bytes at its payload window goes",
+      "x-c": {
+        "index": 3,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "addr",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "pkt",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "usize"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "source",
+            "type": "u64"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "signal",
+            "type": "i32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "time_us",
+            "type": "u32"
+          }
+        ],
+        "table": "Link"
+      }
+    },
+    {
+      "component": "link",
+      "doc": "Release the provider's completed TX reference. `outcome` is retained for\nsource compatibility; no packet or callback returns to the original sender.",
+      "method": "tx_done",
+      "name": "link.tx_done",
+      "note": "packet handle: ownership moves back",
+      "summary": "Release the provider's completed TX reference. `outcome` is retained for",
+      "x-c": {
+        "index": 4,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "addr",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "pkt",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "outcome",
+            "type": "c_int"
+          }
+        ],
+        "table": "Link"
+      }
+    },
+    {
+      "component": "link",
+      "doc": "The provider has capacity again after refusing a frame: every subscriber gets `LINK_EVENT_READY`.",
+      "method": "ready",
+      "name": "link.ready",
+      "note": "",
+      "summary": "The provider has capacity again after refusing a frame: every subscriber gets `LINK_EVENT_READY`.",
+      "x-c": {
+        "index": 5,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "addr",
+            "type": "u32"
+          }
+        ],
+        "table": "Link"
+      }
+    },
+    {
+      "component": "link",
+      "doc": "The provider's state (`LINK_UP` / `LINK_DOWN`) and nominal rate in kbit/s changed: subscribers get `LINK_EVENT_STATE`.",
+      "method": "set_state",
+      "name": "link.set_state",
+      "note": "",
+      "summary": "The provider's state (`LINK_UP` / `LINK_DOWN`) and nominal rate in kbit/s changed: subscribers get `LINK_EVENT_STATE`.",
+      "x-c": {
+        "index": 6,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "addr",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "state",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "rate_kbps",
+            "type": "u32"
+          }
+        ],
+        "table": "Link"
+      }
+    },
+    {
+      "component": "link",
+      "doc": "Describe the link at `addr` (set `info.size` first).",
+      "method": "info",
+      "name": "link.info",
+      "note": "",
+      "summary": "Describe the link at `addr` (set `info.size` first).",
+      "x-c": {
+        "index": 7,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "addr",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "out",
+              "size": 60
+            },
+            "name": "info",
+            "type": "*mut LinkInfo"
+          }
+        ],
+        "table": "Link"
+      }
+    },
+    {
+      "component": "link",
+      "doc": "Tell the runtime where the connection identifier is in the frames of the link at `addr`: `len` bytes (1..=16) at `offset`\nfrom the start of the frame. A frame too short for it is delivered, never routed. Changing it clears the routes of the link.",
+      "method": "classify",
+      "name": "link.classify",
+      "note": "",
+      "summary": "Tell the runtime where the connection identifier is in the frames of the link at `addr`: `len` bytes (1..=16) at `offset`",
+      "x-c": {
+        "index": 8,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "addr",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "offset",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "u32"
+          }
+        ],
+        "table": "Link"
+      }
+    },
+    {
+      "component": "link",
+      "doc": "Install (or replace) a route on the link at `addr`: a frame whose identifier equals `key[..key_len]` (`key_len` must be\nthe classified length) is sent to `egress` with destination `token`, from the driver's context, and counted; with\n`ROUTE_COPY` the subscribers get it too. `ERR_NOMEM` when the table (16 routes) is full, `ERR_ARG` for a link that is not classified.",
+      "method": "route",
+      "name": "link.route",
+      "note": "",
+      "summary": "Install (or replace) a route on the link at `addr`: a frame whose identifier equals `key[..key_len]` (`key_len` must be",
+      "x-c": {
+        "index": 9,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "addr",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 2
+            },
+            "name": "key",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "key_len",
+            "type": "usize"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "egress",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "token",
+            "type": "u64"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "flags",
+            "type": "u32"
+          }
+        ],
+        "table": "Link"
+      }
+    },
+    {
+      "component": "link",
+      "doc": "Remove the route for `key` (`ERR_NOTFOUND` if there is none).",
+      "method": "unroute",
+      "name": "link.unroute",
+      "note": "",
+      "summary": "Remove the route for `key` (`ERR_NOTFOUND` if there is none).",
+      "x-c": {
+        "index": 10,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "addr",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 2
+            },
+            "name": "key",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "key_len",
+            "type": "usize"
+          }
+        ],
+        "table": "Link"
+      }
+    },
+    {
+      "component": "power",
+      "doc": "Sleep for `duration_ms`, `cycles` times with `awake_ms` awake between, on the host worker; returns at once. Each wake delivers `HOST_WAKE` to the modules with\nan `ALARM_WINDOW` alarm. `ERR_BUSY` while a request runs, `ERR_ARG` for a duration under 10 ms or a size that is too small. With the radio on it is stopped\nfor each sleep and brought back after it with the same settings (the `espnow` link goes `DOWN` and `UP`); nothing else is touched. With a USB-Serial/JTAG host attached the runtime uses a soft wait;\nphysical light sleep is tested through UART.",
+      "method": "sleep",
+      "name": "power.sleep",
+      "note": "",
+      "summary": "Sleep for `duration_ms`, `cycles` times with `awake_ms` awake between, on the host worker; returns at once. Each wake delivers `HOST_WAKE` to the modules with",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 12
+            },
+            "name": "request",
+            "type": "*const PowerSleep"
+          }
+        ],
+        "table": "Power"
+      }
+    },
+    {
+      "component": "power",
+      "doc": "Read the power state and the FreeRTOS numbers (set `info.size` first). `ERR_SIZE` if `size` is too small.",
+      "method": "info",
+      "name": "power.info",
+      "note": "",
+      "summary": "Read the power state and the FreeRTOS numbers (set `info.size` first). `ERR_SIZE` if `size` is too small.",
+      "x-c": {
+        "index": 1,
+        "params": [
+          {
+            "arg": {
+              "kind": "out",
+              "size": 76
+            },
+            "name": "info",
+            "type": "*mut PowerInfo"
+          }
+        ],
+        "table": "Power"
+      }
+    },
+    {
+      "component": "power",
+      "doc": "Print the power-management locks to the device log (`esp_pm_dump_locks`): who keeps the CPU frequency up or sleep out.",
+      "method": "dump_locks",
+      "name": "power.dump_locks",
+      "note": "",
+      "summary": "Print the power-management locks to the device log (`esp_pm_dump_locks`): who keeps the CPU frequency up or sleep out.",
+      "x-c": {
+        "index": 2,
+        "params": [],
+        "table": "Power"
+      }
+    },
+    {
+      "component": "power",
+      "doc": "Print the FreeRTOS tasks to the device log: name, priority, stack left.",
+      "method": "dump_tasks",
+      "name": "power.dump_tasks",
+      "note": "",
+      "summary": "Print the FreeRTOS tasks to the device log: name, priority, stack left.",
+      "x-c": {
+        "index": 3,
+        "params": [],
+        "table": "Power"
+      }
+    },
+    {
+      "component": "power",
+      "doc": "One sleep ending at an absolute monotonic microsecond deadline. Radio\nshutdown time is included, so it cannot shift a scheduled receive DW.\nRequires no active shared activity window; `flags` may include POWER_TRACE_UART.",
+      "method": "sleep_until",
+      "name": "power.sleep_until",
+      "note": "",
+      "summary": "One sleep ending at an absolute monotonic microsecond deadline. Radio",
+      "x-c": {
+        "index": 4,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "wake_at_us",
+            "type": "u64"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "flags",
+            "type": "u32"
+          }
+        ],
+        "table": "Power"
+      }
+    },
+    {
+      "component": "power",
+      "doc": "Cancel only this caller's pending sleep. Also cancelled at module unload.",
+      "method": "cancel",
+      "name": "power.cancel",
+      "note": "",
+      "summary": "Cancel only this caller's pending sleep. Also cancelled at module unload.",
+      "x-c": {
+        "index": 5,
+        "params": [],
+        "table": "Power"
+      }
+    },
+    {
+      "component": "power",
+      "doc": "Open the shared runtime activity window; zero explicitly clears it.\nLocal serial bytes and decoded directed network records reopen it.",
+      "method": "activate",
+      "name": "power.activate",
+      "note": "",
+      "summary": "Open the shared runtime activity window; zero explicitly clears it.",
+      "x-c": {
+        "index": 6,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "duration_ms",
+            "type": "u32"
+          }
+        ],
+        "table": "Power"
+      }
+    },
+    {
+      "component": "power",
+      "doc": "Extend one shared temporary awake deadline, at most 300,000 ms per call.\nZero queries without extending; returns remaining ms, or ERR_ARG above\nthe limit. Renewal never shortens another caller's hold. Unlike activate,\nthis defers sleep without changing UART or module awake/sleepy policy.",
+      "method": "awake_for",
+      "name": "power.awake_for",
+      "note": "",
+      "summary": "Extend one shared temporary awake deadline, at most 300,000 ms per call.",
+      "x-c": {
+        "index": 7,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "duration_ms",
+            "type": "u32"
+          }
+        ],
+        "table": "Power"
+      }
+    },
+    {
+      "component": "power",
+      "doc": "Link adapters call after selecting a local directed record. The runtime\nfully decodes its CBOR envelope before extending shared activity by 5 s.\nBroadcast, malformed or nonlocal records never vote. Returns 1 if voted,\n0 if ignored; the packet is borrowed only for this call.",
+      "method": "received",
+      "name": "power.received",
+      "note": "a CBOR record inline",
+      "summary": "Link adapters call after selecting a local directed record. The runtime",
+      "x-c": {
+        "index": 8,
+        "params": [
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 1
+            },
+            "name": "record",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "usize"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "directed",
+            "type": "u32"
+          }
+        ],
+        "table": "Power"
+      }
+    },
+    {
+      "component": "nimble",
+      "doc": "Start the stack when needed, set the name, create the CoC pool and server and advertise (see [`NimbleStart`]). The advertisement is restarted after every GAP disconnect while it is wanted.",
+      "method": "start",
+      "name": "nimble.start",
+      "note": "",
+      "summary": "Start the stack when needed, set the name, create the CoC pool and server and advertise (see [`NimbleStart`]). The advertisement is restarted after every GAP disconnect while it is wanted.",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 96
+            },
+            "name": "request",
+            "type": "*const NimbleStart"
+          }
+        ],
+        "table": "Nimble"
+      }
+    },
+    {
+      "component": "nimble",
+      "doc": "Stop advertising, scanning and the connection (disconnect 0x13).",
+      "method": "stop",
+      "name": "nimble.stop",
+      "note": "",
+      "summary": "Stop advertising, scanning and the connection (disconnect 0x13).",
+      "x-c": {
+        "index": 1,
+        "params": [],
+        "table": "Nimble"
+      }
+    },
+    {
+      "component": "nimble",
+      "doc": "Scan for the duration; `-110` (timed out) before the stack is ready.",
+      "method": "scan",
+      "name": "nimble.scan",
+      "note": "",
+      "summary": "Scan for the duration; `-110` (timed out) before the stack is ready.",
+      "x-c": {
+        "index": 2,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 68
+            },
+            "name": "request",
+            "type": "*const NimbleScan"
+          }
+        ],
+        "table": "Nimble"
+      }
+    },
+    {
+      "component": "nimble",
+      "doc": "Read the state (set `status.size` first).",
+      "method": "status",
+      "name": "nimble.status",
+      "note": "",
+      "summary": "Read the state (set `status.size` first).",
+      "x-c": {
+        "index": 3,
+        "params": [
+          {
+            "arg": {
+              "kind": "out",
+              "size": 92
+            },
+            "name": "status",
+            "type": "*mut BleStatus"
+          }
+        ],
+        "table": "Nimble"
+      }
+    },
+    {
+      "component": "nimble",
+      "doc": "Stop a running scan.",
+      "method": "scan_stop",
+      "name": "nimble.scan_stop",
+      "note": "",
+      "summary": "Stop a running scan.",
+      "x-c": {
+        "index": 4,
+        "params": [],
+        "table": "Nimble"
+      }
+    },
+    {
+      "component": "nimble",
+      "doc": "Connect as a central to `addr` and open the CoC channel on `psm`; a scan in progress is cancelled first.",
+      "method": "connect",
+      "name": "nimble.connect",
+      "note": "",
+      "summary": "Connect as a central to `addr` and open the CoC channel on `psm`; a scan in progress is cancelled first.",
+      "x-c": {
+        "index": 5,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 20
+            },
+            "name": "request",
+            "type": "*const NimbleConnect"
+          }
+        ],
+        "table": "Nimble"
+      }
+    },
+    {
+      "component": "nimble",
+      "doc": "Forget every stored bond (a bonded peer must pair again).",
+      "method": "bonds_clear",
+      "name": "nimble.bonds_clear",
+      "note": "",
+      "summary": "Forget every stored bond (a bonded peer must pair again).",
+      "x-c": {
+        "index": 6,
+        "params": [],
+        "table": "Nimble"
+      }
+    },
+    {
+      "component": "nimble",
+      "doc": "Set the wake/sleep mode and the boot flag.",
+      "method": "mode",
+      "name": "nimble.mode",
+      "note": "",
+      "summary": "Set the wake/sleep mode and the boot flag.",
+      "x-c": {
+        "index": 7,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 8
+            },
+            "name": "request",
+            "type": "*const BleMode"
+          }
+        ],
+        "table": "Nimble"
+      }
+    },
+    {
+      "component": "nimble",
+      "doc": "The scan cache (set `results.size` first); empty when the cache is built out.",
+      "method": "scan_results",
+      "name": "nimble.scan_results",
+      "note": "",
+      "summary": "The scan cache (set `results.size` first); empty when the cache is built out.",
+      "x-c": {
+        "index": 8,
+        "params": [
+          {
+            "arg": {
+              "kind": "out",
+              "size": 152
+            },
+            "name": "results",
+            "type": "*mut BleScanResults"
+          }
+        ],
+        "table": "Nimble"
+      }
+    },
+    {
+      "component": "nimble",
+      "doc": "Before a light sleep: in rendezvous mode stop advertising and scanning. `ERR_BUSY` when a link is up (or in always mode with the service live): the sleep is vetoed.",
+      "method": "suspend",
+      "name": "nimble.suspend",
+      "note": "",
+      "summary": "Before a light sleep: in rendezvous mode stop advertising and scanning. `ERR_BUSY` when a link is up (or in always mode with the service live): the sleep is vetoed.",
+      "x-c": {
+        "index": 9,
+        "params": [],
+        "table": "Nimble"
+      }
+    },
+    {
+      "component": "nimble",
+      "doc": "After a light sleep: re-arm what `suspend` stopped.",
+      "method": "resume",
+      "name": "nimble.resume",
+      "note": "",
+      "summary": "After a light sleep: re-arm what `suspend` stopped.",
+      "x-c": {
+        "index": 10,
+        "params": [],
+        "table": "Nimble"
+      }
+    },
+    {
+      "component": "stream",
+      "doc": "Consumer binds an envelope component/method for this instance. Released\non stop. Primary components with a stream manifest need no explicit bind.",
+      "method": "listen",
+      "name": "stream.listen",
+      "note": "",
+      "summary": "Consumer binds an envelope component/method for this instance. Released",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "component",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "method",
+            "type": "c_int"
+          }
+        ],
+        "table": "Stream"
+      }
+    },
+    {
+      "component": "stream",
+      "doc": "Provider opens an opaque byte stream with (NULL, 0); the runtime assembles\nits opening CBOR envelope in feed and selects the consumer. A complete\nenvelope may also be supplied here. Opening storage is bounded to 512 bytes.\nReturns a generation-bound handle; the provider does no envelope parsing.",
+      "method": "open",
+      "name": "stream.open",
+      "note": "",
+      "summary": "Provider opens an opaque byte stream with (NULL, 0); the runtime assembles",
+      "x-c": {
+        "index": 1,
+        "params": [
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 1
+            },
+            "name": "envelope",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "usize"
+          }
+        ],
+        "table": "Stream"
+      }
+    },
+    {
+      "component": "stream",
+      "doc": "Provider delivers borrowed bytes, including an unbound stream's opening\nenvelope. The consumed count includes header bytes. fin requires len=0 and follows all\nconsumed body bytes. Partial/zero consumption retains bytes at provider.",
+      "method": "feed",
+      "name": "stream.feed",
+      "note": "",
+      "summary": "Provider delivers borrowed bytes, including an unbound stream's opening",
+      "x-c": {
+        "index": 2,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "handle",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 2
+            },
+            "name": "data",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "usize"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "fin",
+            "type": "u32"
+          }
+        ],
+        "table": "Stream"
+      }
+    },
+    {
+      "component": "stream",
+      "doc": "Either endpoint closes; peer receives CLOSED. Idempotent only for a live handle.",
+      "method": "close",
+      "name": "stream.close",
+      "note": "",
+      "summary": "Either endpoint closes; peer receives CLOSED. Idempotent only for a live handle.",
+      "x-c": {
+        "index": 3,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "handle",
+            "type": "u32"
+          }
+        ],
+        "table": "Stream"
+      }
+    },
+    {
+      "component": "stream",
+      "doc": "Consumer transfers one pool packet on OK; EVERY error retains it.\nOne outstanding output per stream. fin half-closes after these bytes.",
+      "method": "write_pkt",
+      "name": "stream.write_pkt",
+      "note": "packet handle: ownership moves to the stream",
+      "summary": "Consumer transfers one pool packet on OK; EVERY error retains it.",
+      "x-c": {
+        "index": 4,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "handle",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "packet",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "fin",
+            "type": "u32"
+          }
+        ],
+        "table": "Stream"
+      }
+    },
+    {
+      "component": "stream",
+      "doc": "Provider takes the exact pending physical slot, or gets 0 if none.\nA full held quota leaves it pending for the next poll.",
+      "method": "take",
+      "name": "stream.take",
+      "note": "hands a packet out through a struct",
+      "summary": "Provider takes the exact pending physical slot, or gets 0 if none.",
+      "x-c": {
+        "index": 5,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "handle",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "out",
+              "size": 12
+            },
+            "name": "out",
+            "type": "*mut StreamPacket"
+          }
+        ],
+        "table": "Stream"
+      }
+    },
+    {
+      "component": "stream",
+      "doc": "Provider accepted the outstanding packet into reliable history.",
+      "method": "written",
+      "name": "stream.written",
+      "note": "",
+      "summary": "Provider accepted the outstanding packet into reliable history.",
+      "x-c": {
+        "index": 6,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "handle",
+            "type": "u32"
+          }
+        ],
+        "table": "Stream"
+      }
+    },
+    {
+      "component": "quic",
+      "doc": "Attach this instance as the one local/unhandled endpoint. RX is delivered\nas CALL_LINK(component=this module, method=rx_method), preserving origin.",
+      "method": "attach",
+      "name": "quic.attach",
+      "note": "",
+      "summary": "Attach this instance as the one local/unhandled endpoint. RX is delivered",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "rx_method",
+            "type": "c_int"
+          }
+        ],
+        "table": "Quic"
+      }
+    },
+    {
+      "component": "quic",
+      "doc": "Stop admission. The module closes its protocol holders; accepted native TX\nreferences finish independently without calling the stopped module.",
+      "method": "detach",
+      "name": "quic.detach",
+      "note": "",
+      "summary": "Stop admission. The module closes its protocol holders; accepted native TX",
+      "x-c": {
+        "index": 1,
+        "params": [],
+        "table": "Quic"
+      }
+    },
+    {
+      "component": "quic",
+      "doc": "Atomically create (mode=0) or replace (mode=1) a forwarding owned by this instance.",
+      "method": "relay_set",
+      "name": "quic.relay_set",
+      "note": "",
+      "summary": "Atomically create (mode=0) or replace (mode=1) a forwarding owned by this instance.",
+      "x-c": {
+        "index": 2,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 280
+            },
+            "name": "route",
+            "type": "*const RelayRoute"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "mode",
+            "type": "u32"
+          }
+        ],
+        "table": "Quic"
+      }
+    },
+    {
+      "component": "quic",
+      "doc": "Read this instance's route at a sorted index. NOTFOUND ends enumeration.",
+      "method": "relay_get",
+      "name": "quic.relay_get",
+      "note": "",
+      "summary": "Read this instance's route at a sorted index. NOTFOUND ends enumeration.",
+      "x-c": {
+        "index": 3,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "index",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "out",
+              "size": 280
+            },
+            "name": "route",
+            "type": "*mut RelayRoute"
+          }
+        ],
+        "table": "Quic"
+      }
+    },
+    {
+      "component": "quic",
+      "doc": "",
+      "method": "relay_remove",
+      "name": "quic.relay_remove",
+      "note": "",
+      "summary": "",
+      "x-c": {
+        "index": 4,
+        "params": [
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 1
+            },
+            "name": "cid",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "usize"
+          }
+        ],
+        "table": "Quic"
+      }
+    },
+    {
+      "component": "quic",
+      "doc": "Allocate an opaque CID, or reuse an identical live owned forwarding.\nReturns 1 for reuse, 0 for a new route; negative errors leave routes intact.",
+      "method": "relay_create",
+      "name": "quic.relay_create",
+      "note": "",
+      "summary": "Allocate an opaque CID, or reuse an identical live owned forwarding.",
+      "x-c": {
+        "index": 5,
+        "params": [
+          {
+            "arg": {
+              "kind": "out",
+              "size": 280
+            },
+            "name": "route",
+            "type": "*mut RelayRoute"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "idle_ms",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "reuse",
+            "type": "u32"
+          }
+        ],
+        "table": "Quic"
+      }
+    },
+    {
+      "component": "quic",
+      "doc": "",
+      "method": "relay_stats",
+      "name": "quic.relay_stats",
+      "note": "",
+      "summary": "",
+      "x-c": {
+        "index": 6,
+        "params": [
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 1
+            },
+            "name": "cid",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "usize"
+          },
+          {
+            "arg": {
+              "kind": "out",
+              "size": 16
+            },
+            "name": "stats",
+            "type": "*mut RelayStats"
+          }
+        ],
+        "table": "Quic"
+      }
+    },
+    {
+      "component": "quic",
+      "doc": "Remove expired owned routes; returns the number removed.",
+      "method": "relay_expire",
+      "name": "quic.relay_expire",
+      "note": "",
+      "summary": "Remove expired owned routes; returns the number removed.",
+      "x-c": {
+        "index": 7,
+        "params": [],
+        "table": "Quic"
+      }
+    },
+    {
+      "component": "quic",
+      "doc": "",
+      "method": "relay_idle",
+      "name": "quic.relay_idle",
+      "note": "",
+      "summary": "",
+      "x-c": {
+        "index": 8,
+        "params": [
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 1
+            },
+            "name": "cid",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "usize"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "idle_ms",
+            "type": "u32"
+          }
+        ],
+        "table": "Quic"
+      }
+    },
+    {
+      "component": "crypto",
+      "doc": "Hash `len` bytes of `packet` at `offset` and write the digest at `out_offset` of `out_packet` (may be the same packet, beyond the input).\nReturns the digest length.",
+      "method": "hash",
+      "name": "crypto.hash",
+      "note": "",
+      "summary": "Hash `len` bytes of `packet` at `offset` and write the digest at `out_offset` of `out_packet` (may be the same packet, beyond the input).",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "alg",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "packet",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "offset",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "out_packet",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "out_offset",
+            "type": "u32"
+          }
+        ],
+        "table": "Crypto"
+      }
+    },
+    {
+      "component": "crypto",
+      "doc": "Start a multipart hash. Returns its handle (positive).",
+      "method": "hash_start",
+      "name": "crypto.hash_start",
+      "note": "",
+      "summary": "Start a multipart hash. Returns its handle (positive).",
+      "x-c": {
+        "index": 1,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "alg",
+            "type": "u32"
+          }
+        ],
+        "table": "Crypto"
+      }
+    },
+    {
+      "component": "crypto",
+      "doc": "Add a byte range of a packet to the hash `handle`.",
+      "method": "hash_update",
+      "name": "crypto.hash_update",
+      "note": "",
+      "summary": "Add a byte range of a packet to the hash `handle`.",
+      "x-c": {
+        "index": 2,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "handle",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "packet",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "offset",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "u32"
+          }
+        ],
+        "table": "Crypto"
+      }
+    },
+    {
+      "component": "crypto",
+      "doc": "Finish the hash `handle` (it is released) and write the digest at `out_offset` of `out_packet`. Returns the digest length.",
+      "method": "hash_finish",
+      "name": "crypto.hash_finish",
+      "note": "",
+      "summary": "Finish the hash `handle` (it is released) and write the digest at `out_offset` of `out_packet`. Returns the digest length.",
+      "x-c": {
+        "index": 3,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "handle",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "out_packet",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "out_offset",
+            "type": "u32"
+          }
+        ],
+        "table": "Crypto"
+      }
+    },
+    {
+      "component": "crypto",
+      "doc": "Release the hash `handle` without a result. Safe for an unknown handle.",
+      "method": "hash_abort",
+      "name": "crypto.hash_abort",
+      "note": "",
+      "summary": "Release the hash `handle` without a result. Safe for an unknown handle.",
+      "x-c": {
+        "index": 4,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "handle",
+            "type": "u32"
+          }
+        ],
+        "table": "Crypto"
+      }
+    },
+    {
+      "component": "crypto",
+      "doc": "Verify with `alg` ([`ALG_ECDSA_SHA_256`]): the range at `offset` holds the public key (`key_len`: 33 compressed or 65 uncompressed SEC1 bytes),\nthen the message (`message_len`), then the 64-byte raw signature (`signature_len`). 0 when valid, `ERR_AUTH` when not.",
+      "method": "verify",
+      "name": "crypto.verify",
+      "note": "",
+      "summary": "Verify with `alg` ([`ALG_ECDSA_SHA_256`]): the range at `offset` holds the public key (`key_len`: 33 compressed or 65 uncompressed SEC1 bytes),",
+      "x-c": {
+        "index": 5,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "alg",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "packet",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "offset",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "key_len",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "message_len",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "signature_len",
+            "type": "u32"
+          }
+        ],
+        "table": "Crypto"
+      }
+    },
+    {
+      "component": "crypto",
+      "doc": "Fill `len` bytes of `packet` at `offset` with random bytes.",
+      "method": "random",
+      "name": "crypto.random",
+      "note": "",
+      "summary": "Fill `len` bytes of `packet` at `offset` with random bytes.",
+      "x-c": {
+        "index": 6,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "packet",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "offset",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "u32"
+          }
+        ],
+        "table": "Crypto"
+      }
+    },
+    {
+      "component": "identity",
+      "doc": "Write the uncompressed 65-byte SEC1 public key at `offset` of `packet`, creating and committing\nthe identity on first use. No volatile identity is returned on failure.",
+      "method": "public_key",
+      "name": "identity.public_key",
+      "note": "",
+      "summary": "Write the uncompressed 65-byte SEC1 public key at `offset` of `packet`, creating and committing",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "packet",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "offset",
+            "type": "u32"
+          }
+        ],
+        "table": "Identity"
+      }
+    },
+    {
+      "component": "identity",
+      "doc": "SHA-256 and sign `len` bytes of `packet` at `offset`; the raw 64-byte r||s signature goes to `out_offset` of `out_packet`.\nCall when cached signed facts change, never for periodic publication.",
+      "method": "sign",
+      "name": "identity.sign",
+      "note": "",
+      "summary": "SHA-256 and sign `len` bytes of `packet` at `offset`; the raw 64-byte r||s signature goes to `out_offset` of `out_packet`.",
+      "x-c": {
+        "index": 1,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "packet",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "offset",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "out_packet",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "out_offset",
+            "type": "u32"
+          }
+        ],
+        "table": "Identity"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "Configure a pin.\n\nAlso sets the initial level of an output. The pin belongs to the module until the instance is destroyed.\n\n# Returns\n\n`int` — `OK`, `ERR_BUSY` if another module owns it, `ERR_UNSUPPORTED` if main reserved it.\n\n# Arguments\n\n* `pin` (`int`): GPIO number.\n* `mode` (`int`): `GPIO_*`.\n* `pull` (`int`): `GPIO_PULL_*`.\n* `level` (`int`): Initial output level.",
+      "method": "gpio_config",
+      "name": "hw.gpio_config",
+      "note": "",
+      "summary": "Configure a pin.",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "pin",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "mode",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "pull",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "level",
+            "type": "c_int"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "Read a pin.\n\n# Returns\n\n`int` — level 0/1, or a negative error.\n\n# Arguments\n\n* `pin` (`int`): A pin configured by this module.",
+      "method": "gpio_read",
+      "name": "hw.gpio_read",
+      "note": "",
+      "summary": "Read a pin.",
+      "x-c": {
+        "index": 1,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "pin",
+            "type": "c_int"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "Set an output level.\n\n# Returns\n\n`int` — `OK` or an error.\n\n# Arguments\n\n* `pin` (`int`): A pin configured by this module.\n* `level` (`int`): 0 or 1.",
+      "method": "gpio_write",
+      "name": "hw.gpio_write",
+      "note": "",
+      "summary": "Set an output level.",
+      "x-c": {
+        "index": 2,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "pin",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "level",
+            "type": "c_int"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "Report the edges of a pin.\n\nAn edge becomes a call `(component, method)` with `value` = the pin level. The interrupt itself never runs\nmodule code; edges that arrive while the queue is full are counted and dropped.\n\n# Returns\n\n`int` — `OK` or an error.\n\n# Arguments\n\n* `pin` (`int`): The pin.\n* `edge` (`int`): `IRQ_*`.\n* `component` (`int`): Returned in the call.\n* `method` (`int`): Returned in the call.",
+      "method": "irq_register",
+      "name": "hw.irq_register",
+      "note": "",
+      "summary": "Report the edges of a pin.",
+      "x-c": {
+        "index": 3,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "pin",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "edge",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "component",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "method",
+            "type": "c_int"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "Stop reporting a pin.\n\n# Returns\n\n`int` — `OK`, `ERR_NOTFOUND`.\n\n# Arguments\n\n* `pin` (`int`): The pin.",
+      "method": "irq_unregister",
+      "name": "hw.irq_unregister",
+      "note": "",
+      "summary": "Stop reporting a pin.",
+      "x-c": {
+        "index": 4,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "pin",
+            "type": "c_int"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "Mask or unmask a registered pin.\n\n# Returns\n\n`int` — `OK`, `ERR_NOTFOUND`.\n\n# Arguments\n\n* `pin` (`int`): The pin.\n* `enabled` (`int`): 1 unmask, 0 mask.",
+      "method": "irq_enable",
+      "name": "hw.irq_enable",
+      "note": "",
+      "summary": "Mask or unmask a registered pin.",
+      "x-c": {
+        "index": 5,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "pin",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "enabled",
+            "type": "c_int"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "Open a full-duplex SPI device.\n\nThe first open of a controller initialises it with the pins of the config; later opens must use the same\npins. A controller that main initialised is shared as is.\n\n# Returns\n\n`int` — a handle (>= 0) or a negative error.\n\n# Arguments\n\n* `config` (`const xip_spi_config *`): See `spi_config`.",
+      "method": "spi_open",
+      "name": "hw.spi_open",
+      "note": "",
+      "summary": "Open a full-duplex SPI device.",
+      "x-c": {
+        "index": 6,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 44
+            },
+            "name": "config",
+            "type": "*const SpiConfig"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "One chip-select cycle.\n\n`tx` and `rx` are both `len` bytes (`rx` may be NULL). Bounded; waits for `ready_pin` when configured.\n\n# Returns\n\n`int` — `OK`, `ERR_BUSY` when `ready_pin` never became ready, `ERR_IO`.\n\n# Arguments\n\n* `handle` (`int`): From `spi_open`.\n* `tx` (`const uint8_t *`): Bytes to send.\n* `rx` (`uint8_t *`): Bytes received, or NULL.\n* `len` (`size_t`): Length.",
+      "method": "spi_transfer",
+      "name": "hw.spi_transfer",
+      "note": "bulk bytes in and out: a packet in the isolated case",
+      "summary": "One chip-select cycle.",
+      "x-c": {
+        "index": 7,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "handle",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 3
+            },
+            "name": "tx",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "out_bytes",
+              "len": 3
+            },
+            "name": "rx",
+            "type": "*mut u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "usize"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "Release an SPI device.\n\nAlso done when the instance is destroyed.\n\n# Returns\n\n`int` — `OK`, `ERR_ARG`.\n\n# Arguments\n\n* `handle` (`int`): From `spi_open`.",
+      "method": "spi_close",
+      "name": "hw.spi_close",
+      "note": "",
+      "summary": "Release an SPI device.",
+      "x-c": {
+        "index": 8,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "handle",
+            "type": "c_int"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "Write then read on an I2C bus.\n\nEither direction may be empty. The pins are held for the call only.\n\n# Returns\n\n`int` — `OK` or an error.\n\n# Arguments\n\n* `port` (`int`): Controller.\n* `sda` (`int`): Pin.\n* `scl` (`int`): Pin.\n* `frequency` (`uint32_t`): Hz.\n* `address` (`uint8_t`): 7-bit address.\n* `tx` (`const uint8_t *`): Bytes to write.\n* `tx_len` (`size_t`): Length.\n* `rx` (`uint8_t *`): Buffer for the read.\n* `rx_len` (`size_t`): Length.\n* `timeout_ms` (`uint32_t`): Longest wait.",
+      "method": "i2c_transfer",
+      "name": "hw.i2c_transfer",
+      "note": "10 arguments, more than a call carries: a struct parcel; bulk bytes in and out",
+      "summary": "Write then read on an I2C bus.",
+      "x-c": {
+        "index": 9,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "port",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "sda",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "scl",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "frequency",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "address",
+            "type": "u8"
+          },
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 6
+            },
+            "name": "tx",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "tx_len",
+            "type": "usize"
+          },
+          {
+            "arg": {
+              "kind": "out_bytes",
+              "len": 8
+            },
+            "name": "rx",
+            "type": "*mut u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "rx_len",
+            "type": "usize"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "timeout_ms",
+            "type": "u32"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "One-shot 12-bit reading.\n\n`unit` and `channel` may be NULL.\n\n# Returns\n\n`int` — `OK` or an error.\n\n# Arguments\n\n* `pin` (`int`): GPIO number.\n* `ref_mv` (`uint32_t`): Reference for the millivolt value.\n* `raw` (`int *`): Raw reading.\n* `mv` (`uint32_t *`): Millivolts.\n* `unit` (`int *`): ADC unit used.\n* `channel` (`int *`): ADC channel used.",
+      "method": "adc_read",
+      "name": "hw.adc_read",
+      "note": "",
+      "summary": "One-shot 12-bit reading.",
+      "x-c": {
+        "index": 10,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "pin",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "ref_mv",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "out",
+              "size": 4
+            },
+            "name": "raw",
+            "type": "*mut c_int"
+          },
+          {
+            "arg": {
+              "kind": "out",
+              "size": 4
+            },
+            "name": "mv",
+            "type": "*mut u32"
+          },
+          {
+            "arg": {
+              "kind": "out",
+              "size": 4
+            },
+            "name": "unit",
+            "type": "*mut c_int"
+          },
+          {
+            "arg": {
+              "kind": "out",
+              "size": 4
+            },
+            "name": "channel",
+            "type": "*mut c_int"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "hw",
+      "doc": "Set a WS2812-style LED.\n\n# Returns\n\n`int` — `OK` or an error.\n\n# Arguments\n\n* `pin` (`int`): The data pin.\n* `red` (`uint8_t`): 0..255.\n* `green` (`uint8_t`): 0..255.\n* `blue` (`uint8_t`): 0..255.",
+      "method": "rgbled_write",
+      "name": "hw.rgbled_write",
+      "note": "",
+      "summary": "Set a WS2812-style LED.",
+      "x-c": {
+        "index": 11,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "pin",
+            "type": "c_int"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "red",
+            "type": "u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "green",
+            "type": "u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "blue",
+            "type": "u8"
+          }
+        ],
+        "table": "Hardware"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "80. Starts the BLE stack when needed, creates the CoC server on PSM 0x0080 and advertises the DMesh service (16-bit UUID 0x1820 and a 128-bit UUID: the pairing UUID until the device holds a secret, the operational UUID after).",
+      "method": "start",
+      "name": "ble.start",
+      "note": "",
+      "summary": "80. Starts the BLE stack when needed, creates the CoC server on PSM 0x0080 and advertises the DMesh service (16-bit UUID 0x1820 and a 128-bit UUID: the pairing UUID until the device holds a secret, the operational UUID after).",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 8
+            },
+            "name": "request",
+            "type": "*const BleStart"
+          }
+        ],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "81. Stops advertising and scanning and terminates the connection (reason 0x13).",
+      "method": "stop",
+      "name": "ble.stop",
+      "note": "",
+      "summary": "81. Stops advertising and scanning and terminates the connection (reason 0x13).",
+      "x-c": {
+        "index": 1,
+        "params": [],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "82. Passive scan with duplicate filtering.",
+      "method": "scan",
+      "name": "ble.scan",
+      "note": "",
+      "summary": "82. Passive scan with duplicate filtering.",
+      "x-c": {
+        "index": 2,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 8
+            },
+            "name": "request",
+            "type": "*const BleScan"
+          }
+        ],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "83. The state",
+      "method": "status",
+      "name": "ble.status",
+      "note": "",
+      "summary": "83. The state",
+      "x-c": {
+        "index": 3,
+        "params": [
+          {
+            "arg": {
+              "kind": "out",
+              "size": 92
+            },
+            "name": "response",
+            "type": "*mut BleStatus"
+          }
+        ],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "84. Stop scanning",
+      "method": "scan_stop",
+      "name": "ble.scan_stop",
+      "note": "",
+      "summary": "84. Stop scanning",
+      "x-c": {
+        "index": 4,
+        "params": [],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "85. Cancels a scan in progress, connects as a central to `addr` (20 s timeout) and opens the CoC channel.",
+      "method": "connect",
+      "name": "ble.connect",
+      "note": "",
+      "summary": "85. Cancels a scan in progress, connects as a central to `addr` (20 s timeout) and opens the CoC channel.",
+      "x-c": {
+        "index": 5,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 16
+            },
+            "name": "request",
+            "type": "*const BleConnect"
+          }
+        ],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "87. Like `start` without the advertisement: the server for a peer that already knows the address.",
+      "method": "listen",
+      "name": "ble.listen",
+      "note": "",
+      "summary": "87. Like `start` without the advertisement: the server for a peer that already knows the address.",
+      "x-c": {
+        "index": 6,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 8
+            },
+            "name": "request",
+            "type": "*const BleListen"
+          }
+        ],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "88. Deletes the stored peer keys: a bonded peer has to pair again and cannot reconnect with an old key.",
+      "method": "bonds_clear",
+      "name": "ble.bonds_clear",
+      "note": "",
+      "summary": "88. Deletes the stored peer keys: a bonded peer has to pair again and cannot reconnect with an old key.",
+      "x-c": {
+        "index": 7,
+        "params": [],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "89. `mode` 1 (`always`): the service stays up across a sleep; while it is live a light sleep requested through the `power` component is vetoed (advertising keeps the controller from sleeping on the current boards, so it is a power vote).",
+      "method": "mode",
+      "name": "ble.mode",
+      "note": "",
+      "summary": "89. `mode` 1 (`always`): the service stays up across a sleep; while it is live a light sleep requested through the `power` component is vetoed (advertising keeps the controller from sleeping on the current boards, so it is a power vote).",
+      "x-c": {
+        "index": 8,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 8
+            },
+            "name": "request",
+            "type": "*const BleMode"
+          }
+        ],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "90. The distinct advertisements seen by scans since the cache was cleared (a new `scan` clears it), at most 16 and at most `CONFIG_XIP_BLE_SCAN_CACHE`.",
+      "method": "scan_results",
+      "name": "ble.scan_results",
+      "note": "",
+      "summary": "90. The distinct advertisements seen by scans since the cache was cleared (a new `scan` clears it), at most 16 and at most `CONFIG_XIP_BLE_SCAN_CACHE`.",
+      "x-c": {
+        "index": 9,
+        "params": [
+          {
+            "arg": {
+              "kind": "out",
+              "size": 152
+            },
+            "name": "response",
+            "type": "*mut BleScanResults"
+          }
+        ],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "91. What the `power` component runs before each sleep when the component is present, callable by a caller that owns its own sleep.",
+      "method": "suspend",
+      "name": "ble.suspend",
+      "note": "",
+      "summary": "91. What the `power` component runs before each sleep when the component is present, callable by a caller that owns its own sleep.",
+      "x-c": {
+        "index": 10,
+        "params": [],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "ble",
+      "doc": "92. Re-arm after a light sleep",
+      "method": "resume",
+      "name": "ble.resume",
+      "note": "",
+      "summary": "92. Re-arm after a light sleep",
+      "x-c": {
+        "index": 11,
+        "params": [],
+        "table": "Ble"
+      }
+    },
+    {
+      "component": "lora",
+      "doc": "Local only (no CBOR form, no envelope reaches it): NAN calls this to replace or restore its LoRa/FSK receive role without racing a queued module stop. The borrowed start-format request is validated before stopping existing work; only rx, fsk without payload, and idle are accepted. Success admits asynchronous board initialization, not reception.",
+      "method": "configure",
+      "name": "lora.configure",
+      "note": "",
+      "summary": "Local only (no CBOR form, no envelope reaches it): NAN calls this to replace or restore its LoRa/FSK receive role without racing a queued module stop. The borrowed start-format request is validated before stopping existing work; only rx, fsk without payload, and idle are accepted. Success admits asynchronous board initialization, not reception.",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 1
+            },
+            "name": "record",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "usize"
+          }
+        ],
+        "table": "Lora"
+      }
+    },
+    {
+      "component": "lora",
+      "doc": "Local only (no CBOR form, no envelope reaches it): NAN calls this before coordinated sleep or explicit radio off to synchronously cancel radio work and release SPI, IRQ and power. The mapped module remains callable until explicitly stopped.",
+      "method": "suspend",
+      "name": "lora.suspend",
+      "note": "",
+      "summary": "Local only (no CBOR form, no envelope reaches it): NAN calls this before coordinated sleep or explicit radio off to synchronously cancel radio work and release SPI, IRQ and power. The mapped module remains callable until explicitly stopped.",
+      "x-c": {
+        "index": 1,
+        "params": [],
+        "table": "Lora"
+      }
+    },
+    {
+      "component": "nan",
+      "doc": "Local only (no CBOR form, no envelope reaches it): The runtime worker calls this after USB SOF connection state changes, to keep active roles while a host is attached by default, or follow the explicit USB detach policy.",
+      "method": "usb",
+      "name": "nan.usb",
+      "note": "",
+      "summary": "Local only (no CBOR form, no envelope reaches it): The runtime worker calls this after USB SOF connection state changes, to keep active roles while a host is attached by default, or follow the explicit USB detach policy.",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "connected",
+            "type": "u32"
+          }
+        ],
+        "table": "Nan"
+      }
+    },
+    {
+      "component": "nan",
+      "doc": "Local only (no CBOR form, no envelope reaches it): The runtime worker calls this with the native wake cause so NAN restores receive capture and active transport policy after local serial or decoded directed-packet activity.",
+      "method": "wake",
+      "name": "nan.wake",
+      "note": "",
+      "summary": "Local only (no CBOR form, no envelope reaches it): The runtime worker calls this with the native wake cause so NAN restores receive capture and active transport policy after local serial or decoded directed-packet activity.",
+      "x-c": {
+        "index": 1,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "cause",
+            "type": "i32"
+          }
+        ],
+        "table": "Nan"
+      }
+    },
+    {
+      "component": "nan",
+      "doc": "Local only (no CBOR form, no envelope reaches it): Local policy callers and the remote sleepy handler use this to select paired discovery windows; USB attachment vetoes enabling.",
+      "method": "sleepy",
+      "name": "nan.sleepy",
+      "note": "",
+      "summary": "Local only (no CBOR form, no envelope reaches it): Local policy callers and the remote sleepy handler use this to select paired discovery windows; USB attachment vetoes enabling.",
+      "x-c": {
+        "index": 2,
+        "params": [
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "enabled",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "cadence",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "trace",
+            "type": "u32"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "immediate",
+            "type": "u32"
+          }
+        ],
+        "table": "Nan"
+      }
+    },
+    {
+      "component": "nan",
+      "doc": "Local only (no CBOR form, no envelope reaches it): A publication supplier calls this to replace the cache without restarting synchronization or waiting for a message round trip.",
+      "method": "set_announce",
+      "name": "nan.set_announce",
+      "note": "",
+      "summary": "Local only (no CBOR form, no envelope reaches it): A publication supplier calls this to replace the cache without restarting synchronization or waiting for a message round trip.",
+      "x-c": {
+        "index": 3,
+        "params": [
+          {
+            "arg": {
+              "kind": "bytes",
+              "len": 1
+            },
+            "name": "record",
+            "type": "*const u8"
+          },
+          {
+            "arg": {
+              "kind": "val"
+            },
+            "name": "len",
+            "type": "usize"
+          }
+        ],
+        "table": "Nan"
+      }
+    },
+    {
+      "component": "nan",
+      "doc": "Local only (no CBOR form, no envelope reaches it): Local control callers use this to apply validated independent Wi-Fi, UART, BLE and LoRa/FSK settings; direct transport.set requests use the same NAN policy.",
+      "method": "transport_set",
+      "name": "nan.transport_set",
+      "note": "",
+      "summary": "Local only (no CBOR form, no envelope reaches it): Local control callers use this to apply validated independent Wi-Fi, UART, BLE and LoRa/FSK settings; direct transport.set requests use the same NAN policy.",
+      "x-c": {
+        "index": 4,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 40
+            },
+            "name": "request",
+            "type": "*const NanTransport"
+          }
+        ],
+        "table": "Nan"
+      }
+    },
+    {
+      "component": "system",
+      "doc": "1. Free, minimum-free and largest-block values, in bytes.",
+      "method": "heap",
+      "name": "system.heap",
+      "note": "",
+      "summary": "1. Free, minimum-free and largest-block values, in bytes.",
+      "x-c": {
+        "index": 0,
+        "params": [
+          {
+            "arg": {
+              "kind": "out",
+              "size": 24
+            },
+            "name": "response",
+            "type": "*mut SystemHeapInfo"
+          }
+        ],
+        "table": "System"
+      }
+    },
+    {
+      "component": "system",
+      "doc": "2. Kinds: 0 memory regions, 1 block snapshot, 3 trace start, 4 trace dump, 5 trace stop, 6 CBOR block records over native PPP.",
+      "method": "heap_dump",
+      "name": "system.heap_dump",
+      "note": "",
+      "summary": "2. Kinds: 0 memory regions, 1 block snapshot, 3 trace start, 4 trace dump, 5 trace stop, 6 CBOR block records over native PPP.",
+      "x-c": {
+        "index": 1,
+        "params": [
+          {
+            "arg": {
+              "kind": "in",
+              "size": 4
+            },
+            "name": "request",
+            "type": "*const SystemHeapDump"
+          }
+        ],
+        "table": "System"
+      }
+    },
+    {
+      "component": "system",
+      "doc": "3. Clients debugging scheduling or memory usage request task names, priorities and remaining stack bytes.",
+      "method": "dump_tasks",
+      "name": "system.dump_tasks",
+      "note": "",
+      "summary": "3. Clients debugging scheduling or memory usage request task names, priorities and remaining stack bytes.",
+      "x-c": {
+        "index": 2,
+        "params": [],
+        "table": "System"
+      }
+    }
+  ],
+  "types": []
+}

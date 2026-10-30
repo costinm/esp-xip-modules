@@ -338,7 +338,7 @@ def module_text(name, number, methods, types, structs, api_path, dispatch_only=F
     for m in methods:
         w(f"            {m['name']}: Some(v_{m['name']}::<T>),")
     w("        };")
-    w(f"        hw.provide_table(call, core::ptr::addr_of!((*hosted).table).cast(), core::ptr::addr_of_mut!((*hosted).ctx).cast())")
+    w(f"        hw.provide_table(call, core::ptr::addr_of!((*hosted).table).cast(), core::ptr::addr_of_mut!((*hosted).ctx).cast(), xip_abi::schema::SCHEMA_{name.replace('-', '_').upper()})")
     w("    }")
     w("}")
     return "\n".join(t) + "\n"

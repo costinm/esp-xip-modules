@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "xip_psa.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -689,7 +688,8 @@ static const void *component_of_module(const char *name)
 }
 
 /* Right after HOST_START (worker, exec_lock held): ask the module for the table of each component its manifest names. The answer is the request's
- * response (xip_instance_request's machinery, run inline): the table and the context as two native words. */
+ * response (xip_instance_request's machinery, run inline): the table and the context as native words, then the address of the component's
+ * schema (only wasm runtimes use it; ignored here). */
 static void components_publish(struct xip_instance *in)
 {
     if (!in->comps[0].name[0]) return;
@@ -701,7 +701,7 @@ static void components_publish(struct xip_instance *in)
                                .data = (const uint8_t *)in->comps[c].name, .len = strlen(in->comps[c].name), .from = XIP_ADDR_MAIN, .id = XIP_REQUEST_ID};
         (void)dispatch_x(in, &call);
         in->in_request = false;
-        if (in->responded && in->response_len == 2 * sizeof(void *)) {
+        if (in->responded && (in->response_len == 2 * sizeof(void *) || in->response_len == 3 * sizeof(void *))) {
             const void *table; void *ctx;
             memcpy(&table, in->response, sizeof table);
             memcpy(&ctx, in->response + sizeof table, sizeof ctx);
@@ -719,11 +719,11 @@ static void components_publish(struct xip_instance *in)
 static const void *h_get_component(void *user, const char *name)
 {
     (void)user; /* Requester context; native component functions take no extra argument. */
-    extern const xip_psa *xip_psa_component(void);
+    extern const xip_crypto *xip_crypto_component(void);
     extern const xip_identity *xip_identity_component(void);
     if (!name) return NULL;
     if (!strcmp(name, "serial")) return xip_serial_component();
-    if (strcmp(name, "psa") == 0) return xip_psa_component();
+    if (strcmp(name, "crypto") == 0) return xip_crypto_component();
     if (strcmp(name, "identity") == 0) return xip_identity_component();
     if (strcmp(name, "link") == 0) return link_table();
     if (strcmp(name, "quic") == 0) return quic_module_table();
@@ -868,6 +868,19 @@ static int h_pkt_buf(void *user, uint32_t pkt, uint8_t **ptr, size_t *max)
     *max = xip_pool_slot_size(pool) - e->start - PKT_TAIL;
     if (*max > XIP_PKT_MAX) *max = XIP_PKT_MAX;
     return XIP_OK;
+}
+
+/* The bytes [offset, offset+len) of the payload window of a packet (the window pkt_buf returns); NULL when the handle is dead or the range is
+ * outside it. Writing needs the packet unshared. Used by the crypto component, which takes ranges of packets. */
+uint8_t *xip_runtime_packet_range(uint32_t pkt, uint32_t offset, uint32_t len, bool write)
+{
+    xip_packet_ref *e = xip_packet_get(pool,pkt);
+    if (!e) return NULL;
+    if (write && xip_pool_refs(pool, e->slot) != 1) return NULL;
+    size_t max = xip_pool_slot_size(pool) - e->start - PKT_TAIL;
+    if (max > XIP_PKT_MAX) max = XIP_PKT_MAX;
+    if ((uint64_t)offset + len > max) return NULL;
+    return xip_pool_slot(pool, e->slot) + e->start + offset;
 }
 
 static int h_pkt_span(void *user, uint32_t pkt, uint8_t **base, size_t *capacity)
@@ -2132,6 +2145,7 @@ static void finish(struct xip_instance *in, int result)
     }
     streams_release(in->id);
     quic_module_release(in);
+    { extern void xip_crypto_release(void *owner); xip_crypto_release(in); }
     if (quic_mutex) { SemaphoreHandle_t m=quic_lock(); xip_quic_relay_release(&quic_table,in->id); xSemaphoreGive(m); relay_link_gc(); }
     xip_power_cancel(in->id);
     xip_info_release(in->id);

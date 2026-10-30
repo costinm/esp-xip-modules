@@ -26,6 +26,8 @@ pub const ERR_SIZE: i32 = -8;
 pub const ERR_LEAK: i32 = -9;
 /// A nonblocking socket operation would block; wait for another readiness event.
 pub const ERR_AGAIN: i32 = -10;
+/// A signature or authentication tag did not verify.
+pub const ERR_AUTH: i32 = -11;
 
 // HOST: Methods of component 0, which only the host uses. A module's own components are 1 and up.
 /// The host's component number.
@@ -765,11 +767,8 @@ pub struct Host {
     /// The leading `user` argument is the requesting module's existing runtime context,
     /// used for bookkeeping; it is not added to functions in the returned table.
     /// `name` is a NUL-terminated string. `"wifi"` returns the wanted-state component (`xip_wifi` in `xip.h`: `set`, `get`, `state`; design in
-    /// `notes/ai/2026-10-16-wifi-intent-component.md`), where the host has Wi-Fi. `"psa"` returns the host's native PSA
-    /// crypto table, defined by the ordinary C header `include/xip_psa.h` and a
-    /// hand-written Rust wrapper. Component headers need not be generated from this file.
-    /// The PSA table is read-only and valid for the firmware lifetime. Its signatures,
-    /// context types and error codes are native SDK ones. Lookup does not initialize
+    /// `notes/ai/2026-10-16-wifi-intent-component.md`), where the host has Wi-Fi. `"crypto"` and `"identity"` return the runtime's
+    /// cryptography (`xip_crypto`, `xip_identity`): calls on packets, no native contexts. Lookup does not initialize
     /// Wi-Fi or invoke another module. Module-provided tables and entrypoint changes
     /// are separate future work.
     ///

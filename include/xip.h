@@ -40,6 +40,9 @@
 // A nonblocking socket operation would block; wait for another readiness event.
 #define XIP_ERR_AGAIN -10
 
+// A signature or authentication tag did not verify.
+#define XIP_ERR_AUTH -11
+
 // The host's component number.
 #define XIP_HOST_COMPONENT 0
 
@@ -400,27 +403,21 @@
 // `Hardware::version`.
 #define XIP_HARDWARE_VERSION 1
 
-#define XIP_VERSION 1
+#define XIP_CRYPTO_VERSION 1
 
+// SHA-256 (digest 32 bytes).
 #define XIP_ALG_SHA_256 33554441
 
+// SHA-384 (digest 48 bytes).
+#define XIP_ALG_SHA_384 33554442
+
+// SHA-512 (digest 64 bytes).
+#define XIP_ALG_SHA_512 33554443
+
+// ECDSA over P-256 with SHA-256: `verify` checks a message against a raw 64-byte r||s signature.
 #define XIP_ALG_ECDSA_SHA_256 100664841
 
-#define XIP_KEY_TYPE_ECC_PUBLIC_KEY_SECP_R1 16658
-
-#define XIP_KEY_USAGE_VERIFY_HASH 8192
-
-#define XIP_KEY_USAGE_VERIFY_MESSAGE 2048
-
-#define XIP_ERROR_INVALID_ARGUMENT -135
-
-#define XIP_ERROR_BAD_STATE -137
-
-#define XIP_ERROR_INSUFFICIENT_MEMORY -141
-
-#define XIP_ERROR_INVALID_SIGNATURE -149
-
-#define XIP_ERROR_CORRUPTION_DETECTED -151
+#define XIP_IDENTITY_VERSION 1
 
 typedef struct {
   uint32_t free;
@@ -556,9 +553,11 @@ typedef struct {
   int (*close)(void *ctx, uint32_t handle);
   // Consumer transfers one pool packet on OK; EVERY error retains it.
   // One outstanding output per stream. fin half-closes after these bytes.
+  // note=packet handle: ownership moves to the stream
   int (*write_pkt)(void *ctx, uint32_t handle, uint32_t packet, uint32_t len, uint32_t fin);
   // Provider takes the exact pending physical slot, or gets 0 if none.
   // A full held quota leaves it pending for the next poll.
+  // note=hands a packet out through a struct
   int (*take)(void *ctx, uint32_t handle, xip_stream_packet *out);
   // Provider accepted the outstanding packet into reliable history.
   int (*written)(void *ctx, uint32_t handle);
@@ -631,28 +630,62 @@ typedef struct {
   uint32_t available;
 } xip_packet_pool_info;
 
-// `get_component("identity")`: P-256 identity, compatible with the firmware's
-// existing `sec/id_p256` key. Calls are serialized by the module owner.
+// `get_component("identity")`: a P-256 identity (on the ESP the existing `sec/id_p256` key; on a host `identity.p256` in the state directory).
+// Results are written into packets like those of [`crate::Crypto`]. Verification is `Crypto::verify`.
 typedef struct {
   // 1.
   uint32_t version;
   // Size of this table.
   uint32_t size;
-  // Write the uncompressed 65-byte SEC1 public key, creating and committing
+  // Write the uncompressed 65-byte SEC1 public key at `offset` of `packet`, creating and committing
   // the identity on first use. No volatile identity is returned on failure.
-  int (*public_key)(void *ctx, uint8_t *out);
-  // SHA-256 and sign a message, returning a 64-byte raw r||s signature.
+  int (*public_key)(void *ctx, uint32_t packet, uint32_t offset);
+  // SHA-256 and sign `len` bytes of `packet` at `offset`; the raw 64-byte r||s signature goes to `out_offset` of `out_packet`.
   // Call when cached signed facts change, never for periodic publication.
-  int (*sign)(void *ctx, const uint8_t *data, size_t len, uint8_t *signature);
-  // Verify raw r||s ECDSA/SHA-256 using a compressed (33-byte) or
-  // uncompressed (65-byte) SEC1 key. No device identity is loaded.
-  int (*verify)(void *ctx,
-                const uint8_t *public,
-                size_t public_len,
-                const uint8_t *data,
-                size_t len,
-                const uint8_t *signature);
+  int (*sign)(void *ctx,
+              uint32_t packet,
+              uint32_t offset,
+              uint32_t len,
+              uint32_t out_packet,
+              uint32_t out_offset);
 } xip_identity;
+
+// `get_component("crypto")`. Every packet argument is a handle the caller holds; ranges outside the payload window answer `ERR_ARG`.
+// A signature that does not verify answers `ERR_AUTH`.
+typedef struct {
+  // 1.
+  uint32_t version;
+  // Size of this table.
+  uint32_t size;
+  // Hash `len` bytes of `packet` at `offset` and write the digest at `out_offset` of `out_packet` (may be the same packet, beyond the input).
+  // Returns the digest length.
+  int (*hash)(void *ctx,
+              uint32_t alg,
+              uint32_t packet,
+              uint32_t offset,
+              uint32_t len,
+              uint32_t out_packet,
+              uint32_t out_offset);
+  // Start a multipart hash. Returns its handle (positive).
+  int (*hash_start)(void *ctx, uint32_t alg);
+  // Add a byte range of a packet to the hash `handle`.
+  int (*hash_update)(void *ctx, uint32_t handle, uint32_t packet, uint32_t offset, uint32_t len);
+  // Finish the hash `handle` (it is released) and write the digest at `out_offset` of `out_packet`. Returns the digest length.
+  int (*hash_finish)(void *ctx, uint32_t handle, uint32_t out_packet, uint32_t out_offset);
+  // Release the hash `handle` without a result. Safe for an unknown handle.
+  int (*hash_abort)(void *ctx, uint32_t handle);
+  // Verify with `alg` ([`ALG_ECDSA_SHA_256`]): the range at `offset` holds the public key (`key_len`: 33 compressed or 65 uncompressed SEC1 bytes),
+  // then the message (`message_len`), then the 64-byte raw signature (`signature_len`). 0 when valid, `ERR_AUTH` when not.
+  int (*verify)(void *ctx,
+                uint32_t alg,
+                uint32_t packet,
+                uint32_t offset,
+                uint32_t key_len,
+                uint32_t message_len,
+                uint32_t signature_len);
+  // Fill `len` bytes of `packet` at `offset` with random bytes.
+  int (*random)(void *ctx, uint32_t packet, uint32_t offset, uint32_t len);
+} xip_crypto;
 
 // Writable packet returned by the pool adapter. A successful begin transfers
 // one writer to C, which must call rx_finish exactly once (commit or abort).
@@ -1235,11 +1268,8 @@ typedef struct {
   // The leading `user` argument is the requesting module's existing runtime context,
   // used for bookkeeping; it is not added to functions in the returned table.
   // `name` is a NUL-terminated string. `"wifi"` returns the wanted-state component (`xip_wifi` in `xip.h`: `set`, `get`, `state`; design in
-  // `notes/ai/2026-10-16-wifi-intent-component.md`), where the host has Wi-Fi. `"psa"` returns the host's native PSA
-  // crypto table, defined by the ordinary C header `include/xip_psa.h` and a
-  // hand-written Rust wrapper. Component headers need not be generated from this file.
-  // The PSA table is read-only and valid for the firmware lifetime. Its signatures,
-  // context types and error codes are native SDK ones. Lookup does not initialize
+  // `notes/ai/2026-10-16-wifi-intent-component.md`), where the host has Wi-Fi. `"crypto"` and `"identity"` return the runtime's
+  // cryptography (`xip_crypto`, `xip_identity`): calls on packets, no native contexts. Lookup does not initialize
   // Wi-Fi or invoke another module. Module-provided tables and entrypoint changes
   // are separate future work.
   //
@@ -1533,6 +1563,7 @@ typedef struct {
   // do not hear their channel meanwhile; the host puts the radio back on its channel when the scan is done. `ERR_BUSY` as
   // well while the driver is busy joining (try again), `ERR_IO` when it refuses. A network in range that is not listed was
   // missed; scan again.
+  // note=array out sized by an argument; polled (ERR_BUSY until done)
   int (*scan)(void *ctx, xip_wifi_ap *out, size_t max);
   // Switch **promiscuous receive** on or off, which a NAN module needs: NAN discovery-window frames are not delivered any
   // other way (see `components/xip_runtime/ESPNOW.md`). The radio keeps receiving as before; the frames the driver then hands
@@ -1552,6 +1583,7 @@ typedef struct {
   int (*auto_reconnect)(void *ctx, bool enabled);
   // Non-blocking bounded channel scan, same completion contract as scan.
   // Bits 1..14 select channels; dwell_ms 10..120 per selected channel.
+  // note=array out sized by an argument
   int (*scan_channels)(void *ctx, xip_wifi_ap *out, size_t max, uint16_t channels, uint16_t dwell_ms);
 } xip_wifi;
 
@@ -1660,6 +1692,7 @@ typedef struct {
   // to the route or to every subscriber, with `source`, `signal` and `time_us` (the low 32 bits of the microsecond clock when
   // the radio received it; 0: now). The packet is consumed whether this succeeds or not (a link with nobody listening is a
   // success). `ERR_ARG` for an address this module does not provide.
+  // note=packet handle: ownership moves to the link
   int (*rx)(void *ctx,
             uint32_t addr,
             uint32_t pkt,
@@ -1669,6 +1702,7 @@ typedef struct {
             uint32_t time_us);
   // Release the provider's completed TX reference. `outcome` is retained for
   // source compatibility; no packet or callback returns to the original sender.
+  // note=packet handle: ownership moves back
   int (*tx_done)(void *ctx, uint32_t addr, uint32_t pkt, int outcome);
   // The provider has capacity again after refusing a frame: every subscriber gets `LINK_EVENT_READY`.
   int (*ready)(void *ctx, uint32_t addr);
@@ -1795,6 +1829,7 @@ typedef struct {
   // fully decodes its CBOR envelope before extending shared activity by 5 s.
   // Broadcast, malformed or nonlocal records never vote. Returns 1 if voted,
   // 0 if ignored; the packet is borrowed only for this call.
+  // note=a CBOR record inline
   int (*received)(void *ctx, const uint8_t *record, size_t len, uint32_t directed);
 } xip_power;
 
@@ -1904,6 +1939,7 @@ typedef struct {
   // * `tx` (`const uint8_t *`): Bytes to send.
   // * `rx` (`uint8_t *`): Bytes received, or NULL.
   // * `len` (`size_t`): Length.
+  // note=bulk bytes in and out: a packet in the isolated case
   int (*spi_transfer)(void *ctx, int handle, const uint8_t *tx, uint8_t *rx, size_t len);
   // Release an SPI device.
   //
@@ -1937,6 +1973,7 @@ typedef struct {
   // * `rx` (`uint8_t *`): Buffer for the read.
   // * `rx_len` (`size_t`): Length.
   // * `timeout_ms` (`uint32_t`): Longest wait.
+  // note=bulk bytes in and out
   int (*i2c_transfer)(void *ctx,
                       int port,
                       int sda,
@@ -2246,7 +2283,8 @@ _Static_assert(sizeof(xip_stream) == 36, "xip_stream layout");
 _Static_assert(sizeof(xip_quic) == 44, "xip_quic layout");
 _Static_assert(sizeof(xip_stream_packet) == 12, "xip_stream_packet layout");
 _Static_assert(sizeof(xip_call) == 88, "xip_call layout");
-_Static_assert(sizeof(xip_identity) == 20, "xip_identity layout");
+_Static_assert(sizeof(xip_identity) == 16, "xip_identity layout");
+_Static_assert(sizeof(xip_crypto) == 36, "xip_crypto layout");
 _Static_assert(sizeof(xip_power) == 44, "xip_power layout");
 _Static_assert(sizeof(xip_host) == 172, "xip_host layout");
 #endif

@@ -2,7 +2,7 @@
 # Generate everything that is generated in this project, in one place:  . ./env.sh && scripts/gen.sh
 # Whether to commit what it changes (the C header, the manifests inside module images) is the decision to update the runtime or not;
 # scripts/test-host.sh is the cross-version test. The tools (cbindgen, cargo, python3) come from the environment (flake.nix);
-# mesh-api-gen comes from the ssh-mesh flake (the `deps` profile of flake.nix puts it on PATH).
+# mesh-api-gen comes from ssh-mesh (flake, or a checkout in front of it with XIP_DEV_BIN).
 #
 # From the Rust declarations of crates/xip-abi (the source of truth of the C ABI):
 #   include/xip.h                         the C header (cbindgen)
@@ -16,8 +16,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
+# mesh-api-gen comes from the ssh-mesh flake (the `deps` profile puts it on PATH); the function-table passes below need a version with
+# --vtable-conf (a checkout of ssh-mesh: XIP_DEV_BIN=/ws/ssh-mesh/target/debug . ./env.sh).
 gen=$(command -v mesh-api-gen || true)
 [ -n "$gen" ] || { echo "mesh-api-gen not found: run scripts/esp-deps.sh (nix build --out-link target/nix/deps) and . ./env.sh" >&2; exit 1; }
+"$gen" --help | grep -q -- --vtable-conf || { echo "$gen is too old (no --vtable-conf): build ssh-mesh's crates/mesh-api-gen and put it first with XIP_DEV_BIN" >&2; exit 1; }
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' || { echo "python3 $(python3 --version) is too old: use the one of the flake (scripts/esp-deps.sh, then . ./env.sh)" >&2; exit 1; }
 
 # the table of each component a module hosts, and the module's glue for it, from the module's API.md and the C types it names
 #   crates/xip-abi/src/ble_vtable.rs, modules/mod_ble/src/api_gen.rs   (tools/gen_vtables.py)
@@ -44,6 +48,12 @@ python3 tools/gen_vtables.py --api modules/mod_nan/API.md --types crates/xip-abi
 (cd crates/xip-abi && RUSTC_BOOTSTRAP=1 CARGO_TARGET_DIR="$PWD/../../target/rustdoc" \
     cargo rustdoc --quiet --lib -- -Z unstable-options --output-format json >/dev/null 2>"$tmp/rustdoc.log") || { cat "$tmp/rustdoc.log" >&2; exit 1; }
 layout=$PWD/target/rustdoc/doc/xip_abi.json
+
+# the schema of the component tables and the wasm32 stubs, from the table structs in that layout (api/vtables.conf lists the tables)
+#   crates/xip-abi/src/schema_data.rs, crates/xip-abi/src/vt_shims.rs
+mkdir -p api/generated
+"$gen" --vtable-conf api/vtables.conf --rustdoc "$layout" --pointer-width 4 --out-tables-json api/generated/tables.api.json
+"$gen" --tables-json api/generated/tables.api.json --out-vtable-schema crates/xip-abi/src/schema_data.rs --out-vtable-shims crates/xip-abi/src/vt_shims.rs
 
 mkdir -p api/generated
 for src in api/*.API.md; do

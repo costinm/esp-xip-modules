@@ -1,5 +1,5 @@
 //! The esp-xip-modules ABI for Rust modules and applications: the host table and the C ABI of `include/xip.h` (generated
-//! from [`Host`] by `scripts/gen.sh`), the components a host offers ([`Wifi`], [`WifiTuner`], [`psa`]), and the safe
+//! from [`Host`] by `scripts/gen.sh`), the components a host offers ([`Wifi`], [`WifiTuner`], [`Crypto`]), and the safe
 //! [`Hw`] wrapper a module uses. The model is event driven: a module is a [`Module`] whose `handle` runs to completion
 //! for every call and never waits. [`Hw`] keeps the raw table pointer, checks the table `size` before each call (an older
 //! host has fewer slots) and returns [`ERR_UNSUPPORTED`] for a call the host does not have. Nothing here allocates unless a
@@ -64,6 +64,8 @@ pub mod heap;
 pub mod task;
 mod host;
 pub use host::*;
+mod vt;
+pub mod schema;
 mod wifi;
 pub use wifi::*;
 mod link;
@@ -85,9 +87,82 @@ pub use nimble::*;
 mod hardware;
 pub use hardware::*;
 
-pub mod psa;
+mod crypto;
+pub use crypto::*;
 mod identity;
 pub use identity::*;
+
+/// The host calls of a module compiled to WebAssembly (`modules/WASM.md`): named imports of the module `xip`, in the one
+/// address space the host and all modules share. Only the calls listed here exist so far; the rest answer `ERR_UNSUPPORTED`.
+/// cbindgen:ignore
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use super::Host;
+    pub struct Empty(pub Host);
+    unsafe impl Sync for Empty {}
+    pub static EMPTY: Empty = Empty(Host {
+        abi_version: crate::ABI_VERSION,
+        ..unsafe { core::mem::zeroed() }
+    });
+
+    /// A host call this module needs that the wasm bridge does not have: the host names it (a porting aid), the module gets `ERR_UNSUPPORTED`.
+    pub fn unsupported(name: &str) -> i32 {
+        unsafe { note_unsupported(name.as_ptr(), name.len()) };
+        crate::ERR_UNSUPPORTED
+    }
+
+    #[link(wasm_import_module = "xip")]
+    extern "C" {
+        fn note_unsupported(name: *const u8, len: usize);
+        pub fn log(data: *const u8, len: usize) -> i32;
+        pub fn now_ms() -> u64;
+        pub fn mem_alloc(size: usize) -> *mut u8;
+        pub fn mem_free(ptr: *mut u8) -> i32;
+        pub fn pkt_info(headroom: *mut u32, max: *mut u32) -> i32;
+        pub fn pkt_alloc(out: *mut u32) -> i32;
+        pub fn pkt_buf(pkt: u32, ptr: *mut *mut u8, max: *mut usize) -> i32;
+        pub fn pkt_keep(pkt: u32) -> i32;
+        pub fn pkt_free(pkt: u32) -> i32;
+        pub fn send(pkt: u32, len: usize, dst: u32, component: i32, method: i32, id: u64) -> i32;
+        pub fn device_info(out: *mut u8, cap: usize) -> i32;
+        pub fn info_publish(component: i32, method: i32, data: *const u8, len: usize) -> i32;
+        pub fn pkt_span(pkt: u32, base: *mut *mut u8, cap: *mut usize) -> i32;
+        pub fn socket_read(socket: u32, out: *mut u8, len: usize) -> i32;
+        pub fn socket_write(socket: u32, data: *const u8, len: usize) -> i32;
+        pub fn socket_close(socket: u32) -> i32;
+        pub fn socket_peer(socket: u32, address: *mut u8, port: *mut u16, scope: *mut u32) -> i32;
+        pub fn udp_send(handle: u32, ip: *const u8, port: u16, scope: u32, data: *const u8, len: usize) -> i32;
+        pub fn socket_write_pkt(socket: u32, pkt: u32, start: u32, len: u32) -> i32;
+        pub fn modules_info(out: *mut u8, cap: usize) -> i32;
+        pub fn module_start(name: *const u8, name_len: usize, request: *const u8, request_len: usize) -> i32;
+        pub fn module_stop(name: *const u8, name_len: usize) -> i32;
+        pub fn module_manifest(name: *const u8, name_len: usize, out: *mut u8, cap: usize) -> i32;
+        pub fn module_rescan() -> i32;
+        pub fn reset() -> i32;
+        pub fn heap_info(out: *mut u8, cap: usize) -> i32;
+        pub fn heap_dump(kind: i32) -> i32;
+        pub fn nv(key: *const u8, key_len: usize, value: *const u8, value_len: usize, out: *mut u8, cap: usize) -> i32;
+        pub fn flash_erase(address: u32, offset: u32, len: u32, component: i32, method: i32, id: u64) -> i32;
+        pub fn flash_write(address: u32, offset: u32, pkt: u32, start: u32, len: u32, component: i32, method: i32, id: u64) -> i32;
+        pub fn flash_read(address: u32, offset: u32, out: *mut u8, len: usize) -> i32;
+        pub fn spi_open(config: *const crate::SpiConfig) -> i32;
+        pub fn spi_transfer(handle: i32, tx: *const u8, rx: *mut u8, len: usize) -> i32;
+        pub fn spi_close(handle: i32) -> i32;
+        pub fn i2c_transfer(port: i32, sda: i32, scl: i32, hz: u32, address: u8, tx: *const u8, tx_len: usize, rx: *mut u8, rx_len: usize, timeout_ms: u32) -> i32;
+        pub fn adc_read(pin: i32, ref_mv: u32, raw: *mut i32, mv: *mut u32, unit: *mut i32, channel: *mut i32) -> i32;
+        pub fn rgbled_write(pin: i32, red: u8, green: u8, blue: u8) -> i32;
+        pub fn alarm_set(delay: u32, window: u32, interval: u32, flags: u32, component: i32, method: i32) -> i32;
+        pub fn alarm_cancel(alarm: i32) -> i32;
+        pub fn get_setting(key: *const u8, key_len: usize, value: *mut u8, cap: usize, len: *mut usize) -> i32;
+        pub fn set_setting(key: *const u8, key_len: usize, value: *const u8, len: usize) -> i32;
+        pub fn gpio_config(pin: i32, mode: i32, pull: i32, level: i32) -> i32;
+        pub fn gpio_read(pin: i32) -> i32;
+        pub fn gpio_write(pin: i32, level: i32) -> i32;
+        pub fn irq_register(pin: i32, edge: i32, component: i32, method: i32) -> i32;
+        pub fn irq_unregister(pin: i32) -> i32;
+        pub fn irq_enable(pin: i32, enabled: i32) -> i32;
+    }
+}
 
 /// Table access for a module. Copy it freely: it is a pointer.
 #[derive(Clone, Copy)]
@@ -95,6 +170,49 @@ pub struct Hw {
     host: *const Host,
 }
 
+/// wasm32: a host call is a named import when there is one (`wasm`), `ERR_UNSUPPORTED` otherwise (the arguments are still checked).
+#[cfg(target_arch = "wasm32")]
+macro_rules! wasm_imp {
+    (pkt_info ( $($a:expr),* )) => { unsafe { wasm::pkt_info($($a),*) } };
+    (pkt_alloc ( $($a:expr),* )) => { unsafe { wasm::pkt_alloc($($a),*) } };
+    (pkt_buf ( $($a:expr),* )) => { unsafe { wasm::pkt_buf($($a),*) } };
+    (pkt_keep ( $($a:expr),* )) => { unsafe { wasm::pkt_keep($($a),*) } };
+    (pkt_free ( $($a:expr),* )) => { unsafe { wasm::pkt_free($($a),*) } };
+    (send ( $($a:expr),* )) => { unsafe { wasm::send($($a),*) } };
+    (device_info ( $($a:expr),* )) => { unsafe { wasm::device_info($($a),*) } };
+    (info_publish ( $($a:expr),* )) => { unsafe { wasm::info_publish($($a),*) } };
+    (pkt_span ( $($a:expr),* )) => { unsafe { wasm::pkt_span($($a),*) } };
+    (socket_read ( $($a:expr),* )) => { unsafe { wasm::socket_read($($a),*) } };
+    (socket_write ( $($a:expr),* )) => { unsafe { wasm::socket_write($($a),*) } };
+    (socket_close ( $($a:expr),* )) => { unsafe { wasm::socket_close($($a),*) } };
+    (socket_peer ( $($a:expr),* )) => { unsafe { wasm::socket_peer($($a),*) } };
+    (udp_send ( $($a:expr),* )) => { unsafe { wasm::udp_send($($a),*) } };
+    (socket_write_pkt ( $($a:expr),* )) => { unsafe { wasm::socket_write_pkt($($a),*) } };
+    (modules_info ( $($a:expr),* )) => { unsafe { wasm::modules_info($($a),*) } };
+    (module_start ( $($a:expr),* )) => { unsafe { wasm::module_start($($a),*) } };
+    (module_stop ( $($a:expr),* )) => { unsafe { wasm::module_stop($($a),*) } };
+    (module_manifest ( $($a:expr),* )) => { unsafe { wasm::module_manifest($($a),*) } };
+    (module_rescan ( $($a:expr),* )) => { unsafe { wasm::module_rescan($($a),*) } };
+    (reset ( $($a:expr),* )) => { unsafe { wasm::reset($($a),*) } };
+    (heap_info ( $($a:expr),* )) => { unsafe { wasm::heap_info($($a),*) } };
+    (heap_dump ( $($a:expr),* )) => { unsafe { wasm::heap_dump($($a),*) } };
+    (nv ( $($a:expr),* )) => { unsafe { wasm::nv($($a),*) } };
+    (flash_erase ( $($a:expr),* )) => { unsafe { wasm::flash_erase($($a),*) } };
+    (flash_write ( $($a:expr),* )) => { unsafe { wasm::flash_write($($a),*) } };
+    (flash_read ( $($a:expr),* )) => { unsafe { wasm::flash_read($($a),*) } };
+    (alarm_set ( $($a:expr),* )) => { unsafe { wasm::alarm_set($($a),*) } };
+    (alarm_cancel ( $($a:expr),* )) => { unsafe { wasm::alarm_cancel($($a),*) } };
+    (get_setting ( $($a:expr),* )) => { unsafe { wasm::get_setting($($a),*) } };
+    (set_setting ( $($a:expr),* )) => { unsafe { wasm::set_setting($($a),*) } };
+    ($other:ident ( $($a:expr),* )) => {{ $( let _ = &$a; )* wasm::unsupported(stringify!($other)) }};
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! call {
+    ($self:ident, $slot:ident, $field:ident ( $($arg:expr),* )) => {{ let _ = &$self; wasm_imp!($field ( $($arg),* )) }};
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 macro_rules! call {
     ($self:ident, $slot:ident, $field:ident ( $($arg:expr),* )) => {{
         let h = $self.table();
@@ -105,6 +223,30 @@ macro_rules! call {
 }
 
 /// A call through the `hw` component (`ERR_UNSUPPORTED` when the host has none or leaves the member empty).
+#[cfg(target_arch = "wasm32")]
+macro_rules! hwcall {
+    ($self:ident, $field:ident ( $($arg:expr),* )) => {{ let _ = &$self; wasm_hw!($field ( $($arg),* )) }};
+}
+
+/// wasm32: the `hw` component is a set of named imports (`gpio_config`, ...) instead of a table found with `get_component`.
+#[cfg(target_arch = "wasm32")]
+macro_rules! wasm_hw {
+    (spi_open ( $($a:expr),* )) => { unsafe { wasm::spi_open($($a),*) } };
+    (spi_transfer ( $($a:expr),* )) => { unsafe { wasm::spi_transfer($($a),*) } };
+    (spi_close ( $($a:expr),* )) => { unsafe { wasm::spi_close($($a),*) } };
+    (i2c_transfer ( $($a:expr),* )) => { unsafe { wasm::i2c_transfer($($a),*) } };
+    (adc_read ( $($a:expr),* )) => { unsafe { wasm::adc_read($($a),*) } };
+    (rgbled_write ( $($a:expr),* )) => { unsafe { wasm::rgbled_write($($a),*) } };
+    (gpio_config ( $($a:expr),* )) => { unsafe { wasm::gpio_config($($a),*) } };
+    (gpio_read ( $($a:expr),* )) => { unsafe { wasm::gpio_read($($a),*) } };
+    (gpio_write ( $($a:expr),* )) => { unsafe { wasm::gpio_write($($a),*) } };
+    (irq_register ( $($a:expr),* )) => { unsafe { wasm::irq_register($($a),*) } };
+    (irq_unregister ( $($a:expr),* )) => { unsafe { wasm::irq_unregister($($a),*) } };
+    (irq_enable ( $($a:expr),* )) => { unsafe { wasm::irq_enable($($a),*) } };
+    ($other:ident ( $($a:expr),* )) => {{ $( let _ = &$a; )* wasm::unsupported(stringify!($other)) }};
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 macro_rules! hwcall {
     ($self:ident, $field:ident ( $($arg:expr),* )) => {{
         match $self.hardware() {
@@ -118,6 +260,10 @@ impl Hw {
     /// # Safety
     /// `host` must be the pointer the handler received, and stay valid during the call.
     pub unsafe fn new(host: *const Host) -> Option<Hw> {
+        // wasm32: the host is reached through named imports (`wasm`), not a table; the pointer only has to be non-null
+        if cfg!(target_arch = "wasm32") {
+            return if host.is_null() { None } else { Some(Hw { host }) };
+        }
         if host.is_null() || (*host).abi_version != ABI_VERSION || ((*host).size as usize) < slot::LOG + 4 {
             return None;
         }
@@ -129,8 +275,15 @@ impl Hw {
         self.host
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn table(&self) -> &Host {
         unsafe { &*self.host }
+    }
+
+    /// wasm32 modules have no table: this empty one (`size` 0) makes every call that has no import yet `ERR_UNSUPPORTED`.
+    #[cfg(target_arch = "wasm32")]
+    fn table(&self) -> &Host {
+        &wasm::EMPTY.0
     }
 
     pub fn abi_version(&self) -> u32 {
@@ -150,13 +303,21 @@ impl Hw {
     }
 
     pub fn log(&self, text: &[u8]) -> i32 {
+        #[cfg(target_arch = "wasm32")]
+        return unsafe { wasm::log(text.as_ptr(), text.len()) };
+        #[cfg(not(target_arch = "wasm32"))]
         call!(self, LOG, log(text.as_ptr(), text.len()))
     }
 
     pub fn now_ms(&self) -> u64 {
-        let h = self.table();
-        if (h.size as usize) < slot::NOW_MS + 4 { return 0; }
-        match h.now_ms { Some(f) => unsafe { f(h.user) }, None => 0 }
+        #[cfg(target_arch = "wasm32")]
+        return unsafe { wasm::now_ms() };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let h = self.table();
+            if (h.size as usize) < slot::NOW_MS + 4 { return 0; }
+            match h.now_ms { Some(f) => unsafe { f(h.user) }, None => 0 }
+        }
     }
 
     /// Monotonic clock for radio synchronization; None on older runtimes.
@@ -176,25 +337,38 @@ impl Hw {
     /// Memory that outlives a call, recorded by the host: free it before the module stops (`ERR_LEAK` otherwise). Null when
     /// the quota is used.
     pub fn mem_alloc(&self, size: usize) -> *mut u8 {
-        let h = self.table();
-        if (h.size as usize) < slot::MEM_ALLOC + 4 { return core::ptr::null_mut(); }
-        match h.mem_alloc { Some(f) => unsafe { f(h.user, size).cast() }, None => core::ptr::null_mut() }
+        #[cfg(target_arch = "wasm32")]
+        return unsafe { wasm::mem_alloc(size) };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let h = self.table();
+            if (h.size as usize) < slot::MEM_ALLOC + 4 { return core::ptr::null_mut(); }
+            match h.mem_alloc { Some(f) => unsafe { f(h.user, size).cast() }, None => core::ptr::null_mut() }
+        }
     }
 
     /// A host-owned table identified by its ordinary component header. NULL if
     /// unavailable. This does not add a context argument to native functions.
     pub fn get_component(&self, name: &core::ffi::CStr) -> *const core::ffi::c_void {
-        let h = self.table();
-        if (h.size as usize) < core::mem::offset_of!(Host, get_component) + core::mem::size_of::<usize>() {
-            return core::ptr::null();
-        }
-        match h.get_component {
-            Some(f) => unsafe { f(h.user, name.as_ptr()).cast() },
-            None => core::ptr::null(),
+        #[cfg(target_arch = "wasm32")]
+        return vt::shim::table(name);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let h = self.table();
+            if (h.size as usize) < core::mem::offset_of!(Host, get_component) + core::mem::size_of::<usize>() {
+                return core::ptr::null();
+            }
+            match h.get_component {
+                Some(f) => unsafe { f(h.user, name.as_ptr()).cast() },
+                None => core::ptr::null(),
+            }
         }
     }
 
     pub fn mem_free(&self, ptr: *mut u8) -> i32 {
+        #[cfg(target_arch = "wasm32")]
+        return unsafe { wasm::mem_free(ptr) };
+        #[cfg(not(target_arch = "wasm32"))]
         call!(self, MEM_FREE, mem_free(ptr.cast()))
     }
 
@@ -271,11 +445,14 @@ impl Hw {
     /// Answer `HOST_TABLE` for a hosted component: `table` is the module's table of functions (`{u32 version, u32 size, then one function pointer per
     /// method}`, every function `int f(void *ctx, ...)` with at most five more words of arguments) and `ctx` the first argument it is called with. The
     /// runtime hands callers a copy whose functions take the module's lock, call these with `ctx` and return `ERR_NOTFOUND` once the module has stopped.
-    pub fn provide_table(&self, call: &CallView, table: *const core::ffi::c_void, ctx: *mut core::ffi::c_void) -> i32 {
-        let mut bytes = [0u8; 2 * core::mem::size_of::<usize>()];
-        let (t, c) = bytes.split_at_mut(core::mem::size_of::<usize>());
-        t.copy_from_slice(&(table as usize).to_ne_bytes());
-        c.copy_from_slice(&(ctx as usize).to_ne_bytes());
+    /// `schema` is the component's schema (`schema::SCHEMA_*`, a static of the module) that tells a runtime which arguments are structs, strings or bytes
+    /// when it cannot call the functions directly (a wasm module); a runtime that can ignores it.
+    pub fn provide_table(&self, call: &CallView, table: *const core::ffi::c_void, ctx: *mut core::ffi::c_void, schema: &'static [u8]) -> i32 {
+        let w = core::mem::size_of::<usize>();
+        let mut bytes = [0u8; 3 * core::mem::size_of::<usize>()];
+        bytes[..w].copy_from_slice(&(table as usize).to_ne_bytes());
+        bytes[w..2 * w].copy_from_slice(&(ctx as usize).to_ne_bytes());
+        bytes[2 * w..].copy_from_slice(&(schema.as_ptr() as usize).to_ne_bytes());
         self.reply(call, &bytes)
     }
 

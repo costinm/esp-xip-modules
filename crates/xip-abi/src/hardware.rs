@@ -116,6 +116,7 @@ pub struct Hardware {
     /// * `tx` (`const uint8_t *`): Bytes to send.
     /// * `rx` (`uint8_t *`): Bytes received, or NULL.
     /// * `len` (`size_t`): Length.
+    /// note=bulk bytes in and out: a packet in the isolated case
     pub spi_transfer: Option<unsafe extern "C" fn(ctx: *mut c_void, handle: core::ffi::c_int, tx: *const u8, rx: *mut u8, len: usize) -> core::ffi::c_int>,
     /// Release an SPI device.
     ///
@@ -149,6 +150,7 @@ pub struct Hardware {
     /// * `rx` (`uint8_t *`): Buffer for the read.
     /// * `rx_len` (`size_t`): Length.
     /// * `timeout_ms` (`uint32_t`): Longest wait.
+    /// note=bulk bytes in and out
     pub i2c_transfer: Option<unsafe extern "C" fn(ctx: *mut c_void, port: core::ffi::c_int, sda: core::ffi::c_int, scl: core::ffi::c_int, frequency: u32, address: u8, tx: *const u8, tx_len: usize, rx: *mut u8, rx_len: usize, timeout_ms: u32) -> core::ffi::c_int>,
     /// One-shot 12-bit reading.
     ///

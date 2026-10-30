@@ -1,13 +1,16 @@
 //! The runtime: instances, the event loop with virtual time, alarms, pins and the application side.
 use crate::fixtures::SpiDevice;
 use crate::pool::{Mem,Pool};
-use crate::{hostcalls, HandlerFn, Loaded};
+use crate::{hostcalls, HandlerFn, Kind, Loaded};
+use xip_wasm::{WasmSpace, SLOTS};
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::rc::Rc;
 use xip_abi::*;
 
+/// Most state bytes of a wasm module (its state block is a region of the shared memory).
+pub(crate) const WASM_STATE_MAX: usize = 16384;
 pub(crate) const PINS: usize = 49;
 pub(crate) const ALARMS: usize = 8;
 pub(crate) const QUEUE: usize = 64;
@@ -180,19 +183,42 @@ pub(crate) struct Ctx {
     pub id: usize,
 }
 
+/// How an instance's `xip_handle` is reached.
+pub(crate) enum Handler {
+    Native(HandlerFn),
+    /// The module in `slot` of the runtime's shared wasm memory.
+    Wasm { space: Rc<WasmSpace>, slot: usize },
+}
+
 pub(crate) struct Inst {
     pub id: usize,
     pub name: String,
     pub _ctx: Box<Ctx>,
     pub notify: Rc<tokio::sync::Notify>,
     pub table: Box<Host>,
-    pub handler: HandlerFn,
+    pub handler: Handler,
     pub manifest: Vec<u8>,
     pub registered: Cell<bool>,
     pub state_ptr: *mut u8,
     _state: Box<[u128]>,
     _loaded: Option<Loaded>,
     pub st: RefCell<InstState>,
+}
+
+impl Inst {
+    /// Call `xip_handle` once.
+    pub(crate) fn run(&self, call: &Call) -> i32 {
+        match &self.handler {
+            Handler::Native(f) => unsafe { f(&*self.table, self.state_ptr, call) },
+            Handler::Wasm { space, slot } => match space.invoke(*slot, &*self.table, self.state_ptr, call) {
+                Ok(rc) => rc,
+                Err(e) => {
+                    eprintln!("wasm module {}: {e}", self.name);
+                    ERR_IO
+                }
+            },
+        }
+    }
 }
 
 pub(crate) struct Shared {
@@ -208,7 +234,13 @@ pub(crate) struct Shared {
     pub thunk_tables: RefCell<Vec<(String, Box<[usize]>)>>,
     /// Starts the installed module that hosts a component on demand (`Runtime::on_demand`).
     pub starter: RefCell<Option<Rc<dyn Fn(&str) -> Option<Instance>>>>,
+    /// Multipart hashes in progress (`crypto.hash_start`): handle, owner instance, state; dropped with the instance.
+    pub hashes: RefCell<HashMap<u32, (usize, xip_psa::Hasher)>>,
     pub request_starter: RefCell<Option<Rc<dyn Fn(i32) -> Result<Instance,i32>>>>,
+    /// The shared memory of the wasm modules, created with the first one; how many are loaded.
+    pub wasm: RefCell<Option<Rc<WasmSpace>>>,
+    /// State block and heap of each slot, taken the first time the slot is used and reused when a module is loaded there again.
+    pub wasm_slots: RefCell<Vec<Option<(xip_wasm::Region, xip_wasm::Region)>>>,
 }
 
 /// The runtime. Single threaded and deterministic: the application calls [`Runtime::run`] and the modules' handlers run
@@ -258,7 +290,7 @@ impl Runtime {
         crate::wifi::FIX.with(|f| *f.borrow_mut() = crate::wifi::Fixture::new());
         crate::wifi::TUNING.with(|t| *t.borrow_mut() = xip_abi::WifiTuning::default());
         crate::power::FIX.with(|f| f.borrow_mut().requests.clear());
-        let sh = Rc::new(Shared { pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None), thunk_tables: RefCell::new(Vec::new()), starter: RefCell::new(None), request_starter: RefCell::new(None) });
+        let sh = Rc::new(Shared { pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None), thunk_tables: RefCell::new(Vec::new()), starter: RefCell::new(None), request_starter: RefCell::new(None), hashes: RefCell::new(HashMap::new()), wasm: RefCell::new(None), wasm_slots: RefCell::new(vec![None; SLOTS + 1]) });
         Runtime { sh }
     }
 
@@ -269,7 +301,7 @@ impl Runtime {
         let loaded = Loaded::open(path.as_ref())?;
         let name = path.as_ref().file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let state_bytes = loaded.metadata.as_ref().map_or(state_bytes, |m| m.state_bytes.max(state_bytes));
-        Ok(self.add_loaded(&name, loaded, state_bytes))
+        self.try_add_loaded(&name, loaded, state_bytes)
     }
 
     /// Load native artifact and its generated metadata (component, state, ports).
@@ -279,7 +311,7 @@ impl Runtime {
         let state_bytes = metadata.state_bytes;
         let component = xip_abi::cbor::get_int(&metadata.manifest, 2).ok().flatten().ok_or("manifest lacks component")? as i32;
         let name = xip_abi::cbor::get_text(&metadata.manifest, 1).ok().flatten().map(|s| String::from_utf8_lossy(s).into_owned()).unwrap_or_default();
-        let instance = self.add_loaded(&name, loaded, state_bytes);
+        let instance = self.try_add_loaded(&name, loaded, state_bytes)?;
         instance.set_component(component);
         if let Ok(Some(mut ids)) = xip_abi::cbor::get(&instance.me.manifest, 12) {
             let parsed = (|| {
@@ -319,10 +351,58 @@ impl Runtime {
 
     /// Instantiate a previously loaded native module.
     pub fn add_loaded(&self, name: &str, loaded: Loaded, state_bytes: usize) -> Instance {
+        self.try_add_loaded(name, loaded, state_bytes).expect("load module")
+    }
+
+    /// The shared memory of the wasm modules, created with the first one: the packet pool storage moves into it (the pool has to be unused),
+    /// and every module gets a state block and a heap in it.
+    fn wasm_space(&self) -> Result<Rc<WasmSpace>, String> {
+        let sh = &self.sh;
+        if let Some(s) = sh.wasm.borrow().as_ref() {
+            return Ok(s.clone());
+        }
+        let per_module = sh.cfg.mem_quota as usize + WASM_STATE_MAX + 4096;
+        let space = Rc::new(WasmSpace::new(sh.pool.region_bytes() + SLOTS * per_module + 4096)?);
+        let region = space.region(sh.pool.region_bytes())?;
+        sh.pool.attach_region(region.ptr)?;
+        *sh.wasm.borrow_mut() = Some(space.clone());
+        Ok(space)
+    }
+
+    pub fn try_add_loaded(&self, name: &str, loaded: Loaded, state_bytes: usize) -> Result<Instance, String> {
         let sh = &self.sh;
         let id = sh.insts.borrow().len();
         let mut state: Box<[u128]> = vec![0u128; state_bytes.max(1).div_ceil(16)].into_boxed_slice();
-        let state_ptr = state.as_mut_ptr().cast::<u8>();
+        let mut state_ptr = state.as_mut_ptr().cast::<u8>();
+        let mut mem = Mem::new(sh.cfg.mem_quota);
+        let handler = match &loaded.kind {
+            Kind::Native(f) => Handler::Native(*f),
+            Kind::Wasm { stem } => {
+                if state_bytes > WASM_STATE_MAX {
+                    return Err(format!("state of {state_bytes} bytes: at most {WASM_STATE_MAX} for a wasm module"));
+                }
+                let space = self.wasm_space()?;
+                // the first slot no running wasm instance holds (a stopped module gives its slot back)
+                let busy: Vec<usize> = sh.insts.borrow().iter().filter(|i| !i.st.borrow().ended).filter_map(|i| match &i.handler {
+                    Handler::Wasm { slot, .. } => Some(*slot),
+                    _ => None,
+                }).collect();
+                let slot = (1..=SLOTS).find(|s| !busy.contains(s)).ok_or_else(|| format!("at most {SLOTS} running wasm modules per runtime"))?;
+                let file = crate::slot_file(stem, slot);
+                let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e} (build one file per slot)", file.display()))?;
+                space.load(slot, &bytes)?;
+                let mut regions = sh.wasm_slots.borrow_mut();
+                if regions[slot].is_none() {
+                    regions[slot] = Some((space.region(WASM_STATE_MAX)?, space.region(sh.cfg.mem_quota as usize)?));
+                }
+                let (st, heap) = regions[slot].unwrap();
+                // SAFETY: regions of the space; a new module starts with zeroed state and an empty heap
+                unsafe { std::ptr::write_bytes(st.ptr, 0, st.len) };
+                state_ptr = st.ptr;
+                mem = Mem::with_arena(sh.cfg.mem_quota, heap.ptr, heap.len);
+                Handler::Wasm { space, slot }
+            }
+        };
         let ctx = Box::new(Ctx { sh: Rc::as_ptr(sh), id });
         let mut table: Box<Host> = Box::new(unsafe { std::mem::zeroed() });
         hostcalls::fill(&mut table, &*ctx as *const Ctx as *mut c_void);
@@ -332,7 +412,7 @@ impl Runtime {
             _ctx: ctx,
             notify: sh.notify.clone(),
             table,
-            handler: loaded.handler,
+            handler,
             manifest: loaded.metadata.as_ref().map(|m| m.manifest.clone()).unwrap_or_default(),
             registered: Cell::new(false),
             state_ptr,
@@ -345,7 +425,7 @@ impl Runtime {
                 settings: HashMap::new(),
                 spi_open: [None; 4],
                 spi_transfers: 0,
-                mem: Mem::new(sh.cfg.mem_quota),
+                mem,
                 component: None,
                 env: Default::default(),
                 hosted: Vec::new(),
@@ -359,7 +439,7 @@ impl Runtime {
             }),
         });
         sh.insts.borrow_mut().push(inst.clone());
-        Instance { rt: self.clone(), me: inst }
+        Ok(Instance { rt: self.clone(), me: inst })
     }
 
     /// Shared state of the runtime (virtual time, what modules wrote to the application, console fixtures).
@@ -645,7 +725,7 @@ fn dispatch(sh: &Shared, me: &Rc<Inst>, component: i32, method: i32, value: i32,
             src_scope: 0,
     };
     me.st.borrow_mut().calls += 1;
-    let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
+    let rc = me.run(&call);
     finish_call(sh, me, component, method, rc);
     if component == HOST_COMPONENT as i32 && method == HOST_START as i32 && !me.st.borrow().ended {
         crate::hosted::publish(sh, me);
@@ -659,7 +739,11 @@ fn finish_call(sh: &Shared, me: &Rc<Inst>, component: i32, method: i32, rc: i32)
     if rc < 0 || rc == RET_DONE as i32 || (component == HOST_COMPONENT as i32 && method == HOST_STOP as i32) {
         st.ended = true;
     }
+    let ended = st.ended;
     drop(st);
+    if ended {
+        sh.hashes.borrow_mut().retain(|_, (owner, _)| *owner != me.id);
+    }
     let mut s = sh.st.borrow_mut();
     if s.trace_on {
         let t_ms = s.now;
@@ -737,7 +821,7 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
             src_port: c.src.as_ref().map_or(0, |s| s.1),
             src_scope: c.src.as_ref().map_or(0, |s| s.2),
         };
-        let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
+        let rc = me.run(&call);
         finish_call(sh, me, c.component, c.method, rc);
         return;
     }
@@ -763,7 +847,7 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
             src_scope: 0,
         };
         me.st.borrow_mut().calls += 1;
-        let rc = unsafe { (me.handler)(&*me.table, me.state_ptr, &call) };
+        let rc = me.run(&call);
         finish_call(sh, me, c.component, c.method, rc);
         return;
     }
@@ -891,7 +975,7 @@ impl Instance {
     }
     /// The module hosts the component `name` (manifest key 11; `load_module` reads it): after `HOST_START` the runtime asks it for the table.
     pub fn host_component(&self, name: &str) {
-        self.me.st.borrow_mut().hosted.push(crate::hosted::Hosted { name: name.to_string(), table: 0, ctx: 0 });
+        self.me.st.borrow_mut().hosted.push(crate::hosted::Hosted { name: name.to_string(), table: 0, ctx: 0, schema: 0 });
     }
     /// The address of this module for `send(dst = component)`.
     pub fn set_component(&self, component: i32) {

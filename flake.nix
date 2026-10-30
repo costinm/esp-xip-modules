@@ -11,10 +11,15 @@
       url = "github:costinm/dmesh";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Rust toolchains with extra targets (wasm32): only for the `wasm-dev` package.
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs, ssh-mesh, dmesh }:
+    { self, nixpkgs, ssh-mesh, dmesh, rust-overlay }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -116,6 +121,22 @@
             name = "xip-dmesh";
             paths = [ self.packages.${system}.dmesh-cli dmesh.packages.${system}.dmesh ssh-mesh.packages.${system}.ssh-mesh ];
           };
+          # Tools to compile the modules (modules/*) to WebAssembly and nothing else: Rust (nightly, as the modules use
+          # allocator_api and RUSTC_BOOTSTRAP) with the wasm32 targets and rust-src (rust-lld is part of it), plus binaryen
+          # (wasm-opt), wabt, wasm-tools and wasmtime to optimize, inspect and run the result.
+          # modules/WASM.md:  nix build .#wasm-dev --out-link ${WASM_DEV:-$HOME/opt/wasm-dev}
+          wasm-dev =
+            let
+              rpkgs = import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; };
+              rust = rpkgs.rust-bin.nightly.latest.minimal.override {
+                extensions = [ "rust-src" "clippy" ];
+                targets = [ "x86_64-unknown-linux-musl" "wasm32-unknown-unknown" "wasm32v1-none" "wasm32-wasip1" ];
+              };
+            in
+            rpkgs.symlinkJoin {
+              name = "xip-wasm-dev";
+              paths = [ rust rpkgs.binaryen rpkgs.wabt rpkgs.wasm-tools rpkgs.wasmtime rpkgs.gcc ];
+            };
           default = self.packages.${system}.deps;
         }
       );

@@ -12,3 +12,10 @@ pub mod api;
 mod runtime;
 #[cfg(feature = "runtime")]
 pub use runtime::*;
+
+#[cfg(feature = "sim")]
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+
+#[cfg(feature = "sim")]
+export!();

@@ -14,6 +14,8 @@ pub struct Pool {
     buffers: Cell<u32>,
     refs: RefCell<Vec<u32>>,
     mem: RefCell<Vec<Option<Box<[u8]>>>>,
+    /// Storage of every slot in one block of memory the pool does not own (the shared memory of wasm modules, `attach_region`).
+    region: Cell<*mut u8>,
     generations: RefCell<Vec<u16>>,
     packets: RefCell<Vec<PacketRef>>,
 }
@@ -34,7 +36,26 @@ impl Pool {
             buffers: Cell::new(0),
             refs: RefCell::new(vec![0; slots as usize]),
             mem: RefCell::new((0..slots).map(|_| None).collect()),
+            region: Cell::new(std::ptr::null_mut()),
         }
+    }
+    /// Bytes `attach_region` needs.
+    pub fn region_bytes(&self) -> usize {
+        self.slots as usize * self.slot_size as usize
+    }
+    /// Keep the storage of every slot in `ptr` (`region_bytes()` bytes that outlive the pool), so that wasm modules can reach the
+    /// packets. Only while no packet is in use; the per-slot allocation and trimming stop.
+    pub fn attach_region(&self, ptr: *mut u8) -> Result<(), String> {
+        if self.free.get() != self.slots as u32 {
+            return Err("the packet pool is in use: load wasm modules before the first packet".into());
+        }
+        let mut mem = self.mem.borrow_mut();
+        for m in mem.iter_mut() {
+            *m = None;
+        }
+        self.buffers.set(0);
+        self.region.set(ptr);
+        Ok(())
     }
     pub fn slots(&self) -> u16 {
         self.slots
@@ -74,12 +95,12 @@ impl Pool {
         for pass in 0..2 {
             // slots that already have storage first, then any
             for i in 0..self.slots as usize {
-                if (pass == 0 && mem[i].is_none()) || refs[i] != 0 {
+                if (pass == 0 && mem[i].is_none() && self.region.get().is_null()) || refs[i] != 0 {
                     continue;
                 }
                 refs[i] = 1;
                 let mut g=self.generations.borrow_mut();g[i]=g[i].wrapping_add(1);
-                if mem[i].is_none() {
+                if mem[i].is_none() && self.region.get().is_null() {
                     mem[i] = Some(vec![0u8; self.slot_size as usize].into_boxed_slice());
                     self.buffers.set(self.buffers.get() + 1);
                 }
@@ -124,6 +145,9 @@ impl Pool {
         if slot < 0 || slot >= self.slots as i32 {
             return std::ptr::null_mut();
         }
+        if !self.region.get().is_null() {
+            return unsafe { self.region.get().add(slot as usize * self.slot_size as usize) };
+        }
         self.mem.borrow_mut()[slot as usize].as_mut().map_or(std::ptr::null_mut(), |b| b.as_mut_ptr())
     }
     pub fn available(&self) -> u16 {
@@ -155,16 +179,45 @@ pub struct Mem {
     pub used: u32,
     pub quota: u32,
     blocks: HashMap<usize, Layout>,
+    /// A wasm module's heap: blocks are carved from this memory (first fit) instead of malloc, so that the module can address them.
+    arena: Option<Arena>,
+}
+
+struct Arena {
+    ptr: *mut u8,
+    len: usize,
+    /// Offset to size of the live blocks.
+    blocks: std::collections::BTreeMap<usize, usize>,
 }
 
 impl Mem {
     pub fn new(quota: u32) -> Box<Mem> {
-        Box::new(Mem { used: 0, quota, blocks: HashMap::new() })
+        Box::new(Mem { used: 0, quota, blocks: HashMap::new(), arena: None })
+    }
+    /// Blocks live in `len` bytes at `ptr` (inside the shared memory of the wasm modules).
+    pub fn with_arena(quota: u32, ptr: *mut u8, len: usize) -> Box<Mem> {
+        Box::new(Mem { used: 0, quota, blocks: HashMap::new(), arena: Some(Arena { ptr, len, blocks: Default::default() }) })
     }
     /// Null: over the quota, zero size or no memory. Aligned to 16 for any type.
     pub fn alloc(&mut self, size: usize) -> *mut c_void {
         if size == 0 || size > self.quota as usize || self.used as usize > self.quota as usize - size {
             return std::ptr::null_mut();
+        }
+        if let Some(a) = self.arena.as_mut() {
+            let size = size.next_multiple_of(16);
+            let mut at = 0usize;
+            for (&p, &s) in &a.blocks {
+                if p - at >= size {
+                    break;
+                }
+                at = p + s;
+            }
+            if at + size > a.len {
+                return std::ptr::null_mut();
+            }
+            a.blocks.insert(at, size);
+            self.used += size as u32;
+            return unsafe { a.ptr.add(at) }.cast();
         }
         let layout = Layout::from_size_align(size, 16).unwrap();
         let p = unsafe { alloc(layout) };
@@ -177,6 +230,16 @@ impl Mem {
     }
     /// `false` for a pointer that is not a live block of this module.
     pub fn free(&mut self, ptr: *mut c_void) -> bool {
+        if let Some(a) = self.arena.as_mut() {
+            let off = (ptr as usize).wrapping_sub(a.ptr as usize);
+            return match a.blocks.remove(&off) {
+                Some(s) => {
+                    self.used -= s as u32;
+                    true
+                }
+                None => false,
+            };
+        }
         match self.blocks.remove(&(ptr as usize)) {
             Some(layout) => {
                 self.used -= layout.size() as u32;

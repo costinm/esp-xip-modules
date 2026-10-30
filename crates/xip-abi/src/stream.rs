@@ -46,6 +46,7 @@ pub struct Stream {
     pub close: Option<unsafe extern "C" fn(ctx: *mut c_void, handle: u32) -> c_int>,
     /// Consumer transfers one pool packet on OK; EVERY error retains it.
     /// One outstanding output per stream. fin half-closes after these bytes.
+    /// note=packet handle: ownership moves to the stream
     pub write_pkt: Option<
         unsafe extern "C" fn(
             ctx: *mut c_void,
@@ -57,6 +58,7 @@ pub struct Stream {
     >,
     /// Provider takes the exact pending physical slot, or gets 0 if none.
     /// A full held quota leaves it pending for the next poll.
+    /// note=hands a packet out through a struct
     pub take: Option<
         unsafe extern "C" fn(ctx: *mut c_void, handle: u32, out: *mut StreamPacket) -> c_int,
     >,

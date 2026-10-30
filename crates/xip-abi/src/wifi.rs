@@ -272,6 +272,7 @@ pub struct Wifi {
     /// do not hear their channel meanwhile; the host puts the radio back on its channel when the scan is done. `ERR_BUSY` as
     /// well while the driver is busy joining (try again), `ERR_IO` when it refuses. A network in range that is not listed was
     /// missed; scan again.
+    /// note=array out sized by an argument; polled (ERR_BUSY until done)
     pub scan: Option<unsafe extern "C" fn(ctx: *mut c_void, out: *mut WifiAp, max: usize) -> c_int>,
     /// Switch **promiscuous receive** on or off, which a NAN module needs: NAN discovery-window frames are not delivered any
     /// other way (see `components/xip_runtime/ESPNOW.md`). The radio keeps receiving as before; the frames the driver then hands
@@ -291,6 +292,7 @@ pub struct Wifi {
     pub auto_reconnect: Option<unsafe extern "C" fn(ctx: *mut c_void, enabled: bool) -> c_int>,
     /// Non-blocking bounded channel scan, same completion contract as scan.
     /// Bits 1..14 select channels; dwell_ms 10..120 per selected channel.
+    /// note=array out sized by an argument
     pub scan_channels: Option<unsafe extern "C" fn(ctx: *mut c_void, out: *mut WifiAp, max: usize, channels: u16, dwell_ms: u16) -> c_int>,
 }
 

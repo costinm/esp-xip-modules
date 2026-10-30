@@ -23,7 +23,7 @@ if [[ $what == generated || $what == abi || $what == all ]]; then
     # regenerate and compare: a stale generated file is reported (and left regenerated). gen.sh needs cbindgen and mesh-api-gen
     # (on PATH, both come from the flake); without them the check is skipped, the generated files are committed.
     if command -v cbindgen >/dev/null && command -v mesh-api-gen >/dev/null; then
-        sums() { find api/generated -type f | LC_ALL=C sort | xargs sha256sum; sha256sum include/xip.h modules/*/API.manifest modules/mod_con/src/tables.rs crates/xip-abi/src/ble_vtable.rs modules/mod_ble/src/api_gen.rs crates/xip-abi/src/nan_vtable.rs modules/mod_nan/src/api_gen.rs modules/mod_nan/src/power_gen.rs crates/xip-abi/src/system_vtable.rs modules/mod_system/src/api_gen.rs crates/xip-abi/src/lora_vtable.rs modules/mod_lora/src/api_gen.rs; }
+        sums() { find api/generated -type f | LC_ALL=C sort | xargs sha256sum; sha256sum include/xip.h modules/*/API.manifest modules/mod_con/src/tables.rs crates/xip-abi/src/schema_data.rs crates/xip-abi/src/vt_shims.rs crates/xip-abi/src/ble_vtable.rs modules/mod_ble/src/api_gen.rs crates/xip-abi/src/nan_vtable.rs modules/mod_nan/src/api_gen.rs modules/mod_nan/src/power_gen.rs crates/xip-abi/src/system_vtable.rs modules/mod_system/src/api_gen.rs crates/xip-abi/src/lora_vtable.rs modules/mod_lora/src/api_gen.rs; }
         before=$(sums); scripts/gen.sh
         [[ "$before" == "$(sums)" ]] || { echo "scripts/gen.sh changed generated files: commit them (a new runtime) or revert" >&2; exit 1; }
     elif [[ $what == generated ]]; then

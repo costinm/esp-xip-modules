@@ -180,8 +180,7 @@ async fn socket_backpressure_packet_ownership_peer_and_eof() {
     rt.register_component("socket-probe", (&*fixture as *const SocketProbe).cast());
     // Use generated manifest for declarative ports, then the probe handler to
     // check the actual socket ABI with native Rust allocations.
-    let mut loaded = xip_runtime_host::Loaded::open(module("mod_rtest")).unwrap();
-    loaded.handler = socket_probe;
+    let loaded = xip_runtime_host::Loaded::open(module("mod_rtest")).unwrap().with_handler(socket_probe);
     let m = rt.add_loaded("socket-probe", loaded, 64);
     m.set_component(2);
     let ports = m
@@ -356,10 +355,10 @@ async fn cli_defaults_bind_declared_ports_and_serve_async_echo() {
                 .await
                 .unwrap()
                 .expect("CLI exited during startup");
-            if line.contains("mod_con.so") {
+            if line.contains("mod_con.wasm") {
                 assert!(line.contains("TCP None") && line.contains("UDP None"), "{line}"); // the console has no port
             } else {
-                assert!(line.contains("mod_rtest.so") && line.contains("TCP Some"), "{line}");
+                assert!(line.contains("mod_rtest.wasm") && line.contains("TCP Some"), "{line}");
             }
         }
         // A module's UDP port gets the full raw datagram (mod_con answers envelopes of PPP ports and 0x444d0002 datagrams, not raw UDP).
@@ -466,4 +465,41 @@ fn paused_device_bench_rejects_overflow_then_answers_admitted_requests() {
     rt.run(0);
     assert_eq!(m.mem_leaked(), 0);
     assert_eq!(m.leaked(), 0);
+}
+
+/// `xip-host` on an ephemeral QUIC port answers a `0x444d0002` request (what `dmesh-cli console` sends) through the classifier.
+#[tokio::test(flavor = "current_thread")]
+async fn cli_answers_a_quic_lite_envelope_on_the_udp_link() {
+    use tokio::io::AsyncBufReadExt;
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xip-host"))
+        .env("XIP_QUIC_PORT", "0")
+        .env("XIP_BASE_PORT", "0")
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+        let addr = loop {
+            let line = lines.next_line().await.unwrap().expect("CLI exited during startup");
+            if let Some(a) = line.strip_prefix("QUIC: UDP ") {
+                break a.to_string();
+            }
+        };
+        // long header (version 0x444d0002, DCID 01, SCID 02) and the envelope {1: 20 console, 2: 5 status, 3: 1}
+        let mut request = vec![0xc0, 0x44, 0x4d, 0x00, 0x02, 1, 0x01, 1, 0x02];
+        request.extend([0xa3, 0x01, 0x14, 0x02, 0x05, 0x03, 0x01]);
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.send_to(&request, &addr).await.unwrap();
+        let mut reply = [0u8; 1500];
+        let n = socket.recv(&mut reply).await.unwrap();
+        assert_eq!(&reply[..9], &[0xc0, 0x44, 0x4d, 0x00, 0x02, 1, 0x02, 1, 0x01], "CIDs swapped");
+        assert_eq!(xip_runtime_host::xip_abi::cbor::get_int(&reply[9..n], 1).unwrap(), Some(20));
+    })
+    .await;
+    child.kill().await.unwrap();
+    let _ = child.wait().await;
+    result.unwrap();
 }

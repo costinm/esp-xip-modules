@@ -608,3 +608,10 @@ macro_rules! export {
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "sim")]
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+
+#[cfg(feature = "sim")]
+export!();

@@ -1,39 +1,8 @@
 //! Optional local announcement policy; private keys and crypto remain native.
 use alloc::vec::Vec;
 use dmesh_server::announce as a;
-use xip_abi::{psa::*, *};
+use xip_abi::*;
 pub const INFO_MAX: usize = 255;
-
-// TODO: move to crates/xip-abi - in a 'high level rust' module
-pub struct NativeCrypto {
-    table: &'static PsaTable,
-}
-impl NativeCrypto {
-    pub fn new(hw: &Hw) -> Result<Self, i32> {
-        unsafe { PsaTable::from_table(hw.get_component(c"psa").cast()) }
-            .map(|table| Self { table })
-            .ok_or(ERR_UNSUPPORTED)
-    }
-    pub fn hash(&self, input: &[u8]) -> Result<[u8; 32], i32> {
-        let mut out = [0; 32];
-        let mut n = 0;
-        let rc = unsafe {
-            (self.table.psa_hash_compute)(
-                ALG_SHA_256,
-                input.as_ptr(),
-                input.len(),
-                out.as_mut_ptr(),
-                32,
-                &mut n,
-            )
-        };
-        if rc == 0 && n == 32 {
-            Ok(out)
-        } else {
-            Err(ERR_IO)
-        }
-    }
-}
 
 // Create a signed announce with our current hardware addresses and identity.
 pub fn make_announce(
@@ -41,28 +10,26 @@ pub fn make_announce(
     channel: u8,
     out: &mut [u8; INFO_MAX],
 ) -> Result<(a::Announce, usize), i32> {
-    let crypto = NativeCrypto::new(hw)?;
-    make_announce_with_digest(hw, channel, out, |input| crypto.hash(input))
+    // the runtime's crypto and identity: this module links none and never sees the key
+    let crypto = CryptoClient::from_host(*hw).ok_or(ERR_UNSUPPORTED)?;
+    let public = crypto.identity_public_key()?;
+    make_announce_with(
+        hw,
+        channel,
+        out,
+        public,
+        |input| crypto.sha256(input),
+        |message| crypto.identity_sign(message),
+    )
 }
-fn make_announce_with_digest(
+fn make_announce_with(
     hw: &Hw,
     channel: u8,
     out: &mut [u8; INFO_MAX],
+    public: [u8; 65],
     digest: impl FnOnce(&[u8]) -> Result<[u8; 32], i32>,
+    sign: impl FnOnce(&[u8]) -> Result<[u8; 64], i32>,
 ) -> Result<(a::Announce, usize), i32> {
-    let ptr = hw.get_component(c"identity").cast::<Identity>();
-    if ptr.is_null() {
-        return Err(ERR_UNSUPPORTED);
-    }
-    let identity = unsafe { &*ptr };
-    if identity.version != 1 || identity.size < core::mem::size_of::<Identity>() as u32 {
-        return Err(ERR_UNSUPPORTED);
-    }
-    let mut public = [0; 65];
-    let rc = unsafe { identity.public_key.ok_or(ERR_UNSUPPORTED)?(hw.ctx(), public.as_mut_ptr()) };
-    if rc < 0 {
-        return Err(rc);
-    }
     let mut compressed = [0; 33];
     compressed[0] = 2 | (public[64] & 1);
     compressed[1..].copy_from_slice(&public[1..33]);
@@ -128,13 +95,7 @@ fn make_announce_with_digest(
     });
     let mut signing = [0; 384];
     let n = a::signing_bytes(own, &mut signing).ok_or(ERR_SIZE)?;
-    let mut signature = [0; 64];
-    let rc = unsafe {
-        identity.sign.ok_or(ERR_UNSUPPORTED)?(hw.ctx(), signing.as_ptr(), n, signature.as_mut_ptr())
-    };
-    if rc < 0 {
-        return Err(rc);
-    }
+    let signature = sign(&signing[..n])?;
     if !own.set_signature(&signature) {
         return Err(ERR_ARG);
     }
@@ -145,6 +106,7 @@ fn make_announce_with_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::ffi::c_void;
     use dmesh_server::tagged;
     pub fn verify_announce(
         announce: a::Announce,
@@ -167,48 +129,22 @@ mod tests {
         Ok(hint)
     }
 
-    use core::ffi::{c_char, c_void, CStr};
     use p256::ecdsa::{
         signature::{Signer, Verifier},
         Signature, SigningKey, VerifyingKey,
     };
     use sha2::{Digest, Sha256};
-    struct SignerState {
-        calls: usize,
-    }
     fn key() -> SigningKey {
         SigningKey::from_slice(&[7; 32]).unwrap()
     }
-    unsafe extern "C" fn public(_: *mut c_void, out: *mut u8) -> i32 {
-        core::slice::from_raw_parts_mut(out, 65)
-            .copy_from_slice(key().verifying_key().to_encoded_point(false).as_bytes());
-        0
-    }
-    unsafe extern "C" fn sign(ctx: *mut c_void, data: *const u8, len: usize, out: *mut u8) -> i32 {
-        (*ctx.cast::<SignerState>()).calls += 1;
-        let sig: Signature = key().sign(core::slice::from_raw_parts(data, len));
-        core::slice::from_raw_parts_mut(out, 64).copy_from_slice(&sig.to_bytes());
-        0
-    }
-    unsafe extern "C" fn get(_: *mut c_void, name: *const c_char) -> *const c_void {
-        if CStr::from_ptr(name).to_bytes() == b"identity" {
-            &IDENTITY as *const _ as *const c_void
-        } else {
-            core::ptr::null()
-        }
+    fn public() -> [u8; 65] {
+        key().verifying_key().to_encoded_point(false).as_bytes().try_into().unwrap()
     }
     unsafe extern "C" fn info(_: *mut c_void, out: *mut u8, cap: usize) -> i32 {
         let mut w = cbor::Writer::new(core::slice::from_raw_parts_mut(out, cap));
         w.map(1).uint(1).map(1).uint(2).uint(13);
         w.finish().unwrap().len() as i32
     }
-    static IDENTITY: Identity = Identity {
-        version: 1,
-        size: core::mem::size_of::<Identity>() as u32,
-        public_key: Some(public),
-        sign: Some(sign),
-        verify: None,
-    };
     fn digest(input: &[u8]) -> Result<[u8; 32], i32> {
         Ok(Sha256::digest(input).into())
     }
@@ -223,17 +159,20 @@ mod tests {
     }
     #[test]
     fn signs_once_and_reuses_identical_signed_facts_for_every_response() {
-        let mut signer = SignerState { calls: 0 };
+        let calls = core::cell::Cell::new(0usize);
         let mut host: Host = unsafe { core::mem::zeroed() };
         host.abi_version = ABI_VERSION;
         host.size = core::mem::size_of::<Host>() as u32;
-        host.user = (&mut signer as *mut SignerState).cast();
-        host.get_component = Some(get);
         host.device_info = Some(info);
         let hw = unsafe { Hw::new(&host) }.unwrap();
         let mut record = [0; INFO_MAX];
-        let (own, len) = make_announce_with_digest(&hw, 6, &mut record, digest).unwrap();
-        assert_eq!(signer.calls, 1);
+        let (own, len) = make_announce_with(&hw, 6, &mut record, public(), digest, |m| {
+            calls.set(calls.get() + 1);
+            let sig: Signature = key().sign(m);
+            Ok(sig.to_bytes().into())
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
         verify_announce(own, digest, verify).unwrap();
         for id in [0, 1, 42, u64::MAX] {
             let mut response = [0; 255];
@@ -244,7 +183,7 @@ mod tests {
             verify_announce(replied, digest, verify).unwrap();
             assert_eq!(replied.signature(), own.signature());
         }
-        assert_eq!(signer.calls, 1);
+        assert_eq!(calls.get(), 1);
         assert_eq!(
             a::decode_announce(&record[..len]).unwrap().public_key(),
             own.public_key()

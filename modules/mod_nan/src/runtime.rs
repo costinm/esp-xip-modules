@@ -2221,7 +2221,7 @@ mod packet_lifetime_tests {
             b"stream" => (&COMPANION_STREAM as *const Stream).cast(),
             b"wifi" => (&WIFI as *const Wifi).cast(),
             b"link" => (&STARTUP_LINK as *const Link).cast(),
-            b"identity" | b"psa" => panic!("NAN startup must not request identity or crypto"),
+            b"identity" | b"crypto" | b"psa" => panic!("NAN startup must not request identity or crypto"),
             _ => core::ptr::null(),
         }
     }

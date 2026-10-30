@@ -60,7 +60,7 @@ while it is stopped, and are bound again to the next instance of the name, which
 wrappers from an `API.md` (`scripts/gen.sh`).
 
 Which methods of a hosted vtable an envelope can reach: those of the module's `API.md` (numbered, CBOR, in the catalog) are remote-callable, and only
-they are in the generated `dispatch`. Methods that only `get_component` callers use, with their own parameters (up to five words, like the psa vtable),
+they are in the generated `dispatch`. Methods that only `get_component` callers use, with their own parameters (up to five words, like the crypto table),
 are declared in `API.local.md` beside it; they are in the table after the remote ones and no envelope reaches them.
 
 ## UART wake

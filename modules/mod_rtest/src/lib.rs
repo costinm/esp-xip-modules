@@ -1009,15 +1009,12 @@ impl Module for State {
                         let mut before = Vec::<u8>::new();
                         if before.try_reserve_exact(32).is_err() { return ERR_NOMEM; }
                         before.extend_from_slice(b"before native call");
-                        let mut digest = [0u8; 32];
-                        let mut len = 0usize;
-                        let rc = match ctx.with_hw(|h| {
-                            let Some(psa) = xip_abi::psa::PsaTable::from_host(*h) else { return xip_abi::ERR_UNSUPPORTED; };
-                            unsafe { (psa.psa_hash_compute)(xip_abi::psa::ALG_SHA_256, b"abc".as_ptr(), 3,
-                                digest.as_mut_ptr(), digest.len(), &mut len) }
-                        }) { Ok(rc) => rc, Err(e) => return e };
-                        if rc != 0 { return rc; }
-                        if len != 32 || digest != [0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,
+                        // the runtime's crypto on a packet, called between the two global allocations
+                        let digest = match ctx.with_hw(|h| match xip_abi::CryptoClient::from_host(*h) {
+                            Some(c) => c.sha256(b"abc"),
+                            None => Err(xip_abi::ERR_UNSUPPORTED),
+                        }) { Ok(Ok(d)) => d, Ok(Err(e)) | Err(e) => return e };
+                        if digest != [0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,
                             0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23,0xb0,0x03,0x61,0xa3,
                             0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad] { return ERR_ARG; }
                         if let Err(e) = ctx.sleep(1).await { return e; }

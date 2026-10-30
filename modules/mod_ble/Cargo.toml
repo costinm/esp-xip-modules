@@ -18,7 +18,7 @@ mkmod = "--stack 4096 --state 128 --autostart --components ble"
 
 [features]
 flat-image = []
-# the panic handler of a no_std library built as a shared object for crates/xip-runtime-host (scripts/build-host-modules.sh)
+# the panic handler and the global allocator of a no_std library built as wasm for crates/xip-runtime-host (scripts/build-host-modules.sh)
 sim = []
 
 [lib]

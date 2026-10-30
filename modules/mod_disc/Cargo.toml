@@ -26,6 +26,8 @@ runtime = ["dep:esp-mod-nan", "dep:dmesh-server"]
 # Select with default-features = false to compile only the route record contract.
 api-only = []
 flat-image = ["runtime", "xip-abi/global-alloc"]
+# the wasm module for the host runtime (scripts/build-host-modules.sh): panic handler, allocator and entry point in the library
+sim = ["runtime", "xip-abi/global-alloc"]
 
 [lib]
 crate-type = ["rlib"]

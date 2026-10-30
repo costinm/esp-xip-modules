@@ -8,8 +8,8 @@ pub fn module(name: &str) -> PathBuf {
     let dir = std::env::var_os("XIP_HOST_MODULES")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/host-modules"));
-    let p = dir.join(format!("{name}.so"));
-    assert!(p.exists(), "{} missing: run scripts/build-host-modules.sh", p.display());
+    let p = dir.join(format!("{name}.wasm"));
+    assert!(p.with_extension("s1.wasm").exists(), "{} missing: run scripts/build-host-modules.sh", p.display());
     p
 }
 

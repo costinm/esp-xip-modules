@@ -115,6 +115,7 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
+ "hkdf",
  "pem-rfc7468",
  "pkcs8",
  "rand_core",
@@ -130,6 +131,7 @@ dependencies = [
  "p256",
  "sha2",
  "xip-abi",
+ "xip-psa",
 ]
 
 [[package]]
@@ -173,6 +175,15 @@ dependencies = [
  "ff",
  "rand_core",
  "subtle",
+]
+
+[[package]]
+name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac",
 ]
 
 [[package]]
@@ -321,9 +332,14 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 [[package]]
 name = "xip-abi"
 version = "0.1.0"
+
+[[package]]
+name = "xip-psa"
+version = "0.1.0"
 dependencies = [
- "digest",
  "p256",
+ "rand_core",
+ "sha2",
 ]
 
 [[package]]

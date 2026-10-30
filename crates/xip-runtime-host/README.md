@@ -1,6 +1,6 @@
 # xip-runtime-host
 
-Run and test modules on Linux using the same module API as the ESP runtimes.
+Run and test modules on Linux/Android using the same module API as the ESP runtimes.
 
 From the repository root:
 
@@ -10,13 +10,22 @@ scripts/build-host-modules.sh
 cargo run --manifest-path crates/xip-runtime-host/Cargo.toml --bin xip-host
 ```
 
-This starts the CBOR console on UDP `127.0.0.1:5226` and an async echo module
-on TCP/UDP `127.0.0.1:5228`. Send numeric console envelopes to the UDP port;
-see the [console API](../../modules/mod_con/API.md). There is no text/stdin
-console. Arbitrary module routing through the console is not supported;
-Rust clients can use the module request API directly.
+This starts `mod_con` (no port; it serves the request envelopes the runtime dispatches to it) and `mod_rtest` with an async
+echo on TCP/UDP `127.0.0.1:5228`. Requests arrive over QUIC, as on the devices: `dmesh-cli` wraps every request in a `0x444d0002`
+long packet, and the runtime's classifier (`quic.rs`, a Rust port of the C runtime's, with no code shared) takes it from the link
+`udp`, a socket on the QUIC port. The port is `XIP_QUIC_PORT` (default 3340, `0` any, `off` none). It is not the device port 3339, which lmesh and the firmware use (`dmesh-cli` itself listens on 3338); the
+startup line prints the port.
 
-Try the echo service:
+```sh
+cargo run --manifest-path crates/xip-runtime-host/Cargo.toml --bin xip-host &
+dmesh-cli console udp://127.0.0.1:3340 console.status
+```
+
+There is no text/stdin console. Rust tests call modules through the request API directly (see below); the
+[console API](../../modules/mod_con/API.md) describes the envelopes. Short packets and other long versions go to the QUIC stack
+registered with `Runtime::set_quic_local` (none in `xip-host` yet, so they are dropped and counted).
+
+Try the echo service (raw bytes, not a request):
 
 ```python
 import socket
@@ -31,7 +40,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as datagram:
     print(datagram.recv(100))
 ```
 
-To choose modules and their start requests, pass `PATH.so[=START]` arguments. For example, `target/host-modules/mod_con.so target/host-modules/mod_rtest.so=async`. Keep each generated `.json` file beside its module. Restart `xip-host` to restart a stopped module.
+To choose modules and their start requests, pass `PATH.wasm[=START]` arguments. For example, `target/host-modules/mod_con.wasm target/host-modules/mod_rtest.wasm=async`. Keep each generated `.json` file beside its module. Restart `xip-host` to restart a stopped module.
 
 Run checks with `scripts/test-host.sh generated` and `scripts/test-host.sh ci-runtime`.
 

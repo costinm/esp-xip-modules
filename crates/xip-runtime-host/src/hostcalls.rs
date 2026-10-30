@@ -606,6 +606,13 @@ unsafe extern "C" fn h_get_component(user: *mut c_void, name: *const c_char) -> 
         if let Some(p)=sh.st.borrow().components.get(&name) {return *p as *const c_void;}
         return crate::link::quic_component().cast();
     }
+    // the runtime's cryptography on packets (crates/xip-psa behind it)
+    if name == "crypto" {
+        return crate::crypto::crypto_component().cast();
+    }
+    if name == "identity" {
+        return crate::crypto::identity_component().cast();
+    }
     if name == "link" {
         return crate::link::component().cast();
     }

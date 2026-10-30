@@ -455,11 +455,47 @@ fn link_route(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16) -> bool {
     !copy
 }
 
+/// The module that attached to the QUIC endpoint gets the packet (short packets nobody relays, long packets of other versions), as in the C
+/// runtime's `quic_module_offer`: true when it took the packet or it was dropped (the caller must not touch `slot` any more).
+fn quic_module_offer(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, source: u64, signal: i32, time_us: u32) -> bool {
+    let Some((inst, component, method)) = sh.links.borrow().quic.module.clone() else { return false };
+    if inst.st.borrow().ended {
+        sh.links.borrow_mut().quic.module = None;
+        return false;
+    }
+    if deliver(sh, &inst, slot, start, len, component, method, addr, source, signal, CALL_LINK, time_us, None) != 0 {
+        sh.pool.release(slot);
+    }
+    true
+}
+
+unsafe extern "C" fn quic_attach(user: *mut c_void, rx_method: c_int) -> c_int {
+    let (sh, me) = ctx(user);
+    if rx_method <= 0 {
+        return ERR_ARG;
+    }
+    let mut links = sh.links.borrow_mut();
+    if let Some((owner, _, _)) = links.quic.module.as_ref().filter(|(o, _, _)| !o.st.borrow().ended) {
+        return if Rc::ptr_eq(owner, &me) { 0 } else { ERR_BUSY };
+    }
+    links.quic.module = Some((me.clone(), component_of(&me), rx_method));
+    0
+}
+
+unsafe extern "C" fn quic_detach(user: *mut c_void) -> c_int {
+    let (sh, me) = ctx(user);
+    let mut links = sh.links.borrow_mut();
+    if links.quic.module.as_ref().is_some_and(|(o, _, _)| Rc::ptr_eq(o, &me)) {
+        links.quic.module = None;
+    }
+    0
+}
+
 /// The console module answers the envelopes that no other module serves (`QUIC_CONSOLE_COMPONENT`).
 const QUIC_CONSOLE_COMPONENT: i32 = 20;
 
 fn quic_active(links: &Links) -> bool {
-    links.quic_rx.is_some() || links.quic.local.is_some() || links.quic.classifier
+    links.quic_rx.is_some() || links.quic.local.is_some() || links.quic.classifier || links.quic.module.is_some()
 }
 
 /// The common QUIC receive function, the classifier part: true when the packet went to its one handler or was dropped and counted (the caller
@@ -514,7 +550,12 @@ fn quic_common_rx(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, sourc
             return true;
         }
         match (entry, &local) {
-            (None, _) => stat(|s| &mut s.short_unknown),
+            (None, _) => {
+                if quic_module_offer(sh, addr, slot, start, len, source, signal, time_us) {
+                    return true;
+                }
+                stat(|s| &mut s.short_unknown)
+            }
             (Some(e), _) if e.kind == QuicKind::Relay => {
                 // forward or drop, no queue: the DCID is replaced in the empty headroom, the same pool packet goes to the egress link and peer
                 let at = unsafe { sh.pool.slot(slot).add(start as usize) };
@@ -536,6 +577,7 @@ fn quic_common_rx(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, sourc
                 }
                 stat(|s| &mut s.short_relay_failed);
             }
+            (Some(_), local) if quic_module_offer(sh, addr, slot, start, len, source, signal, time_us) => { let _ = local; return true; }
             (Some(_), None) => stat(|s| &mut s.short_no_handler),
             (Some(_), Some(local)) => {
                 stat(|s| &mut s.short_local);
@@ -547,6 +589,9 @@ fn quic_common_rx(sh: &Shared, addr: u32, slot: i32, start: u16, len: u16, sourc
         return true;
     }
     if h.version != quic::VERSION_CBOR {
+        if quic_module_offer(sh, addr, slot, start, len, source, signal, time_us) {
+            return true;
+        }
         match &local {
             Some(local) => {
                 stat(|s| &mut s.long_other);
@@ -1066,7 +1111,7 @@ unsafe extern "C" fn relay_remove(user:*mut c_void,cid:*const u8,len:usize)->i32
     links.quic.table.remove(cid);relay_gc(&mut links);0
 }
 static QUIC_COMPONENT:Quic=Quic {version:QUIC_VERSION,size:std::mem::size_of::<Quic>() as u32,
-    attach:None,detach:None,relay_set:Some(relay_set),relay_get:Some(relay_get),relay_remove:Some(relay_remove),
+    attach:Some(quic_attach),detach:Some(quic_detach),relay_set:Some(relay_set),relay_get:Some(relay_get),relay_remove:Some(relay_remove),
     relay_create:Some(relay_create),relay_stats:Some(relay_stats),relay_expire:Some(relay_expire),relay_idle:Some(relay_idle)};
 pub(crate) fn quic_component()->*const Quic {&QUIC_COMPONENT}
 

@@ -9,10 +9,11 @@ publish = false
 
 [dependencies]
 xip-abi = { path = "../xip-abi" }
-libloading = "0.8"
+xip-wasm = { path = "../xip-wasm" }
+xip-psa = { path = "../xip-psa" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "time", "macros", "net", "io-util", "sync", "signal"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", "net", "io-util", "sync", "signal"] }
 
 [[bin]]
 name = "xip-host"
