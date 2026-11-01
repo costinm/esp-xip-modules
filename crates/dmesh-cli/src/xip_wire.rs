@@ -1,9 +1,10 @@
 //! The runtime's serial record wire (`components/xip_runtime/src/xip_ppp.c`): a record is
 //! `0x7e port payload 0x7e` with `0x7e`/`0x7d` escaped as `0x7d` (byte ^ `0x20`), the record's
 //! first byte its port (`xip.h` `XIP_PORT_*`). Bytes between records are not the runtime's
-//! workload and are dropped, but the device writes its ESP_LOG lines raw, so a session sees
-//! both: log text and records. dmesh-cli is the only thing in this project that touches a
-//! serial port and the only host-side implementation of this framing (AGENTS.md).
+//! workload: the device writes its ESP_LOG lines there, emitted atomically between records
+//! (never spliced into one), so a session sees both: log text and records. dmesh-cli is the
+//! only thing in this project that touches a serial port and the only host-side
+//! implementation of this framing (AGENTS.md).
 
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
