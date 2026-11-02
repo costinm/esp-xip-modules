@@ -166,6 +166,8 @@ int xip_serial_write(const void *data, size_t len)
 
 static void apply_pending_baud(void);
 static void packet_event(uint32_t event, uint32_t value);
+static void logs_to_frames(void);
+static void logs_to_console(void);
 
 static const xip_serial_codec_t *codec;
 void xip_serial_set_codec(const xip_serial_codec_t *c) { codec = c; }
@@ -183,10 +185,16 @@ static void chunk(const uint8_t *buf, int n)
     else if (codec && codec->on_bytes) codec->on_bytes(buf, (size_t)n);
 }
 
+/* True while a writer owns the gap-free record lane (write_frame's codec TX or
+ * a control record). The log lane must never splice a line into one of them. */
+static _Atomic bool frame_open;
+
 static int write_frame(uint32_t port, const void *data, size_t len)
 {
     if (!s.frame_lock || xSemaphoreTake(s.frame_lock, portMAX_DELAY) != pdTRUE) return XIP_ERR_BUSY;
+    atomic_store(&frame_open, true);
     int rc = codec && codec->tx ? codec->tx(port, data, len) : xip_serial_write(data, len);
+    atomic_store(&frame_open, false);
     xSemaphoreGive(s.frame_lock);
     if (!atomic_load(&s.tx_state)) packet_event(7, 1);
     return rc;
@@ -304,7 +312,9 @@ int xip_serial_start_packets(const xip_serial_packet_client *client)
     s.packets = *client;
     xip_serial_client_t native = {.on_bytes = packet_bytes, .on_reset = packet_reset,
         .on_tx = packet_tx, .on_uart_event = packet_uart_event, .on_close = packet_close};
-    return xip_serial_start_client(&native);
+    int rc = xip_serial_start_client(&native);
+    if (!rc) logs_to_frames();
+    return rc;
 }
 
 static void drain(void)
@@ -487,11 +497,13 @@ static void apply_pending_baud(void)
             else wire[n++] = record[i];
         }
         wire[n++] = 0x7e;
+        atomic_store(&frame_open, true);
         for (size_t at = 0; at < n;) {
             int w = xip_serial_write(wire + at, n - at);
             if (w <= 0) { sent = false; break; }
             at += (size_t)w;
         }
+        atomic_store(&frame_open, false);
     }
     /* uart_wait_tx_done in set_baud drains the old-rate ACK before switching.
      * A failed write/drain never changes the rate. USB has no baud exchange. */
@@ -593,6 +605,7 @@ int xip_serial_start(void)
     extern const xip_serial_codec_t xip_ppp_codec;
     xip_serial_set_codec(&xip_ppp_codec);
     rc = start_tasks();
+    if (!rc) logs_to_frames();
     if (!rc) ESP_LOGW(TAG, "records on %s (the PPP codec)", s.usb ? "USB-Serial/JTAG" : "UART0");
     return rc;
 }
@@ -627,11 +640,60 @@ void xip_serial_stop(void)
     if (s.opened) uninstall_driver();
     s.opened = false;
     atomic_store(&s.pending_baud, 0);
+    logs_to_console(); /* before the mutex goes away: no hook may outlive it */
     if (s.frame_lock) { vSemaphoreDelete(s.frame_lock); s.frame_lock = NULL; }
     if (s.client.on_close) s.client.on_close(s.client.ctx);
     else if (codec && codec->on_reset) codec->on_reset();
     memset(&s.client, 0, sizeof(s.client));
     if (s.exited) { vSemaphoreDelete(s.exited); s.exited = NULL; }
+}
+
+/* The log lane shares the wire with PPP records. The host reader treats raw
+ * bytes between records as text and discards bytes it cannot frame, but a
+ * line spliced into a record corrupts both. So each line goes out under the
+ * same frame_lock that serializes whole records: a line lands atomically in
+ * the gap between records. Output is never queued: while a record is open,
+ * from an ISR, or when the lock cannot be taken immediately, the line is
+ * dropped and counted. Busy log output must not hold the CPU, a DW or the
+ * record lane. */
+static int (*log_prev)(const char *, va_list);
+static bool log_installed;
+static _Atomic uint32_t log_dropped;
+
+static int log_vprintf(const char *fmt, va_list ap)
+{
+    if (!s.running || s.stop) return log_prev ? log_prev(fmt, ap) : 0;
+    char line[256];
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    if (n < 0) return n;
+    if (atomic_load(&frame_open) || xPortInIsrContext() ||
+        xSemaphoreTake(s.frame_lock, 0) != pdTRUE) {
+        atomic_fetch_add(&log_dropped, 1u);
+        return n;
+    }
+    size_t left = (size_t)(n < (int)sizeof(line) ? n : (int)sizeof(line) - 1);
+    for (size_t at = 0; at < left;) {
+        int w = xip_serial_write(line + at, left - at);
+        if (w <= 0) break;
+        at += (size_t)w;
+    }
+    xSemaphoreGive(s.frame_lock);
+    return n;
+}
+
+static void logs_to_frames(void)
+{
+    if (log_installed) return;
+    log_prev = esp_log_set_vprintf(log_vprintf);
+    log_installed = true;
+}
+
+static void logs_to_console(void)
+{
+    if (!log_installed) return;
+    (void)esp_log_set_vprintf(log_prev);
+    log_prev = NULL;
+    log_installed = false;
 }
 
 static int rom_vprintf(const char *fmt, va_list ap)
@@ -642,4 +704,9 @@ static int rom_vprintf(const char *fmt, va_list ap)
     return n;
 }
 
-void xip_log_to_rom(void) { esp_log_set_vprintf(rom_vprintf); }
+void xip_log_to_rom(void)
+{
+    /* Once the PPP codec owns the port the framed lane must stay installed;
+     * before that the ROM console is the caller's own choice, as before. */
+    if (!log_installed) (void)esp_log_set_vprintf(rom_vprintf);
+}

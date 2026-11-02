@@ -1184,7 +1184,10 @@ impl Context {
             // Activity holds defer entry; do not clear the shared activity grace.
             let mut info=PowerInfo::default();
             if hw.power().and_then(|p|p.info).is_some_and(|f|unsafe {f(hw.ctx(),&mut info)}==0 && info.active_window!=0) {return;}
-            if let Err(rc)=self.enter_sleepy(hw,false,self.cadence) {self.engine.with_stats(|s|s.last_error=rc);}
+            // The re-arm keeps the operator's boundary-trace choice: a query
+            // that disarms the policy must not silently drop the trace the
+            // meter session asked for.
+            if let Err(rc)=self.enter_sleepy(hw,self.sleep.tracing(),self.cadence) {self.engine.with_stats(|s|s.last_error=rc);}
         }
     }
     fn quiet_transports(&mut self, hw: &Hw) -> Result<(),i32> {
