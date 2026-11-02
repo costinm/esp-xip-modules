@@ -14,7 +14,7 @@ use xip_abi::{Call, Host};
 extern "C" {
     fn xip_handle(host: *const Host, state: *mut u8, call: *const Call) -> i32;
 
-    /// The formatter a packed image carries (`port/xip_libc.c`); it has its own name, so the host
+    /// The formatter a packed image carries (`components/xip_runtime/src/xip_fmt.c`, the `snprintf` of the `native` table); it has its own name, so the host
     /// can call it without interposing libc's `snprintf`.
     pub fn xip_fmt_snprintf(s: *mut i8, n: usize, fmt: *const i8, ...) -> i32;
 }

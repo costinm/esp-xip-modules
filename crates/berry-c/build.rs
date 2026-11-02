@@ -4,7 +4,7 @@
 // Same sources and flags as the device build (tools/build_c_mod.py) and as the .so builder that
 // went away with main's switch to wasm; the skip list is the device builder's too, the lists are
 // kept in step by hand. The host links
-// libc, and port/xip_libc.c defines no libc names under __linux__, so nothing is interposed.
+// libc, and the formatter is components/xip_runtime/src/xip_fmt.c under its own name, so nothing is interposed.
 use std::path::Path;
 
 fn setup(b: &mut cc::Build, root: &Path) {
@@ -36,6 +36,7 @@ fn main() {
     println!("cargo::rerun-if-changed=../../modules/mod_berry");
     println!("cargo::rerun-if-changed=../../modules/common");
     println!("cargo::rerun-if-changed=../../include");
+    println!("cargo::rerun-if-changed=../../components/xip_runtime/src/xip_fmt.c");
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
 
@@ -66,6 +67,9 @@ fn main() {
     setup(&mut port, &root);
     port.std("c11").warnings(true).flag("-Wextra").flag("-Werror");
     port.file(root.join("modules/mod_berry/mod_berry.c"));
+    // the runtime's formatter (the `snprintf` of the `native` table on a device): the very file the firmware links
+    port.include(root.join("components/xip_runtime/include"));
+    port.file(root.join("components/xip_runtime/src/xip_fmt.c"));
     for f in c_files(&root.join("modules/mod_berry/port"), &[]) {
         port.file(f);
     }
