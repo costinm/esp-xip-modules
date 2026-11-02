@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS "bootloader_start.c" "state_core.c"
     INCLUDE_DIRS "."
+    PRIV_INCLUDE_DIRS "../../../components/xip_loader/include" "../../../include"
     PRIV_REQUIRES bootloader_support nvs_flash hal)
 
 if(NOT DEFINED ENV{WL_STAGE2_VERSION} OR "$ENV{WL_STAGE2_VERSION}" STREQUAL "")

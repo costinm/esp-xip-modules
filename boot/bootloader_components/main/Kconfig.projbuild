@@ -5,7 +5,7 @@ menu "Stage2"
         default -1
         help
             Held at its active level for about 300 ms after reset, this pin
-            selects the loader. Do not use a strapping pin (GPIO0 on ESP32,
+            boots the older runtime image (when there is one). Do not use a strapping pin (GPIO0 on ESP32,
             GPIO9 on ESP32-C6): it would start ROM download mode instead.
 
     config WL_BOOT_BUTTON_ACTIVE_LOW
@@ -13,7 +13,7 @@ menu "Stage2"
         default y
 
     config WL_BOOT_QUICK_RESETS
-        int "Quick resets that select the loader"
+        int "Quick resets that roll the newer runtime back"
         default 5
 
     config WL_BOOT_QUICK_WINDOW_TICKS
@@ -25,7 +25,7 @@ menu "Stage2"
         default 6000000
 
     config WL_BOOT_ABNORMAL_RESETS
-        int "Watchdog / brown-out resets that select the loader"
+        int "Watchdog / brown-out resets that roll the newer runtime back"
         default 5
 
     config WL_BOOT_ABNORMAL_WINDOW_TICKS

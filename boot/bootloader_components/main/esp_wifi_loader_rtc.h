@@ -11,13 +11,13 @@
 
 /* One-shot boot request, written by Main/loader, consumed by Stage2. */
 #define WL_HANDOFF_NORMAL 0u
-#define WL_HANDOFF_LOADER 1u /* next boot: run the loader (upgrade request) */
-#define WL_HANDOFF_MAIN 2u   /* next boot: run Main (loader finished) */
+#define WL_HANDOFF_LOADER 1u /* next boot: run the older runtime image (the loader of earlier versions; now a manual rollback) */
+#define WL_HANDOFF_MAIN 2u   /* next boot: run the newest runtime image */
 
-/* Why Stage2 selected the loader (written by Stage2, read by the loader). */
+/* Why Stage2 did not boot the newest image as usual (written by Stage2, read by the runtime). */
 #define WL_REASON_NONE 0u
-#define WL_REASON_CRASH 1u  /* reset pattern or abnormal-reset loop */
-#define WL_REASON_UPDATE 2u /* Main's request or the entry button */
+#define WL_REASON_CRASH 1u  /* reset pattern or abnormal-reset loop: the newer image was rolled back */
+#define WL_REASON_UPDATE 2u /* the runtime's request or the entry button: the older image */
 
 /* Stage2-owned flash read-mode trial bits (WL_RTC_FLASH). */
 #define WL_FLASH_QIO_TRIAL 0x01u /* Main was booted in QIO, outcome pending */

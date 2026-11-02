@@ -1,10 +1,13 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* Stage2: selects Main or the loader. See docs/boot.md.
+/* Stage2: boots the newest runtime found in the xip partition (the extent scan, xip_extent.h). See boot/README.md.
  *
+ *  - There is no "active slot" record: the images say it (components/xip_loader/include/xip_image.h). The highest version boots. Two
+ *    valid images mean the newer one is on trial; the runtime erases the older one when it has stayed up (xip_loader_settle).
  *  - Normal boots write nothing to flash and add no delay.
- *  - Five quick resets (or five watchdog/brown-out resets in a longer window)
- *    select the loader; so does the optional entry button and the RTC request.
- *  - The QIO verdict lives in the state sector (written once). */
+ *  - Five quick resets (or five watchdog/brown-out resets in a longer window) roll back: the older image boots, with reason CRASH in RTC; the
+ *    runtime then erases the failed one (xip_loader_reap). Stage2 never writes the images. With one image there is nothing to roll back to.
+ *    The optional entry button and the RTC request boot the older image with reason UPDATE: the runtime erases nothing.
+ *  - The QIO verdict lives in the state sectors (partition wlstate, written once). */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -34,22 +37,22 @@
 #include "nvs_bootloader.h"
 #include "esp_wifi_loader_rtc.h"
 #include "esp_wifi_loader_state.h"
+#include "xip_extent.h"
 
 #if CONFIG_ESPTOOLPY_FLASHMODE_QIO || CONFIG_ESPTOOLPY_FLASHMODE_QOUT
 #error "Build Stage2 as DIO; it enables QIO for Main at runtime"
 #endif
 
-#define LOADER_INDEX FACTORY_INDEX
-#define MAIN_INDEX 0 /* ota_0; factory (-1) is the loader */
+#define SLOTS 2 /* runtimes considered: the first two found, by address */
 
 /* NVS stg2:flash override (read-only): 1=DIO, 2=QIO, anything else/unset=auto. */
 #define STAGE2_NAMESPACE "stg2"
 #define FLASH_MODE_DIO 1u
 #define FLASH_MODE_QIO 2u
 
-/* NVS stg2:boot_target (u32), written over USB by DMesh's flash-device.py: 1 = always Main, 2 =
- * always the loader. It outranks the reset pattern and the entry button, but not the one-shot
- * RTC handoff. Unset or any other value = automatic. */
+/* NVS stg2:boot_target (u32), written over USB by DMesh's flash-device.py: 1 = always the newest image, 2 =
+ * always the older one (when there is one). It outranks the reset pattern and the entry button, but not the
+ * one-shot RTC handoff. Unset or any other value = automatic. */
 #define BOOT_TARGET_MAIN 1u
 #define BOOT_TARGET_LOADER 2u
 
@@ -125,7 +128,7 @@ static bool read_u32(const char *key, uint32_t *value)
     return true;
 }
 
-/* ---- state sector access (last two sectors of the loader partition) ---- */
+/* ---- state sector access (the two sectors of the wlstate partition) ---- */
 
 static uint32_t state_base;
 
@@ -270,24 +273,31 @@ static bool cache_reads_qio(void)
 #endif
 }
 
-static bool main_header_present(const bootloader_state_t *bs)
+/* The runtimes of the xip partition, looked at once per boot: the extent scan (xip_extent.h) finds them anywhere; slot 0 is the one at the lowest
+ * address. Headers only: the checksum is the image loader's. */
+static xip_image_info_t slot_info[SLOTS];
+static xip_extent_t slot_ext[SLOTS];
+
+static int flash_read_at(void *ctx, uint32_t addr, void *buf, size_t len)
 {
-    esp_image_header_t header;
-    return bs->ota[MAIN_INDEX].size != 0 &&
-           bootloader_flash_read(bs->ota[MAIN_INDEX].offset, &header, sizeof(header), true) == ESP_OK &&
-           header.magic == ESP_IMAGE_HEADER_MAGIC;
+    (void)ctx;
+    return bootloader_flash_read(addr, buf, len, true) == ESP_OK ? 0 : -1;
 }
 
-static const char *apply_flash_mode(const bootloader_state_t *bs, int partition_index,
-                                    boot_state_t *s, wl_state_t *st)
+static void inspect_slots(const bootloader_state_t *bs)
+{
+    const size_t n = xip_extent_scan(flash_read_at, NULL, bs->factory.offset, bs->factory.size, XIP_WANT_RUNTIME, slot_ext, SLOTS);
+    for (size_t i = 0; i < SLOTS; i++)
+        slot_info[i] = i < n ? (xip_image_info_t){.valid = true, .version = slot_ext[i].version, .extent = slot_ext[i].size} : (xip_image_info_t){0};
+}
+
+static const char *apply_flash_mode(int partition_index, boot_state_t *s, wl_state_t *st)
 {
     uint32_t mode = 0;
     (void)read_u32("flash", &mode);
-    if (partition_index != MAIN_INDEX) return "dio-loader";
     if (mode == FLASH_MODE_DIO) return "dio";
-    /* The loader erases Main's first sector before an update. With no header
-     * the image loader falls through to the loader, which must stay in DIO. */
-    if (!main_header_present(bs)) return "dio-no-main";
+    /* No image in any slot: the image loader finds nothing to start, which stays in DIO. */
+    if (partition_index < 0 || !slot_info[partition_index].valid) return "dio-no-image";
     bool forced = mode == FLASH_MODE_QIO;
     if (!forced) {
         if (st->view.qio == WL_QIO_DIO_ONLY) return "dio-verdict";
@@ -315,7 +325,8 @@ static const char *apply_flash_mode(const bootloader_state_t *bs, int partition_
 
 /* ---- selection ---- */
 
-static int select_partition(boot_state_t *s, wl_state_t *st, bool fresh)
+/* Returns the slot to boot (0 or 1), -1 when neither holds an image. */
+static int select_partition(const bootloader_state_t *bs, boot_state_t *s, wl_state_t *st, bool fresh)
 {
     int reset = esp_rom_get_reset_reason(0);
     uint32_t now = rtc_boot_ticks();
@@ -327,38 +338,48 @@ static int select_partition(boot_state_t *s, wl_state_t *st, bool fresh)
 
     account_trial(s, st, reset, now);
     reset_verdict_t v = account_resets(s, reset, now);
+    inspect_slots(bs);
 
-    esp_rom_printf("WL stage2 v=%u: reset=%d handoff=%u quick=%u abn=%u flash=0x%x\n",
+    esp_rom_printf("WL stage2 v=%u: reset=%d handoff=%u quick=%u abn=%u flash=0x%x slots=%u/%u\n",
                    (unsigned)WL_STAGE2_VERSION, reset, (unsigned)handoff,
-                   (unsigned)s->quick_count, (unsigned)s->abnormal_count, (unsigned)s->flash);
+                   (unsigned)s->quick_count, (unsigned)s->abnormal_count, (unsigned)s->flash,
+                   (unsigned)(slot_info[0].valid ? slot_info[0].version : 0), (unsigned)(slot_info[1].valid ? slot_info[1].version : 0));
 
-    /* The loader's "install finished" handoff outranks everything else. */
+    const int newest = xip_image_pick(slot_info, false);
+    const int previous = xip_image_pick(slot_info, true);
+
+    /* The runtime's "I am settled" handoff outranks everything else. */
     if (handoff == WL_HANDOFF_MAIN) {
-        ESP_LOGW(TAG, "select Main: loader handoff");
-        return MAIN_INDEX;
+        ESP_LOGW(TAG, "select the newest: runtime handoff");
+        return newest;
     }
     uint32_t boot_target = 0;
     if (handoff != WL_HANDOFF_LOADER && read_u32("boot_target", &boot_target)) {
         if (boot_target == BOOT_TARGET_LOADER) {
             s->reason = WL_REASON_UPDATE;
-            return LOADER_INDEX;
+            return previous;
         }
-        if (boot_target == BOOT_TARGET_MAIN) return MAIN_INDEX;
+        if (boot_target == BOOT_TARGET_MAIN) return newest;
     }
     if (button_pressed()) {
         s->reason = WL_REASON_UPDATE;
-        return LOADER_INDEX;
+        return previous;
     }
     if (handoff == WL_HANDOFF_LOADER) {
         s->reason = WL_REASON_UPDATE;
-        return LOADER_INDEX;
+        return previous;
     }
     if (v.quick || v.abnormal) {
         s->reason = WL_REASON_CRASH;
-        return LOADER_INDEX;
+        if (newest >= 0 && xip_image_older(slot_info) >= 0) {
+            /* The newer image is on trial and crashes: the older one boots. Erasing the failed one is the runtime's job (reason CRASH,
+             * xip_loader_reap), which keeps this code read-only. */
+            ESP_LOGE(TAG, "slot %d (version %u) fails: rolled back", newest, (unsigned)slot_info[newest].version);
+            return previous;
+        }
+        return newest;      /* nothing to roll back to */
     }
-    /* A blank or corrupt Main falls through to the loader in the image loader. */
-    return MAIN_INDEX;
+    return newest;
 }
 
 void __attribute__((noreturn)) call_start_cpu0(void)
@@ -376,13 +397,23 @@ void __attribute__((noreturn)) call_start_cpu0(void)
     bool fresh;
     boot_state_t *s = boot_state(&fresh);
     wl_state_t st;
-    state_base = bs.factory.offset + bs.factory.size - WL_STATE_SIZE;
+    state_base = WL_STATE_OFFSET;
     wl_state_open(&st, &state_ops);
 
-    int partition_index = select_partition(s, &st, fresh);
-    const char *flash_mode = apply_flash_mode(&bs, partition_index, s, &st);
+    int partition_index = select_partition(&bs, s, &st, fresh);
+    const char *flash_mode = apply_flash_mode(partition_index, s, &st);
     esp_rom_printf("WL stage2: load partition=%d flash=%s\n", partition_index, flash_mode);
-    bootloader_utility_load_boot_image(&bs, partition_index);
+    /* The IDF loader gets the runtimes as OTA entries and starts at the chosen one: it checks the image (magic, chip, app description,
+     * checksum, SHA-256) and, when that fails, tries the other runtime. With none it finds nothing and resets. */
+    const uint32_t end = bs.factory.offset + bs.factory.size;
+    bs.factory = (esp_partition_pos_t){0};
+    for (int i = 0; i < SLOTS; i++) {
+        const uint32_t at = slot_ext[i].offset;
+        bs.ota[i] = slot_info[i].valid ? (esp_partition_pos_t){.offset = at, .size = end - at < XIP_RUNTIME_RESERVE ? end - at : XIP_RUNTIME_RESERVE}
+                                       : (esp_partition_pos_t){0};
+    }
+    bs.app_count = SLOTS;
+    bootloader_utility_load_boot_image(&bs, partition_index < 0 ? 0 : partition_index);
     bootloader_reset();
 }
 

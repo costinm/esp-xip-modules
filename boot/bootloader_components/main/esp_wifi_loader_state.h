@@ -11,6 +11,7 @@
 
 #define WL_STATE_SECTOR 4096u
 #define WL_STATE_SIZE (2u * WL_STATE_SECTOR)
+#define WL_STATE_OFFSET 0xd000u /* the wlstate partition: the same place on every chip and flash size (boot/partitions/<n>mb.csv) */
 
 #define WL_REC_PIN 1u     /* 65-byte pinned public key */
 #define WL_REC_MINVER 2u  /* u32 minimum Main version */
