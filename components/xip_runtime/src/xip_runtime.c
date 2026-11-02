@@ -721,10 +721,12 @@ static const void *h_get_component(void *user, const char *name)
     (void)user; /* Requester context; native component functions take no extra argument. */
     extern const xip_crypto *xip_crypto_component(void);
     extern const xip_identity *xip_identity_component(void);
+    extern const xip_native *xip_native_component(void);
     if (!name) return NULL;
     if (!strcmp(name, "serial")) return xip_serial_component();
     if (strcmp(name, "crypto") == 0) return xip_crypto_component();
     if (strcmp(name, "identity") == 0) return xip_identity_component();
+    if (strcmp(name, "native") == 0) return xip_native_component();
     if (strcmp(name, "link") == 0) return link_table();
     if (strcmp(name, "quic") == 0) return quic_module_table();
     if (strcmp(name, "stream") == 0) return stream_table();
