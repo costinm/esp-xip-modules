@@ -326,10 +326,10 @@ fn run(f: &mut Fake) -> (Connection, bool) {
 }
 fn module_image() -> Vec<u8> {
     let mut data = vec![42; 8192 + 333];
-    data[..4].copy_from_slice(b"DMOD");
-    data[6..8].copy_from_slice(&64u16.to_le_bytes());
+    data[0] = b'M';
+    data[2..4].copy_from_slice(&64u16.to_le_bytes());
     let size = data.len() as u32;
-    data[12..16].copy_from_slice(&size.to_le_bytes());
+    data[4..8].copy_from_slice(&size.to_le_bytes());
     data[16..18].copy_from_slice(&2u16.to_le_bytes());
     data[44..52].fill(0); // no manifest
     data
@@ -520,8 +520,8 @@ fn large_main_drains_buffered_input_between_async_completions() {
 /// Install a fake module image (header and manifest `{1: name, 2: tag}`) on a page of the module partition.
 fn module_on_page(f: &mut Fake, page: usize, name: &[u8], tag: u16) {
     let at = 0x380000 + page * 0x10000;
-    f.flash[at..at + 4].copy_from_slice(b"DMOD");
-    f.flash[at+12..at+16].copy_from_slice(&256u32.to_le_bytes());
+    f.flash[at] = b'M';
+    f.flash[at+4..at+8].copy_from_slice(&256u32.to_le_bytes());
     f.flash[at + 16..at + 18].copy_from_slice(&tag.to_le_bytes());
     f.flash[at + 44..at + 48].copy_from_slice(&64u32.to_le_bytes());
     let mut m = vec![0xa2, 1, 0x60 + name.len() as u8];
@@ -533,8 +533,8 @@ fn module_on_page(f: &mut Fake, page: usize, name: &[u8], tag: u16) {
 /// `module_on_page` for a module with a version (manifest `{1: name, 8: version, 2: tag}`).
 fn module_v(f: &mut Fake, page: usize, name: &[u8], tag: u16, version: u8) {
     let at = 0x380000 + page * 0x10000;
-    f.flash[at..at + 4].copy_from_slice(b"DMOD");
-    f.flash[at+12..at+16].copy_from_slice(&256u32.to_le_bytes());
+    f.flash[at] = b'M';
+    f.flash[at+4..at+8].copy_from_slice(&256u32.to_le_bytes());
     f.flash[at + 16..at + 18].copy_from_slice(&tag.to_le_bytes());
     f.flash[at + 44..at + 48].copy_from_slice(&64u32.to_le_bytes());
     let mut m = vec![if version > 0 { 0xa3 } else { 0xa2 }, 1, 0x60 + name.len() as u8];
@@ -684,9 +684,9 @@ fn the_package_and_its_image_say_the_same_name_and_version() {
     // Manifest {1: "test", 8: 2} in block zero, a later block, or the second flash page.
     let make = |size: usize, name: &[u8], version: u8| {
         let mut data = vec![42u8; size];
-        data[..4].copy_from_slice(b"DMOD");
-        data[6..8].copy_from_slice(&64u16.to_le_bytes());
-        data[12..16].copy_from_slice(&(size as u32).to_le_bytes());
+        data[0] = b'M';
+        data[2..4].copy_from_slice(&64u16.to_le_bytes());
+        data[4..8].copy_from_slice(&(size as u32).to_le_bytes());
         data[16..18].copy_from_slice(&2u16.to_le_bytes());
         let mut m = vec![0xa2, 1, 0x60 + name.len() as u8];
         m.extend_from_slice(name);
@@ -823,7 +823,7 @@ fn a_signed_package_made_by_the_loader_tools_is_installed_over_the_socket_protoc
 fn multi_page_images_protect_tails_and_require_contiguous_space() {
     let image=module_image();let mut f=Fake::new(&image,target::MODULE,false);
     module_v(&mut f,0,b"nan",46,1);
-    f.flash[0x380000+12..0x380000+16].copy_from_slice(&(65536u32+100).to_le_bytes());
+    f.flash[0x380000+4..0x380000+8].copy_from_slice(&(65536u32+100).to_le_bytes());
     let pages=read_pages_of(&f);
     assert_eq!(pages[1].unwrap().first,0);
     assert!(is_active(&pages,0));assert!(!is_active(&pages,1));
@@ -852,7 +852,7 @@ fn expanded_module_partition_admits_and_protects_high_pages() {
     let pages=read_pages(hw,&l).unwrap();assert_eq!(pages.len(),24);
     assert_eq!(choose_span(&pages,b"quic",1,PageSet::default(),4,24).unwrap().0,20);
     module_v(&mut f,0,b"quic",48,1);let mut header=f.flash[0x380000..0x380000+256].to_vec();
-    header[12..16].copy_from_slice(&(3*65536u32+100).to_le_bytes());
+    header[4..8].copy_from_slice(&(3*65536u32+100).to_le_bytes());
     f.flash[0x3c0000..0x3c0000+256].copy_from_slice(&header);
     module_v(&mut f,0,b"quic",48,2);let header=f.flash[0x380000..0x380000+256].to_vec();
     f.flash[0x280000..0x280000+256].copy_from_slice(&header);

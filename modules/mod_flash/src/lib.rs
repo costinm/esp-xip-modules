@@ -9,6 +9,7 @@ use core::ptr;
 #[cfg(any(target_arch = "riscv32", target_arch = "xtensa"))]
 mod rtc;
 mod state;
+mod extents;
 mod upload;
 mod crypto;
 mod wire;
@@ -149,10 +150,10 @@ fn read_pages(hw: Hw, l: &Layout) -> Result<Pages, Reject> {
         if hw.flash_read(l.data, page * PAGE, &mut h) != 64 {
             return Err(wire::FLASH);
         }
-        if h[..4] != *b"DMOD" {
+        if h[0] != b'M' {
             continue;
         }
-        let image_size=le32(&h[12..16]);
+        let image_size=le32(&h[4..8]);
         let claimed=image_size.checked_add(PAGE-1).map(|s|s/PAGE);
         let valid=image_size>64 && claimed.is_some_and(|n|n!=0 && n<=(l.data_size/PAGE).min(state::MODULE_SLOTS as u32)-page);
         let span=if valid {claimed.unwrap()} else {1};
@@ -783,9 +784,9 @@ impl Connection {
                         let bytes =
                             unsafe { core::slice::from_raw_parts(self.write, self.write_len) };
                         if bytes.len() < 64
-                            || bytes[..4] != [0x44, 0x4d, 0x4f, 0x44]
-                            || u16::from_le_bytes([bytes[6], bytes[7]]) != 64
-                            || u32::from_le_bytes(bytes[12..16].try_into().unwrap()) != self.size
+                            || bytes[0] != b'M'
+                            || u16::from_le_bytes([bytes[2], bytes[3]]) != 64
+                            || u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != self.size
                             || u16::from_le_bytes([bytes[16], bytes[17]]) == COMPONENT as u16
                             || (self.tag != 0 && u16::from_le_bytes([bytes[16], bytes[17]]) != self.tag)
                         {

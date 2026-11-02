@@ -19,6 +19,7 @@
  * The interpreter lives in berry/ (vendored) and its port in port/. */
 #include "xip_module.h"
 #include "xip_berry.h"
+#include "xip_native_libc.h"
 #include "berry.h"
 
 _Static_assert(sizeof(berry_state) <= 1696, "keep berry_state inside the declared state block");
