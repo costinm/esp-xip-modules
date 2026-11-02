@@ -174,8 +174,20 @@
 // A previously accepted packet has been fully submitted to the socket.
 #define XIP_SOCKET_EVENT_WRITE_DONE 7
 
-// 'DMOD' little endian.
-#define XIP_DMOD_MAGIC 1146047812
+// First byte of every extent of the xip partition (the scan reads 8 bytes per 64 KiB page): a module image.
+#define XIP_DMOD_KIND_MODULE 77
+
+// A data extent (the flash filesystem of `mod_flash`): the same 8-byte lead as a module, `image_size` is its length.
+#define XIP_EXTENT_DATA 68
+
+// A runtime image is an ESP image: its first byte is the ESP magic.
+#define XIP_EXTENT_RUNTIME 233
+
+// A page that was never written, or was erased again.
+#define XIP_EXTENT_EMPTY 255
+
+// A deleted extent: the first byte of each of its pages is programmed to zero (no erase), a later pass erases the pages.
+#define XIP_EXTENT_DELETED 0
 
 #define XIP_DMOD_HEADER_SIZE 64
 
@@ -188,8 +200,9 @@
 // Bytes reserved for each module's call context (currently only a Host pointer).
 #define XIP_DMOD_STATIC_SLOT_BYTES 16
 
-// Cells in the platform's reserved module-context arena.
-#define XIP_DMOD_STATIC_SLOTS 16
+// Cells in the platform's reserved module-context arena: the most slots any chip has. The link windows can be fewer
+// (the classic ESP32 maps only 16 of 64 KiB, see `xip_loader`'s `XIP_WINDOW_BYTES`).
+#define XIP_DMOD_STATIC_SLOTS 64
 
 #define XIP_DMOD_STATIC_ESP32_BASE 1073598464
 
@@ -418,6 +431,8 @@
 #define XIP_ALG_ECDSA_SHA_256 100664841
 
 #define XIP_IDENTITY_VERSION 1
+
+#define XIP_NATIVE_VERSION 1
 
 typedef struct {
   uint32_t free;
@@ -686,6 +701,46 @@ typedef struct {
   // Fill `len` bytes of `packet` at `offset` with random bytes.
   int (*random)(void *ctx, uint32_t packet, uint32_t offset, uint32_t len);
 } xip_crypto;
+
+// `get_component("native")`. Fields are in the order of the C library headers they come from.
+typedef struct {
+  // 1.
+  uint32_t version;
+  // Size of this table.
+  uint32_t size;
+  void *(*memcpy)(void *dst, const void *src, size_t n);
+  void *(*memmove)(void *dst, const void *src, size_t n);
+  void *(*memset)(void *dst, int c, size_t n);
+  int (*memcmp)(const void *a, const void *b, size_t n);
+  size_t (*strlen)(const char *s);
+  int (*strcmp)(const char *a, const char *b);
+  int (*strncmp)(const char *a, const char *b, size_t n);
+  char *(*strcpy)(char *dst, const char *src);
+  char *(*strncpy)(char *dst, const char *src, size_t n);
+  char *(*strcat)(char *dst, const char *src);
+  char *(*strchr)(const char *s, int c);
+  char *(*strstr)(const char *hay, const char *needle);
+  double (*strtod)(const char *s, char **end);
+  long (*strtol)(const char *s, char **end, int base);
+  unsigned long (*strtoul)(const char *s, char **end, int base);
+  // The runtime's formatter (`%c %d %i %u %o %x %X %s %p %f %e %g %%`, flags, width, precision, `l`/`ll`); `-1` for anything else.
+  int (*snprintf)(char *out, size_t n, const char *fmt, ...);
+  double (*fmod)(double x, double y);
+  double (*floor)(double x);
+  double (*ceil)(double x);
+  double (*trunc)(double x);
+  double (*rint)(double x);
+  double (*sqrt)(double x);
+  double (*fabs)(double x);
+  double (*copysign)(double x, double y);
+  float (*floorf)(float x);
+  float (*ceilf)(float x);
+  float (*truncf)(float x);
+  float (*rintf)(float x);
+  float (*sqrtf)(float x);
+  float (*fabsf)(float x);
+  float (*copysignf)(float x, float y);
+} xip_native;
 
 // Writable packet returned by the pool adapter. A successful begin transfers
 // one writer to C, which must call rx_finish exactly once (commit or abort).
@@ -1396,16 +1451,18 @@ typedef struct {
 
 // first 64 bytes of a module image
 typedef struct __attribute__((packed)) {
-  // `DMOD_MAGIC`.
-  uint32_t magic;
+  // `DMOD_KIND_MODULE`.
+  uint8_t kind;
   // `ABI_VERSION` the module was built for.
-  uint16_t abi_version;
+  uint8_t abi_version;
   // `DMOD_HEADER_SIZE`.
   uint16_t header_size;
+  // Header plus code and read-only data (plus the manifest): the length of the extent, at offset 4 so that a scan which reads 8 bytes finds it.
+  uint32_t image_size;
   // Offset of `xip_handle` from the start of the image (includes the header).
   uint32_t entry_offset;
-  // Header plus code and read-only data.
-  uint32_t image_size;
+  // Zero.
+  uint32_t reserved1;
   // Module tag; must match the slot the image is installed in.
   uint16_t tag;
   // Zero.
@@ -2285,6 +2342,7 @@ _Static_assert(sizeof(xip_stream_packet) == 12, "xip_stream_packet layout");
 _Static_assert(sizeof(xip_call) == 88, "xip_call layout");
 _Static_assert(sizeof(xip_identity) == 16, "xip_identity layout");
 _Static_assert(sizeof(xip_crypto) == 36, "xip_crypto layout");
+_Static_assert(sizeof(xip_native) == 132, "xip_native layout");
 _Static_assert(sizeof(xip_power) == 44, "xip_power layout");
 _Static_assert(sizeof(xip_host) == 172, "xip_host layout");
 #endif

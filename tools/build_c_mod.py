@@ -34,6 +34,15 @@ ROOT = mkmod.ROOT
 SKIP = {"be_jsonlib", "be_mathlib", "be_timelib", "be_oslib", "be_solidifylib", "be_introspectlib",
         "be_strictlib", "be_debuglib", "be_bytecode"}
 
+# wasm3 as mod_wasm3 configures it (the files of wasm3/ it compiles, the -D list); crates/wasm3-c/build.rs keeps the same.
+W3_FILES = {"m3_bind", "m3_code", "m3_compile", "m3_core", "m3_env", "m3_exec", "m3_function", "m3_module", "m3_parse", "m3_validate"}
+W3_DEFS = ["d_m3HasPosixHost=0", "M3_THREAD_LOCAL=", "M3_HAS_THREAD_LOCAL=0", "d_m3HasAtomics=0",
+           "d_m3HasExceptionHandling=0", "d_m3HasSnapshots=0", "d_m3HasStackSwitching=0", "d_m3HasTypedRefs=0",
+           "d_m3HasMemory64=0", "d_m3HasMultiMemory=0", "d_m3HasWideArithmetic=0", "d_m3HasExtendedConst=0",
+           "d_m3HasCompactImports=0", "d_m3HasRefTypes=0", "d_m3HasGasMetering=0", "d_m3GuardedMemory=0",
+           "d_m3VerboseErrorMessages=0", "d_m3MaxFunctionStackHeight=128", "d_m3MaxConstantTableSize=64",
+           "d_m3CodePageAlignSize=1024", "d_m3MaxNativeStack=5120", "XIP_WASM3_ALLOC"]
+
 
 def read_c_registry(path=None):
     """name -> (component number, state bytes, supported chips) from modules/C-MODULES;
@@ -111,7 +120,7 @@ def compile_c(tool, srcs, out, inc, define_cell, extra):
                f"-I{os.path.join(ROOT, 'include')}",
                f"-I{os.path.join(ROOT, 'modules', 'common')}", *[f"-I{i}" for i in inc]]
         if define_cell:
-            cmd.append(define_cell)
+            cmd += [define_cell, "-include", os.path.join(ROOT, "modules", "common", "xip_native_libc.h")]
         cmd += ["-std=c99", "-Wall", "-Wno-strict-aliasing", "-Wno-unused-function"] if c99 else \
                ["-std=c11", "-Wall", "-Wextra", "-Werror"]
         mkmod.run(cmd + ["-c", f, "-o", obj])
@@ -132,8 +141,8 @@ def build_c(chip, out, directory, name, tag, state, slot, version=0, autostart=N
     static_addr = mkmod.static_address(chip, slot)
     layout = mkmod.read_slot_layout()
     declared, span = layout.get(directory, (slot, 1))
-    if slot + span > dmod.STATIC_SLOTS:
-        sys.exit("module span exceeds the virtual window")
+    if slot + span > min(dmod.STATIC_SLOTS, cfg["slots"]):
+        sys.exit(f"module span exceeds the virtual window of {chip} ({cfg['slots']} slots)")
     for other, (start, count) in layout.items():
         if other != directory and slot < start + count and start < slot + span:
             sys.exit(f"module slot range overlaps {other}: {slot}..{slot + span - 1}")
@@ -147,22 +156,33 @@ def build_c(chip, out, directory, name, tag, state, slot, version=0, autostart=N
     mod_dir = os.path.join(ROOT, "modules", directory)
     inc = [os.path.join(mod_dir, "port")]
     srcs = []
+    extra_defs = []
     berry = os.path.join(mod_dir, "berry")
     if os.path.isdir(berry):
         inc.append(berry)
         for f in sorted(os.listdir(berry)):
             if f.endswith(".c") and f[:-2] not in SKIP:
                 srcs.append((os.path.join(berry, f), True))
+    wasm3 = os.path.join(mod_dir, "wasm3")
+    if os.path.isdir(wasm3):
+        inc.append(wasm3)
+        extra_defs = [f"-D{d}" for d in W3_DEFS]
+        if "xtensa" in tool:     # its gcc has no sibling-call pattern: `musttail` is an error there, plain calls are correct
+            extra_defs.append("-DM3_HAS_TAIL_CALL=0")
+        for f in sorted(os.listdir(wasm3)):
+            if f.endswith(".c") and f[:-2] in W3_FILES:
+                srcs.append((os.path.join(wasm3, f), True))
     srcs.append((os.path.join(mod_dir, f"{directory}.c"), False))
+    srcs.append((os.path.join(ROOT, "modules", "common", "xip_native_libc.c"), False))
     port = os.path.join(mod_dir, "port")
     for f in sorted(os.listdir(port)):
         if f.endswith(".c"):
             srcs.append((os.path.join(port, f), False))
 
     with tempfile.TemporaryDirectory() as tmp:
+        extra = extra_defs
         # no small-data param for the cross gccs: riscv parks small constants in .srodata, which
         # its module linker script merges into .rodata; xtensa gcc emits no such sections.
-        extra = []
         objs = compile_c(tool, srcs, os.path.join(tmp, "obj"), inc, f"-DXIP_CELL_ADDR={hex(static_addr)}", extra)
         elf = os.path.join(tmp, "module.elf")
         c_link(tool, objs, elf, script, window + dmod.HEADER_SIZE, data_window + dmod.HEADER_SIZE, cfg["fixed"])

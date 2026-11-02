@@ -13,6 +13,10 @@
 
 static const char *TAG = "main";
 
+/* Safe mode (the runtime crashed in a loop and Stage2 had no older one to boot): the modules that still autostart. Flash management stays so
+ * a good runtime can be uploaded; Wi-Fi in station mode comes from xip_wifi_boot_network. No NAN, no BLE, no classifier. */
+static const char *const SAFE_MODULES[] = {"flash", NULL};
+
 void app_main(void)
 {
     xip_heap_checkpoint("app-entry");
@@ -34,18 +38,22 @@ void app_main(void)
     (void)xip_ble_install();
     /* Native relay classification remains enabled; endpoint modules explicitly
      * attach their packet owner. No demonstration CIDs or consuming callbacks. */
-    xip_quic_classifier_enable(true);
+    /* Safe mode is known only after the loader scans; the loader's init does not start anything, so it is asked before the rest starts. */
+    const xip_loader_config_t cfg = {.partition = "xip", .default_stack_bytes = 8192, .safe_modules = SAFE_MODULES};
+    ESP_ERROR_CHECK(xip_loader_init(&cfg));
+    const bool safe = xip_loader_safe_mode();
+    if (!safe) xip_quic_classifier_enable(true);
     /* The persistent setting ble.boot (module ble, method mode): 1 starts the service at boot. With RELEASE_WHEN_OFF a boot without it
      * gives the controller memory back to the heap (BLE then needs a reboot with the setting on). */
     {
         uint8_t v[4] = {0};
-        xip_ble_configure_boot(xip_wifi_nv("ble.boot", 8, NULL, 0, v, sizeof v) > 0 && v[0] == '1');
+        xip_ble_configure_boot(!safe && xip_wifi_nv("ble.boot", 8, NULL, 0, v, sizeof v) > 0 && v[0] == '1');
     }
-    const xip_loader_config_t cfg = {.partition = "data", .default_stack_bytes = 8192};
-    ESP_ERROR_CHECK(xip_loader_init(&cfg));
     /* What runs at boot is what is installed and asks for it in its manifest (the console module, if it is installed). */
     xip_heap_checkpoint("pre-network");
     xip_wifi_boot_network();
     xip_loader_autostart();
+    /* A runtime that stays up for a minute is settled: the older image (still there while this one is on trial) is erased. */
+    if (!safe) xip_loader_settle_after(60000);
     ESP_LOGW(TAG, "ready");
 }

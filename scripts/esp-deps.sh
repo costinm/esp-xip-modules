@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install ESP-IDF v6.0.2 and the esp32/esp32s3/esp32c6 toolchains under target/,
-# and the host tools (flake.nix) as nix out-links under target/nix/ (env.sh puts their bin/ on PATH).
+# and the host tools (flake.nix: `esp-dev`) as the nix out-link $ESP_DEV (default $HOME/opt/esp-dev; env.sh puts its bin/ on PATH).
 #   scripts/esp-deps.sh host         only the host tools
 #   scripts/esp-deps.sh dmesh        also the DMesh and ssh-mesh tools (dmesh-cli, lmesh, mesh, ...)
 set -euo pipefail
@@ -8,7 +8,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO_ROOT/env.sh"
 ESP_ROOT="$XIP_ESP_ROOT"
-DEPS="$REPO_ROOT/target/nix/deps"
+DEPS="$ESP_DEV"
 IDF_VERSION="v6.0.2"
 JOBS="${ESP_IDF_GIT_JOBS:-8}"
 export NIX_CONFIG="${NIX_CONFIG:-experimental-features = nix-command flakes}"
@@ -24,10 +24,10 @@ if command -v nix >/dev/null 2>&1; then
         [[ -d ${SSH_MESH_DIR:=/ws/ssh-mesh} ]] && over+=(--override-input ssh-mesh "git+file://$(readlink -f "$SSH_MESH_DIR")")
     fi
     # the flake of this checkout (tracked files; a `path:` reference would copy the whole target/ tree into the store)
-    nix build "${over[@]}" --out-link "$DEPS" "$REPO_ROOT#deps"
+    nix build "${over[@]}" --out-link "$DEPS" "$REPO_ROOT#esp-dev"
     if [[ ${1:-} == dmesh ]]; then
-        nix build "${over[@]}" --out-link "$REPO_ROOT/target/nix/dmesh" "$REPO_ROOT#dmesh"
-        echo "DMesh tools ready: $REPO_ROOT/target/nix/dmesh/bin (dmesh-cli, lmesh, mesh, ...)"
+        nix build "${over[@]}" --out-link "$ESP_DEV-dmesh" "$REPO_ROOT#dmesh"
+        echo "DMesh tools ready: $ESP_DEV-dmesh/bin (dmesh-cli, lmesh, mesh, ...)"
         exit 0
     fi
 elif [[ ! -x "$DEPS/bin/cmake" ]]; then

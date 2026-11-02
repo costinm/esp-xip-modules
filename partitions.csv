@@ -1,7 +1,6 @@
-# Common build-time layout for the C runtime in either app partition.
-# Deployment keeps Stage2's installed table. The build script validates the
-# selected destination and reserves the loader's final 8 KiB for its state log.
-nvs,        data, nvs,     0x9000,   0x6000,
+# Common build-time layout for the C runtime (see boot/partitions/4mb.csv: one "xip" partition, the runtime at its start).
+# Deployment keeps Stage2's installed table. The build script validates the selected destination; the size here is the 4 MB board's.
+nvs,        data, nvs,     0x9000,   0x4000,
+wlstate,    data, 0x40,    0xd000,   0x2000,
 phy_init,   data, phy,     0xf000,   0x1000,
-loader,     app,  factory, 0x10000,  0xe0000,
-main,       app,  ota_0,   0xf0000,  0x190000,
+xip,        app,  factory, 0x10000,  0x3f0000,

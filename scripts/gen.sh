@@ -19,7 +19,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # mesh-api-gen comes from the ssh-mesh flake (the `deps` profile puts it on PATH); the function-table passes below need a version with
 # --vtable-conf (a checkout of ssh-mesh: XIP_DEV_BIN=/ws/ssh-mesh/target/debug . ./env.sh).
 gen=$(command -v mesh-api-gen || true)
-[ -n "$gen" ] || { echo "mesh-api-gen not found: run scripts/esp-deps.sh (nix build --out-link target/nix/deps) and . ./env.sh" >&2; exit 1; }
+[ -n "$gen" ] || { echo "mesh-api-gen not found: run scripts/esp-deps.sh (nix build .#esp-dev --out-link \$ESP_DEV) and . ./env.sh" >&2; exit 1; }
 "$gen" --help | grep -q -- --vtable-conf || { echo "$gen is too old (no --vtable-conf): build ssh-mesh's crates/mesh-api-gen and put it first with XIP_DEV_BIN" >&2; exit 1; }
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' || { echo "python3 $(python3 --version) is too old: use the one of the flake (scripts/esp-deps.sh, then . ./env.sh)" >&2; exit 1; }
 

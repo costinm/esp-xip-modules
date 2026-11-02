@@ -26,12 +26,14 @@ import dmod  # noqa: E402
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
 # Where each chip runs modules. Must match components/xip_loader/src/loader.c (tests/test_tools.py checks).
+# `slots`: link windows a chip has (the loader's XIP_WINDOW_BYTES); the RAM cells are dmod.STATIC_SLOTS for all.
+# esp32c6 and esp32s3 map modules at the same code address; their data addresses differ (the S3 reads data on its own bus).
 CHIPS = {
-    "esp32":   dict(prefix="xtensa-esp32-elf", fixed=True, code_base=0x40300000, data_base=0x3F700000, rust_target="xtensa-esp32-espidf"),
-    "esp32s3": dict(prefix="xtensa-esp32s3-elf", fixed=True, code_base=0x43000000, data_base=0x3D000000, rust_target="xtensa-esp32s3-espidf"),
+    "esp32":   dict(slots=27, prefix="xtensa-esp32-elf", fixed=True, code_base=0x40250000, data_base=0x3F650000, rust_target="xtensa-esp32-espidf"),
+    "esp32s3": dict(slots=64, prefix="xtensa-esp32s3-elf", fixed=True, code_base=0x42400000, data_base=0x3C400000, rust_target="xtensa-esp32s3-espidf"),
     # C6 has one linear flash region that both buses read (SOC_IRAM0/DRAM0 share the vaddrs), so the
     # data window is the code window; it starts above the pages Stage2 maps for Main (<= 0x42280000).
-    "esp32c6": dict(prefix="riscv32-esp-elf", fixed=True, code_base=0x42400000, data_base=0x42400000,
+    "esp32c6": dict(slots=64, prefix="riscv32-esp-elf", fixed=True, code_base=0x42400000, data_base=0x42400000,
                     rust_target="riscv32imac-unknown-none-elf"),
 }
 
@@ -310,8 +312,8 @@ def build(chip, out, name=None, tag=None, slot=0, stack=8192, state=0, keep_elf=
     module_key = os.path.basename(os.path.dirname(cargo[0])) if cargo else ""
     layout = read_slot_layout()
     declared, span = layout.get(module_key, (slot, 1))
-    if slot + span > dmod.STATIC_SLOTS:
-        sys.exit("module span exceeds the virtual window")
+    if slot + span > min(dmod.STATIC_SLOTS, cfg["slots"]):
+        sys.exit(f"module span exceeds the virtual window of {chip} ({cfg['slots']} slots)")
     for other, (start, count) in layout.items():
         if other != module_key and slot < start + count and start < slot + span:
             sys.exit(f"module slot range overlaps {other}: {slot}..{slot + span - 1}")

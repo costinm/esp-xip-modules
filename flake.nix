@@ -49,10 +49,12 @@
                 --set XIP_TOOL_ROOT $out/share/esp-xip-modules
             '';
           };
-          # Host tools only. ESP-IDF and its cross toolchains (and the esp Rust toolchain) are fetched by
-          # scripts/esp-deps.sh into target/.
-          deps = pkgs.symlinkJoin {
-            name = "esp-xip-modules-deps";
+          # The C and ESP tools: the host side of building firmware (cmake, ninja, python, cc, cbindgen, espup, espflash, mesh-api-gen,
+          # ...). ESP-IDF and its cross toolchains (and the esp Rust toolchain) are not nix packages: scripts/esp-deps.sh installs them under
+          # XIP_ESP_ROOT. The Rust/wasm tools are the separate `wasm-dev`.
+          #   nix build .#esp-dev --out-link ${ESP_DEV:-$HOME/opt/esp-dev}      (scripts/esp-deps.sh does this; env.sh puts its bin/ on PATH)
+          esp-dev = pkgs.symlinkJoin {
+            name = "esp-xip-modules-esp-dev";
             paths = [
               self.packages.${system}.module-tools
             ] ++ pkgs.lib.optional (ssh-mesh.packages ? ${system}) ssh-mesh.packages.${system}.mesh-api-gen ++ [
@@ -116,14 +118,15 @@
           };
           # The DMesh tools: dmesh-cli, DMesh's other host tools (lmesh, mesh-tun, dmeshtui) and ssh-mesh's commands
           # (the `mesh` client in particular). Kept out of `deps` because they build the DMesh and ssh-mesh workspaces.
-          # `scripts/esp-deps.sh dmesh` = `nix build --out-link target/nix/dmesh`; env.sh puts its bin/ on PATH.
+          # `scripts/esp-deps.sh dmesh` = `nix build .#dmesh --out-link ${ESP_DEV:-$HOME/opt/esp-dev}-dmesh`; env.sh puts its bin/ on PATH.
           dmesh = pkgs.symlinkJoin {
             name = "xip-dmesh";
             paths = [ self.packages.${system}.dmesh-cli dmesh.packages.${system}.dmesh ssh-mesh.packages.${system}.ssh-mesh ];
           };
           # Tools to compile the modules (modules/*) to WebAssembly and nothing else: Rust (nightly, as the modules use
           # allocator_api and RUSTC_BOOTSTRAP) with the wasm32 targets and rust-src (rust-lld is part of it), plus binaryen
-          # (wasm-opt), wabt, wasm-tools and wasmtime to optimize, inspect and run the result.
+          # (wasm-opt), wabt, wasm-tools and wasmtime to optimize, inspect and run the result (and gcc for the C of a host build).
+          # Separate from `esp-dev`: that one is ESP-IDF and C.
           # modules/WASM.md:  nix build .#wasm-dev --out-link ${WASM_DEV:-$HOME/opt/wasm-dev}
           wasm-dev =
             let
@@ -137,7 +140,9 @@
               name = "xip-wasm-dev";
               paths = [ rust rpkgs.binaryen rpkgs.wabt rpkgs.wasm-tools rpkgs.wasmtime rpkgs.gcc ];
             };
-          default = self.packages.${system}.deps;
+          # the old name of esp-dev
+          deps = self.packages.${system}.esp-dev;
+          default = self.packages.${system}.esp-dev;
         }
       );
 
@@ -148,7 +153,7 @@
         in
         {
           default = pkgs.mkShell {
-            packages = [ self.packages.${system}.deps ];
+            packages = [ self.packages.${system}.esp-dev ];
             shellHook = ''
               [ -f ./env.sh ] && . ./env.sh
             '';

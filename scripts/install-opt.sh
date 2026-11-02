@@ -6,8 +6,9 @@
 #   scripts/install-opt.sh --lmesh    also $HOME/opt/lmesh/etc/schemas/tools.json (the lmesh service's state directory: only that file)
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-out="$(readlink -f "$REPO_ROOT/target/nix/dmesh")"
-[[ -d $out/etc/schemas ]] || { echo "no $REPO_ROOT/target/nix/dmesh: run scripts/esp-deps.sh dmesh" >&2; exit 1; }
+. "$REPO_ROOT/env.sh"
+out="$(readlink -f "$ESP_DEV-dmesh")"
+[[ -d $out/etc/schemas ]] || { echo "no $ESP_DEV-dmesh: run scripts/esp-deps.sh dmesh" >&2; exit 1; }
 opt="${HOME}/opt"
 for dir in "$out"/etc/schemas/xip-*; do
     svc="$(basename "$dir")"

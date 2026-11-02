@@ -4,6 +4,10 @@
 #   scripts/build-host-modules.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# the wasm-dev out-link of the flake (nix build .#wasm-dev --out-link $WASM_DEV, modules/WASM.md): nightly rustc with the wasm32 targets, first on
+# PATH for this script only (the other Rust tests use the toolchain of env.sh)
+WASM_DEV=${WASM_DEV:-$HOME/opt/wasm-dev}
+[ -d "$WASM_DEV/bin" ] && PATH="$WASM_DEV/bin:$PATH"
 out=target/host-modules
 mkdir -p $out
 slots=${XIP_WASM_SLOTS:-8}

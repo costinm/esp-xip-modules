@@ -60,6 +60,12 @@ if [[ $what == c || $what == all ]]; then
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_loader/include \
         -o target/test_select tests/host/test_select.c components/xip_loader/src/xip_select.c
     target/test_select
+    # the runtime image rules shared by Stage2 and the loader (slots, versions, trial)
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I components/xip_loader/include -o target/test_image tests/host/test_image.c
+    target/test_image
+    # the extent scan shared by Stage2, the loader and (through the loader) mod_flash
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_loader/include -o target/test_extent tests/host/test_extent.c
+    target/test_extent
     # the packet pool
     gcc -Wall -Wextra -fsanitize=address,undefined -g -I components/xip_runtime/include -o target/test_pool tests/host/test_pool.c \
         components/xip_runtime/src/xip_pool.c -lpthread

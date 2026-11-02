@@ -25,14 +25,14 @@ def read(*path):
 class Abi(unittest.TestCase):
     def test_python_and_c_agree_on_the_image_header(self):
         header = read("include", "xip.h")
-        self.assertIn(f"#define XIP_DMOD_MAGIC {dmod.MAGIC}", header)
+        self.assertIn(f"#define XIP_DMOD_KIND_MODULE {dmod.KIND}", header)
         self.assertIn(f"#define XIP_ABI_VERSION {dmod.ABI_VERSION}", header)
         self.assertEqual(dmod._FMT.size, 64)
 
 
 class Dmod(unittest.TestCase):
     def test_roundtrip(self):
-        image = dmod.pack(b"\x01\x02\x03\x04" * 20, 0x44, 7, code_vma=0x40300000, data_vma=0x3F700000, stack_bytes=8192,
+        image = dmod.pack(b"\x01\x02\x03\x04" * 20, 0x44, 7, code_vma=0x40250000, data_vma=0x3F650000, stack_bytes=8192,
                           required_features=3, fixed_vma=True, static_addr=dmod.STATIC_BASES["esp32"])
         h = dmod.unpack(image)
         self.assertEqual((h["tag"], h["entry_offset"], h["image_size"], h["flags"]), (7, 0x44, 64 + 80, 3))
@@ -61,8 +61,8 @@ class Dmod(unittest.TestCase):
     def test_platform_cell_derivation_and_slot_limit(self):
         for chip, base in dmod.STATIC_BASES.items():
             self.assertEqual(mkmod.static_address(chip, 0), base)
-            self.assertEqual(mkmod.static_address(chip, 15), base + 15 * 16)
-            for bad_slot in (-1, 16, 0x10000):
+            self.assertEqual(mkmod.static_address(chip, 63), base + 63 * 16)
+            for bad_slot in (-1, 64, 0x10000):
                 with self.assertRaises(ValueError):
                     mkmod.static_address(chip, bad_slot)
 
@@ -73,7 +73,7 @@ class Dmod(unittest.TestCase):
         for directory in glob.glob(os.path.join(ROOT, "modules", "mod_*")):
             self.assertIn(os.path.basename(directory), slots)
         with tempfile.TemporaryDirectory() as d:
-            for text in ("a 1\nb 1\n", "a 1\na 2\n", "a 16\n", "a\n"):
+            for text in ("a 1\nb 1\n", "a 1\na 2\n", "a 64\n", "a\n"):
                 path = os.path.join(d, "SLOTS")
                 Path(path).write_text(text)
                 with self.assertRaises(ValueError):
@@ -139,7 +139,7 @@ class Slots(unittest.TestCase):
             with open(path, "w") as f:
                 f.write("nan 7 2\nother 9\n")
             self.assertEqual(mkmod.read_slot_layout(path), {"nan": (7, 2), "other": (9, 1)})
-            for bad in ("nan 7 2\nother 8\n", "nan 15 2\n", "nan 7 0\n"):
+            for bad in ("nan 7 2\nother 8\n", "nan 63 2\n", "nan 7 0\n"):
                 with open(path, "w") as f:
                     f.write(bad)
                 with self.assertRaises(ValueError):
