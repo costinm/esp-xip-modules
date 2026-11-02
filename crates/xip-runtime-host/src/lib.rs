@@ -21,6 +21,7 @@ mod hosted;
 pub mod quic;
 mod quic_udp;
 mod crypto;
+mod native;
 mod wifi;
 mod power;
 

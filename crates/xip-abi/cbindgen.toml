@@ -45,6 +45,7 @@ _Static_assert(sizeof(xip_stream_packet) == 12, "xip_stream_packet layout");
 _Static_assert(sizeof(xip_call) == 88, "xip_call layout");
 _Static_assert(sizeof(xip_identity) == 16, "xip_identity layout");
 _Static_assert(sizeof(xip_crypto) == 36, "xip_crypto layout");
+_Static_assert(sizeof(xip_native) == 132, "xip_native layout");
 _Static_assert(sizeof(xip_power) == 44, "xip_power layout");
 _Static_assert(sizeof(xip_host) == 172, "xip_host layout");
 #endif
@@ -63,7 +64,7 @@ int xip_handle(const xip_host *host, void *state, const xip_call *call);
 """
 
 [export]
-include = ["System", "SystemHeapInfo", "SystemHeapDump", "Lora", "Nan", "NanTransport", "Serial", "Stream", "StreamPacket", "Quic", "RelayHop", "RelayRoute", "RelayStats", "PacketPoolInfo", "Identity", "Crypto", "SerialRxBuffer", "SerialPacketTx", "SerialPacketClient", "Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware", "Ble", "BleStart", "BleScan", "BleConnect", "BleListen", "BleMode", "BleStatus", "BleScanResults", "Nimble", "NimbleFilter", "NimbleStart", "NimbleScan", "NimbleConnect"]
+include = ["System", "SystemHeapInfo", "SystemHeapDump", "Lora", "Nan", "NanTransport", "Serial", "Stream", "StreamPacket", "Quic", "RelayHop", "RelayRoute", "RelayStats", "PacketPoolInfo", "Identity", "Crypto", "Native", "SerialRxBuffer", "SerialPacketTx", "SerialPacketClient", "Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware", "Ble", "BleStart", "BleScan", "BleConnect", "BleListen", "BleMode", "BleStatus", "BleScanResults", "Nimble", "NimbleFilter", "NimbleStart", "NimbleScan", "NimbleConnect"]
 prefix = "xip_"
 
 [export.rename]
@@ -83,6 +84,7 @@ RelayStats = "relay_stats"
 PacketPoolInfo = "packet_pool_info"
 Identity = "identity"
 Crypto = "crypto"
+Native = "native"
 SerialRxBuffer = "serial_rx_buffer"
 SerialPacketTx = "serial_packet_tx"
 SerialPacketClient = "serial_packet_client"

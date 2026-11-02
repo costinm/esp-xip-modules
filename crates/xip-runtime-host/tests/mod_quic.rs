@@ -38,3 +38,25 @@ fn host_provides_crypto_and_identity_to_native_handlers() {
         assert!(!unsafe { get(host.user, name.as_ptr()) }.is_null(), "{name:?}");
     }
 }
+
+#[test]
+fn host_provides_the_native_c_library_to_native_handlers() {
+    use xip_abi::{Native, NATIVE_VERSION};
+    let rt = Runtime::default();
+    let m = rt.add_module(module("mod_rtest"), 64).unwrap();
+    let host = m.host();
+    let p = unsafe { (host.get_component.unwrap())(host.user, c"native".as_ptr()) }.cast::<Native>();
+    let t = unsafe { p.as_ref() }.expect("native table");
+    assert_eq!((t.version, t.size as usize), (NATIVE_VERSION, std::mem::size_of::<Native>()));
+    unsafe {
+        assert_eq!((t.strlen.unwrap())(c"xip".as_ptr()), 3);
+        assert_eq!((t.strcmp.unwrap())(c"a".as_ptr(), c"b".as_ptr()).signum(), -1);
+        let mut buf = [0u8; 8];
+        (t.memcpy.unwrap())(buf.as_mut_ptr().cast(), b"abc".as_ptr().cast(), 3);
+        assert_eq!(&buf[..4], b"abc\0");
+        assert_eq!((t.floor.unwrap())(-1.5), -2.0);
+        assert_eq!((t.sqrtf.unwrap())(16.0), 4.0);
+        assert_eq!((t.strtol.unwrap())(c"-42x".as_ptr(), std::ptr::null_mut(), 10), -42);
+    }
+    assert!(t.snprintf.is_none(), "variadic: the process libc is used");
+}

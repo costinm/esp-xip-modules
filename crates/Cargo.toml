@@ -3,7 +3,7 @@
 # Nothing that needs the ESP toolchain or esp-idf-sys unconditionally belongs here: firmware (partitions, startup, transport glue) is
 # under fw/, the no_std modules under modules/ (each its own project with its own target); they depend on these crates by path.
 [workspace]
-members = ["berry-c", "xip-abi", "xip-psa", "xip-runtime-esp", "xip-runtime-host", "xip-wasm", "dmesh-cli"]
+members = ["berry-c", "wasm3-c", "xip-abi", "xip-psa", "xip-runtime-esp", "xip-runtime-host", "xip-wasm", "dmesh-cli"]
 resolver = "2"
 
 # Local cross-repository protocol development; refresh Git pins after publication.

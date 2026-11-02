@@ -91,6 +91,8 @@ mod crypto;
 pub use crypto::*;
 mod identity;
 pub use identity::*;
+mod native;
+pub use native::*;
 
 /// The host calls of a module compiled to WebAssembly (`modules/WASM.md`): named imports of the module `xip`, in the one
 /// address space the host and all modules share. Only the calls listed here exist so far; the rest answer `ERR_UNSUPPORTED`.

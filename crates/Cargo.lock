@@ -2363,6 +2363,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm3-c"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "xip-abi",
+]
+
+[[package]]
 name = "wasmi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2655,6 +2663,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "wasm3-c",
+ "wat",
  "xip-abi",
  "xip-psa",
  "xip-wasm",

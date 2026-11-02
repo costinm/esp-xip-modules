@@ -613,6 +613,10 @@ unsafe extern "C" fn h_get_component(user: *mut c_void, name: *const c_char) -> 
     if name == "identity" {
         return crate::crypto::identity_component().cast();
     }
+    // the C library for natively linked handlers (a wasm module reaches none of it)
+    if name == "native" {
+        return crate::native::component().cast();
+    }
     if name == "link" {
         return crate::link::component().cast();
     }

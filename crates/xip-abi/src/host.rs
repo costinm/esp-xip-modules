@@ -137,8 +137,16 @@ pub const SOCKET_EVENT_CLOSED: u32 = 6;
 pub const SOCKET_EVENT_WRITE_DONE: u32 = 7;
 
 // DMOD: Module image header.
-/// 'DMOD' little endian.
-pub const DMOD_MAGIC: u32 = 0x444f4d44;
+/// First byte of every extent of the xip partition (the scan reads 8 bytes per 64 KiB page): a module image.
+pub const DMOD_KIND_MODULE: u8 = b'M';
+/// A data extent (the flash filesystem of `mod_flash`): the same 8-byte lead as a module, `image_size` is its length.
+pub const EXTENT_DATA: u8 = b'D';
+/// A runtime image is an ESP image: its first byte is the ESP magic.
+pub const EXTENT_RUNTIME: u8 = 0xe9;
+/// A page that was never written, or was erased again.
+pub const EXTENT_EMPTY: u8 = 0xff;
+/// A deleted extent: the first byte of each of its pages is programmed to zero (no erase), a later pass erases the pages.
+pub const EXTENT_DELETED: u8 = 0x00;
 pub const DMOD_HEADER_SIZE: u32 = 64;
 /// Linked at code_vma/data_vma (Xtensa); otherwise position independent (RISC-V).
 pub const DMOD_FLAG_FIXED_VMA: u32 = 1;
@@ -146,8 +154,9 @@ pub const DMOD_FLAG_FIXED_VMA: u32 = 1;
 pub const DMOD_FLAG_STATIC_RAM: u32 = 2;
 /// Bytes reserved for each module's call context (currently only a Host pointer).
 pub const DMOD_STATIC_SLOT_BYTES: u32 = 16;
-/// Cells in the platform's reserved module-context arena.
-pub const DMOD_STATIC_SLOTS: u32 = 16;
+/// Cells in the platform's reserved module-context arena: the most slots any chip has. The link windows can be fewer
+/// (the classic ESP32 maps only 16 of 64 KiB, see `xip_loader`'s `XIP_WINDOW_BYTES`).
+pub const DMOD_STATIC_SLOTS: u32 = 64;
 pub const DMOD_STATIC_ESP32_BASE: u32 = 0x3ffdd000;
 pub const DMOD_STATIC_ESP32C6_BASE: u32 = 0x40860000;
 pub const DMOD_STATIC_ESP32S3_BASE: u32 = 0x3fcd0000;
@@ -224,16 +233,18 @@ const _: () = assert!(core::mem::size_of::<Call>() == 88);
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct DmodHeader {
-    /// `DMOD_MAGIC`.
-    pub magic: u32,
+    /// `DMOD_KIND_MODULE`.
+    pub kind: u8,
     /// `ABI_VERSION` the module was built for.
-    pub abi_version: u16,
+    pub abi_version: u8,
     /// `DMOD_HEADER_SIZE`.
     pub header_size: u16,
+    /// Header plus code and read-only data (plus the manifest): the length of the extent, at offset 4 so that a scan which reads 8 bytes finds it.
+    pub image_size: u32,
     /// Offset of `xip_handle` from the start of the image (includes the header).
     pub entry_offset: u32,
-    /// Header plus code and read-only data.
-    pub image_size: u32,
+    /// Zero.
+    pub reserved1: u32,
     /// Module tag; must match the slot the image is installed in.
     pub tag: u16,
     /// Zero.

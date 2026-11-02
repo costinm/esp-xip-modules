@@ -91,6 +91,10 @@ mod context {
         core::ptr::write_volatile(ADDRESS as *mut usize, new);
         old
     }
+    /// Word 1 of the slot: the `native` table, written once by the runtime (see `xip_module_ram.c`).
+    pub unsafe fn native() -> usize {
+        core::ptr::read_volatile((ADDRESS + core::mem::size_of::<usize>()) as *const usize)
+    }
 }
 
 // Native shared modules have ordinary writable storage. The dispatcher serializes
@@ -101,6 +105,14 @@ mod context {
     static HOST: AtomicUsize = AtomicUsize::new(0);
     pub unsafe fn get() -> usize { HOST.load(Ordering::SeqCst) }
     pub unsafe fn swap(new: usize) -> usize { HOST.swap(new, Ordering::SeqCst) }
+    pub unsafe fn native() -> usize { 0 }
+}
+
+/// The runtime's `native` C-library table, from word 1 of this image's RAM slot: the same word a C module reads.
+/// `None` off the device, or where the runtime wrote none; shared and wasm builds ask `get_component("native")` instead.
+#[cfg(feature = "global-alloc")]
+pub fn native() -> Option<&'static crate::Native> {
+    unsafe { (context::native() as *const crate::Native).as_ref() }
 }
 
 /// Install `host` in this image's allocator cell, returning its previous value.
