@@ -2,13 +2,15 @@
 /* Runs module images from flash. A module is not a task: its image stays mapped
  * while the host's worker calls its handler.
  *
- * The loader scans the module partition: every flash page (XIP_SLOT_ALIGN) that starts with an image header is an image of a module, named by its
+ * The loader scans the module pages of the xip partition: every flash page (XIP_SLOT_ALIGN) that starts with an image header is an image of a module, named by its
  * manifest (key 1), versioned by it (key 8, a plain number, absent = 0) and numbered by its header (the component). Per name the highest version
  * is the module (the slot list); older ones are shadowed (xip_loader_shadow). Nobody tells it where a module lives or what it is called. It maps an
  * image, runs it on the host and stops it; it has no network, crypto, or image installer. It knows no module by name.
  * Mapping, tasks and the host table are the part that depends on the chip; the checks before a
  * module is mapped are in xip_check.h. */
 #pragma once
+
+#include "xip_extent.h"   /* the extent map: runtimes and modules on the pages of the xip partition */
 
 #include <stdbool.h>
 #include "esp_err.h"
@@ -25,7 +27,7 @@ extern "C" {
 typedef struct {
     const char *name;     /* from the manifest of the image (key 1), or "@<offset>" without one */
     uint16_t tag;         /* the component number: the tag in the image header */
-    uint32_t offset;      /* in the module partition, multiple of XIP_SLOT_ALIGN */
+    uint32_t offset;      /* flash address (from the start of the flash), multiple of XIP_SLOT_ALIGN: the pages of the xip partition after the runtime reserve */
     uint32_t size;        /* the physical flash pages the image spans */
     uint32_t version;     /* manifest key 8: higher is newer; 0 without one */
 } xip_slot_t;
@@ -42,8 +44,9 @@ typedef struct {
 } xip_shadow_t;
 
 typedef struct {
-    const char *partition;          /* data partition holding the modules, e.g. "data" */
+    const char *partition;          /* the partition that starts with the runtime and holds the modules after XIP_RUNTIME_RESERVE, i.e. "xip" */
     uint32_t default_stack_bytes;   /* for an image that asks for none */
+    const char *const *safe_modules;   /* NULL-terminated names that autostart in safe mode (none when NULL) */
 } xip_loader_config_t;
 
 /* Loader errors (negative, distinct from XIP_ERR_*). */
@@ -98,6 +101,27 @@ const xip_shadow_t *xip_loader_shadow(int index);
 /* Start the image of `name` with exactly `version`, active or shadowed. A shadowed version replaces the active one in the slot list until the
  * next rescan, and only when the active one is not running. XIP_ERR_NOTFOUND when no such version is installed. */
 int xip_loader_start_version(const uint8_t *name, size_t name_len, uint32_t version, const uint8_t *request, size_t request_len);
+
+/* The two runtimes (slot A at the start of xip, slot B in its last 1.5 MiB): Stage2 boots the newer, which is on trial while the older still
+ * exists. A runtime that has stayed up calls this (or xip_loader_settle_after once at start) to erase the older one; its pages become module
+ * space and a rescan follows. 1: erased, 0: nothing to do (one runtime, or this one is the older). */
+int xip_loader_settle(void);
+int xip_loader_settle_after(uint32_t delay_ms);   /* once, on a timer: for the application's start */
+
+#define XIP_LOADER_RUNTIMES_MAX 4
+
+/* The extent map of the last scan: every runtime image and every module image (active and shadowed) of the xip partition, in address order.
+ * The pages between them are free (or dirty: erase before writing). This is what mod_flash allocates from. Returns the number stored. */
+size_t xip_loader_extents(xip_extent_t *out, size_t max);
+
+/* After a rollback (Stage2 booted this older runtime because the newer crashed, reason CRASH in RTC) delete the failed newer runtime: the first
+ * byte of each of its pages is programmed to 0x00 (no erase). Called by xip_loader_init; 1: deleted, 0: nothing to do. */
+int xip_loader_reap(void);
+
+/* Safe mode: Stage2 reported a crash loop (RTC reason CRASH) and there was no older runtime to fall back to, so this runtime is the one that
+ * crashes. xip_loader_autostart then starts only the modules named in the config's safe_modules; the application should also leave out whatever
+ * else it starts on its own. The loop is bounded: a reset after the quick window boots normally again. */
+bool xip_loader_safe_mode(void);
 
 int xip_loader_find(const char *name);     /* module index or -1 */
 const xip_slot_t *xip_loader_slot(int slot);

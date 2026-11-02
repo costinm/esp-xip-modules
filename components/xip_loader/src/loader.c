@@ -17,6 +17,10 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_flash.h"
+#include "esp_app_desc.h"
+#include "xip_extent.h"
+#include "esp_wifi_loader_rtc.h"
 #include "internal.h"
 #include "xip_module_ram.h"
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32C6
@@ -35,17 +39,26 @@
 static const char *TAG = "xip-loader";
 xip_loader_t em;
 
+/* Module offsets are flash addresses (from the start of the flash): the modules live in more than one partition. */
+static esp_err_t flash_read(uint32_t addr, void *buf, size_t len)
+{
+    return esp_flash_read(NULL, buf, addr, len);
+}
+
 #if CONFIG_IDF_TARGET_ESP32S3
 #define XIP_FIXED 1
-#define XIP_CODE_BASE 0x43000000u
-#define XIP_DATA_BASE 0x3d000000u
+/* Same code base as the C6: the flash is mapped at 0x42000000.. (32 MiB) on the instruction bus and, byte-addressable, at 0x3c000000..
+ * on the data bus (the same offset 0x400000 in both). Main's own pages below must stay under that offset. */
+#define XIP_CODE_BASE 0x42400000u
+#define XIP_DATA_BASE 0x3c400000u
 #define XIP_WINDOW_BYTES (XIP_DMOD_STATIC_SLOTS * XIP_DMOD_WINDOW_SLOT_BYTES)
 #elif CONFIG_IDF_TARGET_ESP32
 #define XIP_FIXED 1
-/* Above Main's own IROM (0x400d0000..) and DROM. */
-#define XIP_CODE_BASE 0x40300000u
-#define XIP_DATA_BASE 0x3f700000u
-#define XIP_WINDOW_BYTES (XIP_DMOD_STATIC_SLOTS * XIP_DMOD_WINDOW_SLOT_BYTES)
+/* Above the runtime's own IROM (0x400d0000.. + XIP_RUNTIME_RESERVE 1.5 MiB = 0x40250000) and DROM: the runtime must stay under the reserve
+ * (tools/partition_layout.py checks main.bin). The windows run to SOC_IROM_HIGH (0x40400000) and SOC_DROM_HIGH (0x3f800000): 27 of them. */
+#define XIP_CODE_BASE 0x40250000u
+#define XIP_DATA_BASE 0x3f650000u
+#define XIP_WINDOW_BYTES (27u * XIP_DMOD_WINDOW_SLOT_BYTES)
 #elif CONFIG_IDF_TARGET_ESP32C6
 #define XIP_FIXED 1
 /* One linear flash region serves both buses (SOC_IRAM0/DRAM0 share the vaddr range, 64 KiB MMU pages),
@@ -77,7 +90,7 @@ xip_slot_rules_t xip_rules(int slot)
 
 esp_err_t xip_read_header(int slot, xip_dmod_header *h)
 {
-    return esp_partition_read(em.part, em.slots_found[slot].offset, h, sizeof(*h));
+    return flash_read(em.slots_found[slot].offset, h, sizeof(*h));
 }
 
 #if XIP_FIXED
@@ -122,7 +135,7 @@ static uint32_t mmu_id(void)
 static esp_err_t map_fixed(int slot, const xip_dmod_header *h, fixed_map_t *m)
 {
     const uint32_t id = mmu_id(), page = mmu_hal_pages_to_bytes(id, 1);
-    const uint32_t paddr = em.part->address + em.slots_found[slot].offset;
+    const uint32_t paddr = em.slots_found[slot].offset;
     const uint32_t rounded = ((h->image_size + page - 1) / page) * page;
     if (page == 0 || paddr % page || h->code_vma % page || h->data_vma % page || rounded > em.slots_found[slot].size)
         return ESP_ERR_INVALID_ARG;
@@ -169,8 +182,17 @@ static esp_err_t map_image(int slot, const xip_dmod_header *h, xip_slot_state_t 
     *base = (const void *)(uintptr_t)st->fixed.code_vaddr;
     return ESP_OK;
 #else
-    if (esp_partition_mmap(em.part, em.slots_found[slot].offset, h->image_size, ESP_PARTITION_MMAP_INST, base,
-                           &st->mmap) != ESP_OK) { *base = NULL; return ESP_FAIL; }
+    const uint32_t addr = em.slots_found[slot].offset;
+    const esp_partition_t *p = NULL;
+    for (esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL); it && !p;
+         it = esp_partition_next(it)) {
+        const esp_partition_t *c = esp_partition_get(it);
+        if (addr >= c->address && addr - c->address < c->size) p = c;
+    }
+    if (!p || esp_partition_mmap(p, addr - p->address, h->image_size, ESP_PARTITION_MMAP_INST, base, &st->mmap) != ESP_OK) {
+        *base = NULL;
+        return ESP_FAIL;
+    }
     return ESP_OK;
 #endif
 }
@@ -204,6 +226,16 @@ static void instance_done(void *ctx, int result, const xip_stats_t *stats)
 }
 
 /* ---- public API ---- */
+/* ---- the extent map ---- */
+
+static int extent_read(void *ctx, uint32_t addr, void *buf, size_t len)
+{
+    (void)ctx;
+    return flash_read(addr, buf, len) == ESP_OK ? 0 : -1;
+}
+
+typedef struct { uint32_t start, end; } xip_region_t;   /* flash addresses, whole pages */
+
 /* The name (manifest key 1, or "@<hex offset>") and the version (key 8, 0 without one) of the image at `offset`. */
 static void ident_of(uint32_t offset, const xip_dmod_header *h, char *out, size_t cap, uint32_t *version)
 {
@@ -215,7 +247,7 @@ static void ident_of(uint32_t offset, const xip_dmod_header *h, char *out, size_
     if (!m) return;
     const uint8_t *text;
     size_t n;
-    if (esp_partition_read(em.part, offset + h->manifest_offset, m, h->manifest_size) == ESP_OK) {
+    if (flash_read(offset + h->manifest_offset, m, h->manifest_size) == ESP_OK) {
         int64_t v;
         if (xip_cbor_get_str(m, h->manifest_size, 1, XIP_CBOR_TEXT, &text, &n) == 0 && n > 0 && n < cap) {
             memcpy(out, text, n);
@@ -256,15 +288,25 @@ static int scan(void)
         return XIP_LOADER_ERR_NOMEM;
     }
     size_t n = 0;
-    for (uint32_t offset = 0; offset + XIP_SLOT_ALIGN <= em.part->size;) {
+    xip_extent_t runtimes[XIP_LOADER_RUNTIMES_MAX];
+    size_t nruntimes = 0;
+    {
+      const xip_region_t region = {em.part->address, em.part->address + em.part->size};
+      for (uint32_t offset = region.start; offset + XIP_SLOT_ALIGN <= region.end && n < em.capacity;) {
+        xip_extent_t ext;
+        if (xip_extent_probe(extent_read, NULL, offset, region.end - offset, &ext) && ext.kind != XIP_DMOD_KIND_MODULE) {
+            if (ext.kind == XIP_EXTENT_RUNTIME && nruntimes < XIP_LOADER_RUNTIMES_MAX) runtimes[nruntimes++] = ext;
+            offset += ext.size;                    /* a runtime or a data extent: its pages hold no module */
+            continue;
+        }
         xip_dmod_header h;
-        if (esp_partition_read(em.part, offset, &h, sizeof(h)) != ESP_OK || h.magic != XIP_DMOD_MAGIC || h.image_size <= XIP_DMOD_HEADER_SIZE) {
+        if (flash_read(offset, &h, sizeof(h)) != ESP_OK || h.kind != XIP_DMOD_KIND_MODULE || h.image_size <= XIP_DMOD_HEADER_SIZE) {
             offset += XIP_SLOT_ALIGN;
             continue;
         }
-        if (h.image_size > em.part->size - offset) { offset += XIP_SLOT_ALIGN; continue; }
+        if (h.image_size > region.end - offset) { offset += XIP_SLOT_ALIGN; continue; }
         const uint32_t size = ((h.image_size + XIP_SLOT_ALIGN - 1) / XIP_SLOT_ALIGN) * XIP_SLOT_ALIGN;
-        if (size > em.part->size - offset) {
+        if (size > region.end - offset) {
             ESP_LOGW(TAG, "image at 0x%x does not fit its room", (unsigned)offset);
             offset += XIP_SLOT_ALIGN;
             continue;
@@ -285,6 +327,7 @@ static int scan(void)
         sizes[n] = size;
         n++;
         offset += size;
+      }
     }
     xip_select(cand, n, choice);
 
@@ -325,6 +368,15 @@ static int scan(void)
     memcpy(em.shadows, shadows, ns * sizeof(*shadows));
     em.found = nf;
     em.shadow_found = ns;
+    memcpy(em.runtimes, runtimes, nruntimes * sizeof(*runtimes));
+    em.runtime_found = nruntimes;
+    size_t ne = 0;     /* the map: merge the runtimes into the modules, both in address order */
+    for (size_t i = 0, r = 0; i < n || r < nruntimes;) {
+        if (r < nruntimes && (i >= n || runtimes[r].offset < cand[i].page * XIP_SLOT_ALIGN)) em.extents[ne++] = runtimes[r++];
+        else { em.extents[ne++] = (xip_extent_t){.offset = cand[i].page * XIP_SLOT_ALIGN, .size = sizes[i], .kind = XIP_DMOD_KIND_MODULE,
+                                                  .version = cand[i].version}; i++; }
+    }
+    em.extent_found = ne;
     xSemaphoreGive(em.lock);
     free(cand); free(choice); free(found); free(shadows); free(tags); free(sizes);
     return (int)nf;
@@ -354,22 +406,32 @@ esp_err_t xip_loader_init(const xip_loader_config_t *cfg)
 {
     if (em.inited) return ESP_OK;
     if (!cfg || !cfg->partition) return ESP_ERR_INVALID_ARG;
-    em.part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, cfg->partition);
+    em.part = esp_partition_find_first(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, cfg->partition);
     if (!em.part) { ESP_LOGE(TAG, "partition \"%s\" not found", cfg->partition); return ESP_ERR_NOT_FOUND; }
-    em.capacity = em.part->size / XIP_SLOT_ALIGN;
+    uint32_t flash_size = 0;
+    if (esp_flash_get_size(NULL, &flash_size) != ESP_OK || flash_size < em.part->address + em.part->size) flash_size = em.part->address + em.part->size;
+    em.capacity = flash_size / XIP_SLOT_ALIGN;     /* pages are numbered from the start of the flash */
     em.slots = calloc(em.capacity ? em.capacity : 1, sizeof(*em.slots));
     em.slots_found = calloc(em.capacity ? em.capacity : 1, sizeof(*em.slots_found));
     em.names_found = calloc(em.capacity ? em.capacity : 1, sizeof(*em.names_found));
     em.shadows = calloc(em.capacity ? em.capacity : 1, sizeof(*em.shadows));
+    em.extents = calloc(em.capacity + XIP_LOADER_RUNTIMES_MAX, sizeof(*em.extents));
     em.lock = xSemaphoreCreateMutex();
-    if (!em.slots || !em.slots_found || !em.names_found || !em.shadows || !em.lock) return ESP_ERR_NO_MEM;
+    if (!em.slots || !em.slots_found || !em.names_found || !em.shadows || !em.extents || !em.lock) return ESP_ERR_NO_MEM;
     em.cfg = *cfg;
     if (!em.cfg.default_stack_bytes) em.cfg.default_stack_bytes = 8192;
     xip_module_ram_init();
     if (scan() < 0) return ESP_ERR_NO_MEM;
+    /* Stage2 saw a crash loop (reason CRASH). When it fell back to this older runtime and the failed newer one is deleted here, the loop is
+     * over; when there was nothing to fall back to, this runtime is the one crashing: safe mode, only cfg.safe_modules autostart. */
+    const bool crash = WL_RTC_REASON == WL_REASON_CRASH;
+    const int reaped = xip_loader_reap();
+    em.safe = crash && !reaped;
+    if (em.safe) ESP_LOGE(TAG, "crash loop with no older runtime to fall back to: safe mode");
+    if (reaped && scan() < 0) return ESP_ERR_NO_MEM;                /* the failed runtime is deleted: its pages are no extent */
     em.inited = true;
-    ESP_LOGI(TAG, "%u modules in \"%s\" (0x%x bytes at 0x%x)", (unsigned)em.found, cfg->partition,
-             (unsigned)em.part->size, (unsigned)em.part->address);
+    ESP_LOGI(TAG, "%u modules in \"%s\" (0x%x bytes at 0x%x), %u runtimes", (unsigned)em.found, cfg->partition,
+             (unsigned)em.part->size, (unsigned)em.part->address, (unsigned)em.runtime_found);
     for (size_t i = 0; i < em.found; i++)
         ESP_LOGI(TAG, "  %s: component %u version %u at 0x%x", em.slots_found[i].name, (unsigned)em.slots_found[i].tag,
                  (unsigned)em.slots_found[i].version, (unsigned)em.slots_found[i].offset);
@@ -377,6 +439,92 @@ esp_err_t xip_loader_init(const xip_loader_config_t *cfg)
         ESP_LOGI(TAG, "  %s version %u at 0x%x is %s 0x%x", em.shadows[i].name, (unsigned)em.shadows[i].version, (unsigned)em.shadows[i].offset,
                  em.shadows[i].duplicate ? "a duplicate of" : "shadowed by", (unsigned)em.shadows[i].shadowed_by);
     return ESP_OK;
+}
+
+/* ---- the runtimes: settling a new one, reaping a failed one ---- */
+
+/* Deleting an extent writes no erase: the first byte of each of its pages is programmed to zero (a 1->0 program works over any content), the
+ * header page first so that a power cut never leaves a valid-looking but partly deleted extent. Every page then starts with 0x00 or 0xFF and the
+ * scan never meets leftover code. Erasing the zeroed pages back to 0xFF is mod_flash's garbage collector. */
+static esp_err_t mark_deleted(const xip_extent_t *x)
+{
+    const uint8_t zero = XIP_EXTENT_DELETED;
+    esp_err_t err = ESP_OK;
+    for (uint32_t off = 0; err == ESP_OK && off < x->size; off += XIP_SLOT_ALIGN) err = esp_flash_write(NULL, &zero, x->offset + off, 1);
+    return err;
+}
+
+static uint32_t own_version(void)
+{
+    const esp_app_desc_t *me = esp_app_get_description();
+    return me ? xip_image_version(me->version, sizeof(me->version)) : 0;
+}
+
+size_t xip_loader_extents(xip_extent_t *out, size_t max)
+{
+    if (!em.inited) return 0;
+    xSemaphoreTake(em.lock, portMAX_DELAY);
+    const size_t n = em.extent_found < max ? em.extent_found : max;
+    memcpy(out, em.extents, n * sizeof(*out));
+    xSemaphoreGive(em.lock);
+    return n;
+}
+
+/* Two runtimes are installed: the newer is on trial (Stage2 boots it; if it crashes Stage2 boots the older and the older reaps it). This one has
+ * stayed up, so a runtime with a lower version - the older - is erased: its pages are module space until the next upgrade. */
+int xip_loader_settle(void)
+{
+    const uint32_t mine = own_version();
+    int result = 0;
+    for (size_t i = 0; i < em.runtime_found; i++) {
+        const xip_extent_t x = em.runtimes[i];
+        if (x.version >= mine) continue;      /* this one, or a newer one (we are the fallback) */
+        ESP_LOGW(TAG, "runtime %u is settled: erasing the older %u (0x%x bytes at 0x%x)", (unsigned)mine, (unsigned)x.version, (unsigned)x.size, (unsigned)x.offset);
+        esp_err_t err = mark_deleted(&x);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "delete failed: %s", esp_err_to_name(err));
+            return XIP_LOADER_ERR_FLASH;
+        }
+        result = 1;
+    }
+    if (result && em.inited && xip_loader_rescan() < 0) return XIP_LOADER_ERR_NOMEM;
+    return result;
+}
+
+int xip_loader_reap(void)
+{
+    if (WL_RTC_REASON != WL_REASON_CRASH) return 0;
+    const uint32_t mine = own_version();
+    int result = 0;
+    for (size_t i = 0; i < em.runtime_found; i++) {
+        const xip_extent_t x = em.runtimes[i];
+        if (x.version <= mine) continue;      /* only a newer runtime than the one Stage2 fell back to has failed */
+        ESP_LOGE(TAG, "runtime %u failed (rolled back to %u): deleting it (0x%x bytes at 0x%x)", (unsigned)x.version, (unsigned)mine, (unsigned)x.size, (unsigned)x.offset);
+        if (mark_deleted(&x) == ESP_OK) result = 1;
+    }
+    return result;
+}
+
+static void settle_task(void *arg)
+{
+    (void)arg;
+    (void)xip_loader_settle();
+    vTaskDelete(NULL);
+}
+
+static void settle_timer(void *arg)
+{
+    (void)arg;
+    if (xTaskCreate(settle_task, "xip_settle", 4096, NULL, 1, NULL) != pdPASS) ESP_LOGE(TAG, "settle: no memory for the task");
+}
+
+int xip_loader_settle_after(uint32_t delay_ms)
+{
+    static esp_timer_handle_t timer;
+    if (timer) return 0;
+    const esp_timer_create_args_t args = {.callback = settle_timer, .name = "xip_settle"};
+    if (esp_timer_create(&args, &timer) != ESP_OK) return XIP_LOADER_ERR_NOMEM;
+    return esp_timer_start_once(timer, (uint64_t)delay_ms * 1000) == ESP_OK ? 0 : XIP_LOADER_ERR_NOMEM;
 }
 
 int xip_loader_find(const char *name)
@@ -403,7 +551,7 @@ static void manifest_components(int slot, const xip_dmod_header *h, char names[X
     if (!m) return;
     xip_cbor_r v;
     xip_cbor_item it;
-    if (esp_partition_read(em.part, em.slots_found[slot].offset + h->manifest_offset, m, h->manifest_size) == ESP_OK &&
+    if (flash_read(em.slots_found[slot].offset + h->manifest_offset, m, h->manifest_size) == ESP_OK &&
         xip_cbor_get(m, h->manifest_size, 11, &v) == 0 && xip_cbor_next(&v, &it) == 0 && it.type == XIP_CBOR_ARRAY) {
         for (size_t i = 0, k = 0; i < it.n && k < XIP_COMPONENTS_MAX; i++) {
             xip_cbor_item t;
@@ -420,7 +568,7 @@ static uint32_t manifest_port(int slot, const xip_dmod_header *h, uint64_t key)
     uint8_t *m = malloc(h->manifest_size);
     if (!m) return 0;
     int64_t port = 0;
-    if (esp_partition_read(em.part, em.slots_found[slot].offset + h->manifest_offset, m, h->manifest_size) != ESP_OK ||
+    if (flash_read(em.slots_found[slot].offset + h->manifest_offset, m, h->manifest_size) != ESP_OK ||
         xip_cbor_get_int(m, h->manifest_size, key, &port) != 0 || port < 0 || port > UINT32_MAX)
         port = 0;
     free(m);
@@ -437,7 +585,7 @@ static int manifest_envelopes(int slot, const xip_dmod_header *h, int32_t ids[XI
     int rc = XIP_ERR_ARG;
     xip_cbor_r value;
     xip_cbor_item it;
-    if (esp_partition_read(em.part, em.slots_found[slot].offset + h->manifest_offset, m, h->manifest_size) == ESP_OK) {
+    if (flash_read(em.slots_found[slot].offset + h->manifest_offset, m, h->manifest_size) == ESP_OK) {
         const int found = xip_cbor_get(m, h->manifest_size, 12, &value);
         if (found == 1) rc = XIP_OK;
         else if (found == 0 && !xip_cbor_next(&value, &it) && it.type == XIP_CBOR_ARRAY && it.n <= XIP_COMPONENTS_MAX) {
@@ -617,13 +765,21 @@ int xip_loader_manifest(int slot, uint8_t *out, size_t capacity)
 {
     if (!xip_loader_slot(slot)) return XIP_LOADER_ERR_SLOT;
     xip_dmod_header h;
-    if (xip_read_header(slot, &h) != ESP_OK || h.magic != XIP_DMOD_MAGIC) return XIP_LOADER_ERR_IMAGE;
+    if (xip_read_header(slot, &h) != ESP_OK || h.kind != XIP_DMOD_KIND_MODULE) return XIP_LOADER_ERR_IMAGE;
     xip_slot_rules_t rules = xip_rules(slot);
     if (xip_dmod_check(&h, &rules) != EMD_OK) return XIP_LOADER_ERR_IMAGE;     /* the offsets are only trusted after the check */
     if (!h.manifest_size) return 0;
     if (h.manifest_size > capacity) return XIP_ERR_SIZE;
-    if (esp_partition_read(em.part, em.slots_found[slot].offset + h.manifest_offset, out, h.manifest_size) != ESP_OK) return XIP_ERR_IO;
+    if (flash_read(em.slots_found[slot].offset + h.manifest_offset, out, h.manifest_size) != ESP_OK) return XIP_ERR_IO;
     return (int)h.manifest_size;
+}
+
+bool xip_loader_safe_mode(void) { return em.inited && em.safe; }
+
+static bool safe_listed(const char *name)
+{
+    for (const char *const *n = em.cfg.safe_modules; n && *n; n++) if (!strcmp(*n, name)) return true;
+    return false;
 }
 
 int xip_loader_autostart(void)
@@ -640,6 +796,7 @@ int xip_loader_autostart(void)
         size_t rn;
         ESP_LOGD(TAG, "autostart: slot %d manifest %d", (int)i, n);
         if (n <= 0 || xip_cbor_get_str(m, (size_t)n, 6, XIP_CBOR_TEXT, &request, &rn) != 0) continue;
+        if (em.safe && !safe_listed(em.slots_found[i].name)) { ESP_LOGW(TAG, "safe mode: %s not started", em.slots_found[i].name); continue; }
         int rc = xip_loader_start((int)i, request, rn);
         ESP_LOGW(TAG, "autostart %s: %d", em.slots_found[i].name, rc);
         if (rc == 0) started++;

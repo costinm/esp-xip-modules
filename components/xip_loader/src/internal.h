@@ -35,9 +35,14 @@ typedef struct {
     char (*names_found)[24];      /* per page */
     size_t found, capacity;      /* modules found, and the pages the partition has */
     const esp_partition_t *part;
+    xip_extent_t runtimes[XIP_LOADER_RUNTIMES_MAX];   /* the scan: the runtime images, in address order */
+    size_t runtime_found;
+    xip_extent_t *extents;        /* the scan: every image (runtimes, active and shadowed modules) in address order; capacity + runtimes entries */
+    size_t extent_found;
     xip_slot_state_t *slots;      /* per page (not per slot index) */
     SemaphoreHandle_t lock;       /* guards xip_slot_state_t.inst: a stop or post must not meet the exit of the task */
     bool inited;
+    bool safe;               /* crash loop with nothing to fall back to: autostart only cfg.safe_modules */
 } xip_loader_t;
 
 extern xip_loader_t em;
