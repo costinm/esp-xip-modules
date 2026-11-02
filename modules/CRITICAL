@@ -1,0 +1,4 @@
+# Modules that go at the end of the runtime partition (the pages after the runtime image), not in the data partition: the ones that flash and
+# recover. They stay in place when a new runtime is written into the other partition; the others may have to move or be flashed again (A/B).
+mod_flash
+mod_con

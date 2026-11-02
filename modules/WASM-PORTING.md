@@ -59,6 +59,27 @@ future mmap-based loader (XIP modules mapped from flash/files) shares. Update it
    packet with a `/// note=` line in the table (the generator then lists them), and give each a stream form; the bulk-bytes inputs (`hw.spi_transfer`,
    `i2c_transfer`) are the same question.
 
+9. `native` (`xip-abi/src/native.rs`, `components/xip_runtime/src/xip_native.c`, host `xip-runtime-host/src/native.rs`): the C library of a native module as a
+   `const` table of plain C functions (own signatures, no `ctx`): the ROM's or the firmware's `memcpy`, `strlen`, `strtod`, `floor`, ..., and the runtime's
+   formatter (`xip_fmt.c`) as `snprintf`. No allocation for the module, nothing remembered about the caller. A C module image (no `.data`/`.bss`, no libc
+   archive) calls it through word 1 of its RAM cell, which its handler fills on every call (`modules/common/xip_native_libc.h`, `.c`; `build_c_mod.py`
+   passes the header with `-include`). `mod_berry` uses it (its own libc is gone, -5 KB per chip). A wasm module does not get it (its memory is not
+   the runtime's); the host table has no `snprintf` (Rust cannot define a variadic function). Not in the table: libgcc's float/64-bit helpers (the
+   compiler calls them directly: the ROM's `esp32*.rom.libgcc.ld` addresses could be linked in at module build time) and anything that needs the
+   module's heap.
+10. wasm3 (`modules/mod_wasm3`, component 51, a C module like Berry): runs a small wasm app that a request carries - not aligned to anything, no slot, gone
+   when the call returns. `run {1: wasm bytes, 2: export?, 3: [int args]?, 4: memory cap?}` answers `{1: result?, 2: logged text or error?, 3: status}`.
+   The app imports `xip.log` and `xip.now_us`; its memory may use the custom page size proposal (a 2 KiB memory runs in 2 KiB) and is capped per request.
+   Every byte (interpreter and app) is a tracked `mem_alloc` block; the host tests (`crates/xip-runtime-host/tests/c_wasm3.rs`, via `crates/wasm3-c`) check zero
+   leaks after results, traps, bad binaries and over-cap memory. The same sources link as a module image with no `.data`/`.bss`
+   (esp32c6 90 KB, esp32s3 and esp32 87 KB, libc through the `native` table: the math functions of the table are its trampolines).
+   Registered for esp32, esp32s3 and esp32c6 (slot 16, span 2; `XIP_DMOD_STATIC_SLOTS` is now 64). The classic ESP32 has 27 link windows since 2026-11-01 (code base 0x40250000, data 0x3F650000, under a runtime of at most 1.5 MiB), so wasm3 builds there (87,488 B) and boots on board 4170 with the module set; not yet started on the device. It has no tail calls on Xtensa (see below).
+   On Xtensa the interpreter is built without tail calls (that gcc cannot sibling-call), so a long-running loop nests natively and traps at
+   `d_m3MaxNativeStack` (5 KiB): small apps only there. Not done: any call from the app into a component (`xip.call` with the (component,
+   method) form is the part that exercises the ABI), a measured heap need (the host test uses 512 KiB for 64 KiB pages), a run on a device.
+   Compiled to wasm32 (`-mtail-call`, `d_m3CanTailCall=1`, a native stack budget below the wasm stack) it runs apps inside wasmtime, so a wasm module
+   holding wasm3 looks feasible; it was not run under `xip-wasm`.
+
 ## Pointer audit and boundary rule
 
 Goals: zero copy for bulk data on low-end devices, and isolation on the host (modules in separate processes with shared memory,

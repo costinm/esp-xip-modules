@@ -10,7 +10,10 @@
 # (default: every chip); tools/build_c_mod.py exits 3 for the rest and scripts/build.sh skips them.
 # The component number must be free (used: 0 host, 1 transport, 2 test, 10 wifi, 13 quic, 14 stream,
 # 20 console, 43..49, 50 berry, 104 ble).
+# A packed C module gets the C library from the runtime (the `native` table, modules/common/xip_native_libc.h), not from a libc archive.
 # Every chip links modules at fixed windows (mkmod.CHIPS, checked against loader.c by tests), so a C
 # const table that points into its own image - Berry's precompiled objects - survives: the loader maps
 # each module's flash pages at exactly its link addresses.
 berry:50:1696:esp32,esp32s3,esp32c6
+# The classic ESP32 has 27 link windows (0x40250000 to SOC_IROM_HIGH, under a runtime of at most 1.5 MiB), enough for slots 16-17 (modules/SLOTS).
+wasm3:51:1696:esp32,esp32s3,esp32c6

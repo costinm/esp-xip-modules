@@ -42,5 +42,9 @@
   "mod_system": {
     "state_bytes": 64,
     "stack_bytes": 4096
+  },
+  "mod_wasm3": {
+    "state_bytes": 1696,
+    "stack_bytes": 8192
   }
 }
