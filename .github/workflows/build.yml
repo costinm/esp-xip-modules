@@ -89,7 +89,6 @@ jobs:
           name: firmware-${{ matrix.cpu }}
           path: |
             target/out/${{ matrix.cpu }}/main.bin
-            target/out/${{ matrix.cpu }}/loader.bin
             target/out/${{ matrix.cpu }}/stage2-4mb.bin
             target/out/${{ matrix.cpu }}/partition-table-4mb.bin
             target/out/${{ matrix.cpu }}/modules.txt
