@@ -114,8 +114,8 @@ int xip_loader_settle_after(uint32_t delay_ms);   /* once, on a timer: for the a
  * The pages between them are free (or dirty: erase before writing). This is what mod_flash allocates from. Returns the number stored. */
 size_t xip_loader_extents(xip_extent_t *out, size_t max);
 
-/* After a rollback (Stage2 booted this older runtime because the newer crashed, reason CRASH in RTC) delete the failed newer runtime: the first
- * byte of each of its pages is programmed to 0x00 (no erase). Called by xip_loader_init; 1: deleted, 0: nothing to do. */
+/* After a rollback (Stage2 booted this older runtime because the newer crashed, reason CRASH in RTC) format the failed newer runtime: the first
+ * sector of it is erased, which ends it as a runtime (its other pages are mod_flash's to sweep). Called by xip_loader_init; 1: formatted, 0: nothing to do. */
 int xip_loader_reap(void);
 
 /* Safe mode: Stage2 reported a crash loop (RTC reason CRASH) and there was no older runtime to fall back to, so this runtime is the one that

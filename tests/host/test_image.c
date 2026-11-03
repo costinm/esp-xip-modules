@@ -48,6 +48,7 @@ int main(void)
     xip_image_info_t a = look();
     CHECK(a.valid && a.version == 42);
     CHECK(a.extent == 0x10000);                          /* 24 + 8 + 0x1000 + checksum fits one page */
+    CHECK(a.length == 32 + 0x1000 + 16 - ((32 + 0x1000) & 15));   /* the exact bytes: the segment end, then the end of the checksum block */
     make("42", 0xffe0, 0);                               /* 32 + 0xffe0 = 0x10000: the checksum block spills into a second page */
     CHECK(look().extent == 0x20000);
     make("42", 0xffd0, 0);                               /* 32 + 0xffd0 = 0xfff0: padding and checksum end at 0x10000 */

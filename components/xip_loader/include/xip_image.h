@@ -26,7 +26,8 @@
 typedef struct {
     bool valid;          /* magic, segment count and app description are plausible (the full checksum is the bootloader's) */
     uint32_t version;
-    uint32_t extent;     /* bytes the image occupies, rounded up to XIP_IMAGE_PAGE; the pages after it are module space */
+    uint32_t length;     /* bytes of the image: the end of its last segment, the checksum block and the appended hash (docs/flash-format.md section 2) */
+    uint32_t extent;     /* `length` rounded up to XIP_IMAGE_PAGE; the pages after it are module space */
 } xip_image_info_t;
 
 /* Reads `len` bytes at `off` of the partition. 0 on success. */
@@ -68,7 +69,7 @@ static inline xip_image_info_t xip_image_inspect(xip_image_read_fn read, void *c
     pos = (pos | 15u) + 1u;                 /* the checksum byte ends a 16-byte block */
     if (hash_appended) pos += 32u;
     if (pos > part_size) return none;
-    xip_image_info_t info = {.valid = true, .extent = (pos + XIP_IMAGE_PAGE - 1) / XIP_IMAGE_PAGE * XIP_IMAGE_PAGE,
+    xip_image_info_t info = {.valid = true, .length = pos, .extent = (pos + XIP_IMAGE_PAGE - 1) / XIP_IMAGE_PAGE * XIP_IMAGE_PAGE,
                              .version = xip_image_version((const char *)head + XIP_IMAGE_DESC_OFFSET + XIP_IMAGE_DESC_VERSION, 32)};
     return info;
 }

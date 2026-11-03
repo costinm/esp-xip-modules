@@ -443,15 +443,12 @@ esp_err_t xip_loader_init(const xip_loader_config_t *cfg)
 
 /* ---- the runtimes: settling a new one, reaping a failed one ---- */
 
-/* Deleting an extent writes no erase: the first byte of each of its pages is programmed to zero (a 1->0 program works over any content), the
- * header page first so that a power cut never leaves a valid-looking but partly deleted extent. Every page then starts with 0x00 or 0xFF and the
- * scan never meets leftover code. Erasing the zeroed pages back to 0xFF is mod_flash's garbage collector. */
-static esp_err_t mark_deleted(const xip_extent_t *x)
+/* A runtime has no deleted state (docs/flash-format.md section 2): a programmed first byte would leave a "deleted" extent whose length (bytes 4-7)
+ * is the entry address. Erasing the first sector ends it as a runtime at once. Its other pages are left as they are: they are orphan pages
+ * (or blank-looking dirty ones) that mod_flash erases, and the scan never reads them as an image. */
+static esp_err_t format_runtime(const xip_extent_t *x)
 {
-    const uint8_t zero = XIP_EXTENT_DELETED;
-    esp_err_t err = ESP_OK;
-    for (uint32_t off = 0; err == ESP_OK && off < x->size; off += XIP_SLOT_ALIGN) err = esp_flash_write(NULL, &zero, x->offset + off, 1);
-    return err;
+    return esp_flash_erase_region(NULL, x->offset, 4096);
 }
 
 static uint32_t own_version(void)
@@ -471,7 +468,7 @@ size_t xip_loader_extents(xip_extent_t *out, size_t max)
 }
 
 /* Two runtimes are installed: the newer is on trial (Stage2 boots it; if it crashes Stage2 boots the older and the older reaps it). This one has
- * stayed up, so a runtime with a lower version - the older - is erased: its pages are module space until the next upgrade. */
+ * stayed up, so a runtime with a lower version - the older - is formatted (its first sector erased): the rest of its pages is mod_flash's to sweep. */
 int xip_loader_settle(void)
 {
     const uint32_t mine = own_version();
@@ -479,8 +476,8 @@ int xip_loader_settle(void)
     for (size_t i = 0; i < em.runtime_found; i++) {
         const xip_extent_t x = em.runtimes[i];
         if (x.version >= mine) continue;      /* this one, or a newer one (we are the fallback) */
-        ESP_LOGW(TAG, "runtime %u is settled: erasing the older %u (0x%x bytes at 0x%x)", (unsigned)mine, (unsigned)x.version, (unsigned)x.size, (unsigned)x.offset);
-        esp_err_t err = mark_deleted(&x);
+        ESP_LOGW(TAG, "runtime %u is settled: formatting the older %u (0x%x bytes at 0x%x)", (unsigned)mine, (unsigned)x.version, (unsigned)x.size, (unsigned)x.offset);
+        esp_err_t err = format_runtime(&x);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "delete failed: %s", esp_err_to_name(err));
             return XIP_LOADER_ERR_FLASH;
@@ -499,8 +496,8 @@ int xip_loader_reap(void)
     for (size_t i = 0; i < em.runtime_found; i++) {
         const xip_extent_t x = em.runtimes[i];
         if (x.version <= mine) continue;      /* only a newer runtime than the one Stage2 fell back to has failed */
-        ESP_LOGE(TAG, "runtime %u failed (rolled back to %u): deleting it (0x%x bytes at 0x%x)", (unsigned)x.version, (unsigned)mine, (unsigned)x.size, (unsigned)x.offset);
-        if (mark_deleted(&x) == ESP_OK) result = 1;
+        ESP_LOGE(TAG, "runtime %u failed (rolled back to %u): formatting it (0x%x bytes at 0x%x)", (unsigned)x.version, (unsigned)mine, (unsigned)x.size, (unsigned)x.offset);
+        if (format_runtime(&x) == ESP_OK) result = 1;
     }
     return result;
 }

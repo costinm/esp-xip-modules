@@ -7,8 +7,9 @@ Inside the partition, 64k 'extents' are used for the executable image, modules a
 
 * **Extents.** Stage2 finds the runtimes with the extent scan (`components/xip_loader/include/xip_extent.h`, shared with the loader and the host
   tests; `mod_flash` has its own implementation of the same format). It reads 8 bytes at the start of each 64 KiB page of `xip`: `0xFF` empty,
-  `0x00` deleted, `M` a module and `D` a data extent (both carry their length at bytes 4-7 and are skipped by it), `0xE9` an ESP image, a runtime
-  (its length is the end of its last segment, its version the app description's). The first two runtimes by address are considered. Where
+  `0xE9` an ESP image, a runtime (its length found by walking its segments, its version the app description's), `M`, `O` (an `M` being written),
+  `D`, `X` and `0x00` (a deleted `M`, `D` or `X`): extents that carry their length in bytes at bytes 4-7 and are skipped by it. Any other first
+  byte, a zero or out-of-range length, or an `E9` that does not walk, is an orphan page: skipped as one page (docs/flash-format.md section 2). The first two runtimes by address are considered. Where
   they sit is the allocator's policy (mod_flash): A at the start of `xip` (0x10000), B in its last 1.5 MiB.
 * **Version.** Each runtime image carries a number, the leading digits of the version string of its app description (`scripts/build.sh`
   sets it to seconds since 2025-01-01, or `XIP_RUNTIME_VERSION`). Stage2 boots the higher one; a tie goes to A.

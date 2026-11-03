@@ -177,8 +177,14 @@
 // First byte of every extent of the xip partition (the scan reads 8 bytes per 64 KiB page): a module image.
 #define XIP_DMOD_KIND_MODULE 77
 
-// A data extent (the flash filesystem of `mod_flash`): the same 8-byte lead as a module, `image_size` is its length.
+// A data extent (the flash filesystem of `mod_flash`): bytes 4-7 are its length in bytes.
 #define XIP_EXTENT_DATA 68
+
+// An index extent (`mod_flash`): the same lead as a data extent.
+#define XIP_EXTENT_INDEX 88
+
+// A module being written: `M` with bit 1 set, the length already in bytes 4-7. The writer clears bit 1 last, so a cut write is skipped by its length and never run.
+#define XIP_EXTENT_MODULE_PENDING 79
 
 // A runtime image is an ESP image: its first byte is the ESP magic.
 #define XIP_EXTENT_RUNTIME 233
@@ -186,7 +192,7 @@
 // A page that was never written, or was erased again.
 #define XIP_EXTENT_EMPTY 255
 
-// A deleted extent: the first byte of each of its pages is programmed to zero (no erase), a later pass erases the pages.
+// A deleted `M`, `D` or `X` extent: byte 0 of its first page is programmed to zero and nothing else, so bytes 4-7 still give its length; `mod_flash` erases the pages later.
 #define XIP_EXTENT_DELETED 0
 
 #define XIP_DMOD_HEADER_SIZE 64
