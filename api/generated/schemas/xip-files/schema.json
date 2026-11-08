@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "const": "files.file.stat"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 15,
+      "x-method-index": 2
+    },
+    {
+      "properties": {
+        "expect": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "files.file.remove"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 15,
+      "x-method-index": 5
+    },
+    {
+      "properties": {
+        "after": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "max": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "files.file.list"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 15,
+      "x-method-index": 6
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "files.file.sync"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 15,
+      "x-method-index": 7
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "files.fs.info"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 15,
+      "x-method-index": 8
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "files.log.erase"
+        },
+        "through_seq": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u64"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 15,
+      "x-method-index": 12
+    },
+    {
+      "properties": {
+        "expect": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "len": {
+          "type": "integer",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "files.file.get"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "offset": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 15,
+      "x-method-index": 17
+    },
+    {
+      "properties": {
+        "cache": {
+          "type": "boolean",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bool"
+        },
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "bytes"
+        },
+        "expect": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "kind": {
+          "type": "integer",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "files.file.put"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "version": {
+          "type": "integer",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 15,
+      "x-method-index": 18
+    },
+    {
+      "properties": {
+        "count": {
+          "type": "integer",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "u32"
+        },
+        "data": {
+          "type": "string",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "bytes"
+        },
+        "first_seq": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u64"
+        },
+        "method": {
+          "const": "files.log.put"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 15,
+      "x-method-index": 19
+    },
+    {
+      "properties": {
+        "max": {
+          "type": "integer",
+          "x-protobuf-index": 13,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "files.log.get"
+        },
+        "since_seq": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u64"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 15,
+      "x-method-index": 20
+    }
+  ]
+}

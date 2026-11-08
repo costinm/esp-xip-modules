@@ -64,7 +64,7 @@
     {
       "access": "authenticated",
       "component": "host",
-      "doc": "Built-in records are read during the call; contributed records (a component's `info_publish`) are cached and may be stale.\nThis call never invokes another module. No console module is needed. No partial record is returned on buffer overflow.",
+      "doc": "Built-in records are read during the call; contributed records (a component's `info_publish`) are cached and may be stale.\nThis call never invokes another module. No sys module is needed. No partial record is returned on buffer overflow.\n\n\n### Rust module panics\n\n`get_component(\"module-panic\")` returns the version-1 `xip_module_panic` table\n(`ModulePanic` in the Rust ABI). The shared Rust panic handler calls `report`\nwith a bounded message and its current host context. The runtime emits a structured CBOR diagnostic,\nrecords the module name in retained RTC RAM, and\nrestarts. The loader rejects every start of that name until a power cycle,\nincluding explicit starts and requests that would start a component provider.\nNo module cleanup or flash write runs from the panic handler.\n\n`read` returns a pending diagnostic as CBOR `{0:3, 1: \"panic\", 2: module_name,\n3: message_bytes}` and the caller's module address. After reboot, mod_flash\nappends this record through the files log API. It calls `logged` only after a\nsuccessful durable reply; errors retain the record for retry. Quarantine\nremains after logging. RTC holds the last diagnostic and up to 32 disabled\nnames; a full list refuses all module starts. A power cycle clears RTC state.\nOlder runtimes without this component receive an ordinary reset request.\n\n### Structured native fault diagnostics\n\nNative console PPP port 1 carries CBOR fault records, rendered on the host by\n`dmesh-cli console SERIAL watch`. No firmware printf line surrounds the record.\nPanic record: `{0:3, 1:\"panic\", 2:module, 3:panic_message_bytes}`. When the same\nmodule has an allocation failure recorded, fields 4–9 carry requested bytes,\nfree heap, largest free block, managed bytes used, quota and rejection reason.\nAllocation denial record: `{0:4, 1:module, 2:bytes, 3:free, 4:largest,\n5:used, 6:quota, 7:reason}`; reason 1 is host reserve, 2 is managed allocator\nfailure (heap/quota), 3 is post-allocation host reserve. These are diagnostics, not ABI\nreturn codes. RTC holds diagnostics before reboot; mod_flash persists them\nthrough the ordinary telemetry commit path after boot.",
       "index": 60,
       "method": "device_info",
       "name": "host.device_info",
@@ -159,6 +159,18 @@
           "name": "mac",
           "tag": 7,
           "type": "bytes"
+        },
+        {
+          "description": "Physical start of the executing runtime within its partition; omitted when unknown.",
+          "name": "image_address",
+          "tag": 8,
+          "type": "u32"
+        },
+        {
+          "description": "Its 64 KiB-rounded flash span; omitted when unknown.",
+          "name": "image_size",
+          "tag": 9,
+          "type": "u32"
         }
       ],
       "kind": "row",
@@ -423,6 +435,12 @@
           "name": "shadowed",
           "tag": 13,
           "type": "Shadowed[]"
+        },
+        {
+          "description": "A Rust panic disabled this module until power-on; start requests are rejected.",
+          "name": "quarantined",
+          "tag": 14,
+          "type": "bool"
         }
       ],
       "kind": "row",

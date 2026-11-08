@@ -108,7 +108,7 @@
     {
       "access": "authenticated",
       "component": "wifi",
-      "doc": "The role and radio flags remain present while off; local MACs are included when known. Joined SSID, IP and RSSI are omitted until associated. `mod_con` encodes this snapshot from the host Wi-Fi table; it never starts another Wi-Fi owner.",
+      "doc": "The role and radio flags remain present while off; local MACs are included when known. Joined SSID, IP and RSSI are omitted until associated. The sys component in `mod_system` encodes this snapshot from the host Wi-Fi table; it never starts another Wi-Fi owner.",
       "index": 3,
       "method": "state",
       "name": "wifi.state",
@@ -191,7 +191,7 @@
     {
       "access": "authenticated",
       "component": "wifi",
-      "doc": "Never blocks: a scan takes seconds and a handler has a budget of milliseconds. The first call starts the scan and returns\n`unavailable` with `retry`; poll about once a second and the call that finds it done returns the answer, once. It works in\nevery radio mode (station, ESP-NOW only, soft AP, joined); with the radio off it is switched on for the scan and off again.\nA scan leaves the channel for about two seconds, so ESP-NOW and a soft AP do not hear their channel meanwhile; the radio is put\nback on its channel afterwards. While the driver is busy joining the call returns `unavailable`. A network in range that is\nnot listed was missed (a scan can); scan again. A module gets the same list from the `scan` function of the `wifi` component.\n\n`mod_con` calls the host scan table and encodes the result. `ERR_BUSY` (-5) means retry; no private scan task or result cache is added.",
+      "doc": "Never blocks: a scan takes seconds and a handler has a budget of milliseconds. The first call starts the scan and returns\n`unavailable` with `retry`; poll about once a second and the call that finds it done returns the answer, once. It works in\nevery radio mode (station, ESP-NOW only, soft AP, joined); with the radio off it is switched on for the scan and off again.\nA scan leaves the channel for about two seconds, so ESP-NOW and a soft AP do not hear their channel meanwhile; the radio is put\nback on its channel afterwards. While the driver is busy joining the call returns `unavailable`. A network in range that is\nnot listed was missed (a scan can); scan again. A module gets the same list from the `scan` function of the `wifi` component.\n\nThe sys component in `mod_system` calls the host scan table and encodes the result. `ERR_BUSY` (-5) means retry; no private scan task or result cache is added.",
       "execution": "non-blocking",
       "index": 4,
       "method": "scan",
@@ -297,7 +297,7 @@
     {
       "access": "any of `system`, `mesh.owner`, `mesh.admin`",
       "component": "wifi",
-      "doc": "Replaces all of them; an absent field is the default. `ampdu` and the four buffer sizes are read when the driver starts, so\na change restarts the radio (the station rejoins); the other fields apply to the next association.\n\nBuffer overrides here are volatile. Persistent boot defaults use `console.nv`\nkeys `wifi.rx_static`, `wifi.rx_dynamic`, and `wifi.rx_ba`; see the console API.\nThe application baseline is 10 fixed RX buffers, a 32-buffer dynamic limit and\na 6-frame RX BA window. Stored defaults are applied on driver initialization;\nnonzero fields in this tuning request take precedence. Reboot after changing\npersistent defaults to apply them reliably.",
+      "doc": "Replaces all of them; an absent field is the default. `ampdu` and the four buffer sizes are read when the driver starts, so\na change restarts the radio (the station rejoins); the other fields apply to the next association.\n\nBuffer overrides here are volatile. Persistent boot defaults use `sys.nv`\nkeys `wifi.rx_static`, `wifi.rx_dynamic`, and `wifi.rx_ba`; see the sys API.\nThe application baseline is 10 fixed RX buffers, a 32-buffer dynamic limit and\na 6-frame RX BA window. Stored defaults are applied on driver initialization;\nnonzero fields in this tuning request take precedence. Reboot after changing\npersistent defaults to apply them reliably.",
       "errors": [
         {
           "description": "A value is out of range.",

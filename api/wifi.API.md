@@ -49,7 +49,7 @@ ESP-NOW, `channel` 0, no names). To change only the channel, `get`, edit and `se
 
 ## 3. `state` — What is true now
 
-The role and radio flags remain present while off; local MACs are included when known. Joined SSID, IP and RSSI are omitted until associated. `mod_con` encodes this snapshot from the host Wi-Fi table; it never starts another Wi-Fi owner.
+The role and radio flags remain present while off; local MACs are included when known. Joined SSID, IP and RSSI are omitted until associated. The sys component in `mod_system` encodes this snapshot from the host Wi-Fi table; it never starts another Wi-Fi owner.
 
 **Access:** authenticated
 
@@ -78,7 +78,7 @@ A scan leaves the channel for about two seconds, so ESP-NOW and a soft AP do not
 back on its channel afterwards. While the driver is busy joining the call returns `unavailable`. A network in range that is
 not listed was missed (a scan can); scan again. A module gets the same list from the `scan` function of the `wifi` component.
 
-`mod_con` calls the host scan table and encodes the result. `ERR_BUSY` (-5) means retry; no private scan task or result cache is added.
+The sys component in `mod_system` calls the host scan table and encodes the result. `ERR_BUSY` (-5) means retry; no private scan task or result cache is added.
 
 **Execution:** non-blocking
 **Access:** authenticated
@@ -138,8 +138,8 @@ Rarely needed settings for measurements and unusual links. The defaults of the d
 Replaces all of them; an absent field is the default. `ampdu` and the four buffer sizes are read when the driver starts, so
 a change restarts the radio (the station rejoins); the other fields apply to the next association.
 
-Buffer overrides here are volatile. Persistent boot defaults use `console.nv`
-keys `wifi.rx_static`, `wifi.rx_dynamic`, and `wifi.rx_ba`; see the console API.
+Buffer overrides here are volatile. Persistent boot defaults use `sys.nv`
+keys `wifi.rx_static`, `wifi.rx_dynamic`, and `wifi.rx_ba`; see the sys API.
 The application baseline is 10 fixed RX buffers, a 32-buffer dynamic limit and
 a 6-frame RX BA window. Stored defaults are applied on driver initialization;
 nonzero fields in this tuning request take precedence. Reboot after changing

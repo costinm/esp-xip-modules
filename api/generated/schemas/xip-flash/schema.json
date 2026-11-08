@@ -13,6 +13,402 @@
       "type": "object",
       "x-component-index": 44,
       "x-method-index": 1
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "flash.file.stat"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 2
+    },
+    {
+      "properties": {
+        "expect": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "len": {
+          "type": "integer",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "flash.file.read"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "offset": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 3
+    },
+    {
+      "properties": {
+        "cache": {
+          "type": "boolean",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bool"
+        },
+        "expect": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "kind": {
+          "type": "integer",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "flash.file.write"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "size": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "version": {
+          "type": "integer",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 4
+    },
+    {
+      "properties": {
+        "expect": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "flash.file.remove"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 5
+    },
+    {
+      "properties": {
+        "after": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "max": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "flash.file.list"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 6
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "flash.file.sync"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 7
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "flash.fs.info"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 8
+    },
+    {
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "erase": {
+          "type": "boolean",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bool"
+        },
+        "full": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        },
+        "method": {
+          "const": "flash.fs.collect"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 9
+    },
+    {
+      "properties": {
+        "count": {
+          "type": "integer",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "u32"
+        },
+        "first_seq": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u64"
+        },
+        "method": {
+          "const": "flash.log.append"
+        },
+        "size": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 10
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "flash.log.read"
+        },
+        "since_seq": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u64"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 11
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "flash.log.erase"
+        },
+        "through_seq": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u64"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 12
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "flash.module.write"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "operation_id": {
+          "type": "integer",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "u64"
+        },
+        "size": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "version": {
+          "type": "integer",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 13
+    },
+    {
+      "properties": {
+        "front": {
+          "type": "boolean",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "bool"
+        },
+        "method": {
+          "const": "flash.runtime.write"
+        },
+        "operation_id": {
+          "type": "integer",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "u64"
+        },
+        "size": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "version": {
+          "type": "integer",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 14
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "flash.image.remove"
+        },
+        "offset": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 15
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "flash.wifi.join"
+        },
+        "psk": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        },
+        "ssid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 21
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "flash.wifi.info"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 22
+    },
+    {
+      "properties": {
+        "method": {
+          "const": "flash.image.list"
+        },
+        "offset": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 44,
+      "x-method-index": 23
     }
   ]
 }

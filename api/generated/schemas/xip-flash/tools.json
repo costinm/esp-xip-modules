@@ -25,5 +25,715 @@
       "unavailable",
       "internal"
     ]
+  },
+  {
+    "description": "inspect a named record",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.file.stat",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 2,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "stream a committed file",
+    "inputSchema": {
+      "properties": {
+        "expect": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "len": {
+          "type": "integer",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "u32"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "offset": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.file.read",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 3,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "stream a replacement",
+    "inputSchema": {
+      "properties": {
+        "cache": {
+          "type": "boolean",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bool"
+        },
+        "expect": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "kind": {
+          "type": "integer",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "u32"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "size": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "version": {
+          "type": "integer",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.file.write",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 4,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "remove all live versions",
+    "inputSchema": {
+      "properties": {
+        "expect": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.file.remove",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 5,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "page through names",
+    "inputSchema": {
+      "properties": {
+        "after": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "max": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.file.list",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 6,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "wait for committed writes",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.file.sync",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 7,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "allocation summary",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.fs.info",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 8,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "make a contiguous run or collect all data",
+    "inputSchema": {
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "erase": {
+          "type": "boolean",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "bool"
+        },
+        "full": {
+          "type": "boolean",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bool"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.fs.collect",
+    "outputSchema": {
+      "properties": {
+        "dirty_pages": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "erased_pages": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u32"
+        },
+        "free_pages": {
+          "type": "integer",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "u32"
+        },
+        "largest_run": {
+          "type": "integer",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "u32"
+        },
+        "processed_pages": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 9,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "stream a CBOR batch",
+    "inputSchema": {
+      "properties": {
+        "count": {
+          "type": "integer",
+          "x-protobuf-index": 11,
+          "x-protobuf-type": "u32"
+        },
+        "first_seq": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u64"
+        },
+        "size": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.log.append",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 10,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "stream retained batches",
+    "inputSchema": {
+      "properties": {
+        "since_seq": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u64"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.log.read",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 11,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "acknowledge batches",
+    "inputSchema": {
+      "properties": {
+        "through_seq": {
+          "type": "integer",
+          "x-protobuf-index": 10,
+          "x-protobuf-type": "u64"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.log.erase",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 12,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "stream a module image",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        },
+        "operation_id": {
+          "type": "integer",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "u64"
+        },
+        "size": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "version": {
+          "type": "integer",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.module.write",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 13,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "stream a runtime image",
+    "inputSchema": {
+      "properties": {
+        "front": {
+          "type": "boolean",
+          "x-protobuf-index": 12,
+          "x-protobuf-type": "bool"
+        },
+        "operation_id": {
+          "type": "integer",
+          "x-protobuf-index": 8,
+          "x-protobuf-type": "u64"
+        },
+        "size": {
+          "type": "integer",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "u32"
+        },
+        "version": {
+          "type": "integer",
+          "x-protobuf-index": 9,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.runtime.write",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 14,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "retire an inactive image",
+    "inputSchema": {
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.image.remove",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 15,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "join with temporary credentials",
+    "inputSchema": {
+      "properties": {
+        "psk": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        },
+        "ssid": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.wifi.join",
+    "outputSchema": {
+      "properties": {
+        "channel": {
+          "type": "integer",
+          "x-protobuf-index": 7,
+          "x-protobuf-type": "u8"
+        },
+        "ip": {
+          "type": "string",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "bytes"
+        },
+        "mac": {
+          "type": "string",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "bytes"
+        },
+        "port": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "u16"
+        },
+        "ready": {
+          "type": "boolean",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bool"
+        },
+        "ssid": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        },
+        "station": {
+          "type": "integer",
+          "x-protobuf-index": 5,
+          "x-protobuf-type": "u8"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 21,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "inspect the current recovery connection",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.wifi.info",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 22,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
+  },
+  {
+    "description": "inspect installed images",
+    "inputSchema": {
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "x-protobuf-index": 6,
+          "x-protobuf-type": "u32"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "flash.image.list",
+    "outputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "x-component-index": 44,
+    "x-method-index": 23,
+    "x-standard-errors": [
+      "unauthenticated",
+      "permission_denied",
+      "timeout",
+      "remote_exception",
+      "invalid_argument",
+      "not_found",
+      "conflict",
+      "unavailable",
+      "internal"
+    ]
   }
 ]

@@ -1,0 +1,289 @@
+{
+  "components": [
+    {
+      "doc": "Direct packet filesystem service for modules and runtime clients. The runtime\nroutes this component to its registered provider; mod_flash owns the storage,\nflash operations and collection. No stream, sys module or transport is\nneeded. An absent provider returns NOT_FOUND. Settings may use this service;\nNVS migration is separate from this API.\n\nSend one CBOR request to component 15. Replies return the same component, method\nand correlation id. Bare negative ABI integers are errors (NOSPACE=-20,\nVERSION=-21). Content is bytes, at most 1024 per call, never silently truncated.\nNames are 1–8 opaque bytes. Larger files can be read in ranges, with expect set\nto the first reply's version to avoid mixing replacements. Named content is at\nmost 65504 bytes. The provider serializes writes with stream operations, queues\nup to four waiting direct requests, and returns BUSY beyond that. Replies to\nwrites follow durable record/index commit. Queue storage is released on stop.\n\nMetadata operations below share the field tags of the flash stream API.",
+      "index": 15,
+      "name": "files"
+    }
+  ],
+  "format": "mesh-api/1",
+  "methods": [
+    {
+      "component": "files",
+      "index": 2,
+      "method": "file.stat",
+      "name": "files.file.stat",
+      "request": {
+        "fields": [
+          {
+            "description": "1–8 opaque bytes, zero padded.",
+            "name": "name",
+            "tag": 1,
+            "type": "bytes"
+          }
+        ]
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "inspect a named record",
+      "visibility": "public"
+    },
+    {
+      "component": "files",
+      "index": 5,
+      "method": "file.remove",
+      "name": "files.file.remove",
+      "request": {
+        "fields": [
+          {
+            "description": "Opaque name.",
+            "name": "name",
+            "tag": 1,
+            "type": "bytes"
+          },
+          {
+            "description": "Optional current-version check.",
+            "name": "expect",
+            "tag": 5,
+            "type": "u32"
+          }
+        ]
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "remove all live versions",
+      "visibility": "public"
+    },
+    {
+      "component": "files",
+      "index": 6,
+      "method": "file.list",
+      "name": "files.file.list",
+      "request": {
+        "fields": [
+          {
+            "description": "Optional exclusive lower name bound.",
+            "name": "after",
+            "tag": 1,
+            "type": "bytes"
+          },
+          {
+            "description": "Default 16, capped at 32.",
+            "name": "max",
+            "tag": 2,
+            "type": "u32"
+          }
+        ]
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "page through names",
+      "visibility": "public"
+    },
+    {
+      "component": "files",
+      "doc": "Empty request and response. Every successful write already waits for its record\nand index entry to reach flash. This is a barrier on the serialized operation path.",
+      "index": 7,
+      "method": "file.sync",
+      "name": "files.file.sync",
+      "request": {
+        "fields": []
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "wait for committed writes",
+      "visibility": "public"
+    },
+    {
+      "component": "files",
+      "doc": "Empty request. Response `{1: free_pages, 2: dirty_pages, 3: max_file}`. Counts cover\nthe back region; the current in-memory image allocation is excluded from available pages.",
+      "index": 8,
+      "method": "fs.info",
+      "name": "files.fs.info",
+      "request": {
+        "fields": []
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "allocation summary",
+      "visibility": "public"
+    },
+    {
+      "component": "files",
+      "index": 12,
+      "method": "log.erase",
+      "name": "files.log.erase",
+      "request": {
+        "fields": [
+          {
+            "description": "Only whole batches ending at or below this sequence.",
+            "name": "through_seq",
+            "tag": 10,
+            "type": "u64"
+          }
+        ]
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "acknowledge batches",
+      "visibility": "public"
+    },
+    {
+      "component": "files",
+      "index": 17,
+      "method": "file.get",
+      "name": "files.file.get",
+      "request": {
+        "fields": [
+          {
+            "description": "1–8 opaque bytes.",
+            "name": "name",
+            "tag": 1,
+            "type": "bytes"
+          },
+          {
+            "description": "Optional expected version.",
+            "name": "expect",
+            "tag": 5,
+            "type": "u32"
+          },
+          {
+            "description": "Default zero.",
+            "name": "offset",
+            "tag": 6,
+            "type": "u32"
+          },
+          {
+            "description": "Default 1024; at most 1024.",
+            "name": "len",
+            "tag": 7,
+            "type": "u32"
+          }
+        ]
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "read a committed range",
+      "visibility": "public"
+    },
+    {
+      "component": "files",
+      "index": 18,
+      "method": "file.put",
+      "name": "files.file.put",
+      "request": {
+        "fields": [
+          {
+            "description": "1–8 opaque bytes.",
+            "name": "name",
+            "tag": 1,
+            "type": "bytes"
+          },
+          {
+            "description": "Default 1; 1–3.",
+            "name": "kind",
+            "tag": 3,
+            "type": "u32"
+          },
+          {
+            "description": "Default false.",
+            "name": "cache",
+            "tag": 4,
+            "type": "bool"
+          },
+          {
+            "description": "Optional version check; zero requires absence.",
+            "name": "expect",
+            "tag": 5,
+            "type": "u32"
+          },
+          {
+            "description": "Optional positive version, greater than the current file version; otherwise increment automatically.",
+            "name": "version",
+            "tag": 9,
+            "type": "u32"
+          },
+          {
+            "description": "Entire replacement; at most 1024 bytes.",
+            "name": "data",
+            "tag": 13,
+            "type": "bytes"
+          }
+        ]
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "replace a small file atomically",
+      "visibility": "public"
+    },
+    {
+      "component": "files",
+      "index": 19,
+      "method": "log.put",
+      "name": "files.log.put",
+      "request": {
+        "fields": [
+          {
+            "description": "First producer sequence number.",
+            "name": "first_seq",
+            "tag": 10,
+            "type": "u64"
+          },
+          {
+            "description": "Number of CBOR items; 1–65535.",
+            "name": "count",
+            "tag": 11,
+            "type": "u32"
+          },
+          {
+            "description": "Encoded batch; at most 1024 bytes.",
+            "name": "data",
+            "tag": 13,
+            "type": "bytes"
+          }
+        ]
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "append a small telemetry batch",
+      "visibility": "public"
+    },
+    {
+      "component": "files",
+      "index": 20,
+      "method": "log.get",
+      "name": "files.log.get",
+      "request": {
+        "fields": [
+          {
+            "description": "Last acknowledged sequence; default zero.",
+            "name": "since_seq",
+            "tag": 10,
+            "type": "u64"
+          },
+          {
+            "description": "Content budget; default/max 1024.",
+            "name": "max",
+            "tag": 13,
+            "type": "u32"
+          }
+        ]
+      },
+      "response": {
+        "fields": []
+      },
+      "summary": "read whole telemetry batches",
+      "visibility": "public"
+    }
+  ],
+  "types": []
+}

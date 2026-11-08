@@ -26,7 +26,7 @@ memory is tracked, not only reported: `lowest_free` shows the worst moment since
 ## 60. `device_info` — Structured device and component status
 
 Built-in records are read during the call; contributed records (a component's `info_publish`) are cached and may be stale.
-This call never invokes another module. No console module is needed. No partial record is returned on buffer overflow.
+This call never invokes another module. No sys module is needed. No partial record is returned on buffer overflow.
 
 **Access:** authenticated
 
@@ -52,6 +52,8 @@ This call never invokes another module. No console module is needed. No partial 
 | 5 | `partition_address` | `u32` | Its address. |
 | 6 | `partition_size` | `u32` | Its size. |
 | 7 | `mac` | `bytes` | Factory Wi-Fi station MAC, six bytes. |
+| 8 | `image_address` | `u32` | Physical start of the executing runtime within its partition; omitted when unknown. |
+| 9 | `image_size` | `u32` | Its 64 KiB-rounded flash span; omitted when unknown. |
 
 `WifiStatus` fields:
 
@@ -112,6 +114,7 @@ This call never invokes another module. No console module is needed. No partial 
 | 11 | `reboot` | `bool` | The module stopped with memory it had not freed: it cannot be replaced until the device restarts. |
 | 12 | `page` | `u32` | The 64 KiB page of the module partition the active image sits on. |
 | 13 | `shadowed` | `Shadowed[]` | The other installed images of this module name: lower versions (kept for recovery, the first pages to be reused) and duplicates. Empty when none. |
+| 14 | `quarantined` | `bool` | A Rust panic disabled this module until power-on; start requests are rejected. |
 
 `Shadowed` fields:
 
@@ -157,3 +160,34 @@ The owner briefly warms up to 32 RX slots after a burst/receive shortage and
 returns to four cached slots after quiet operation. Counter collection can be
 disabled with `CONFIG_XIP_PACKET_STATS`. These limits are independent of Wi-Fi's
 SDK RX buffers and lwIP's UDP socket mailbox.
+
+### Rust module panics
+
+`get_component("module-panic")` returns the version-1 `xip_module_panic` table
+(`ModulePanic` in the Rust ABI). The shared Rust panic handler calls `report`
+with a bounded message and its current host context. The runtime emits a structured CBOR diagnostic,
+records the module name in retained RTC RAM, and
+restarts. The loader rejects every start of that name until a power cycle,
+including explicit starts and requests that would start a component provider.
+No module cleanup or flash write runs from the panic handler.
+
+`read` returns a pending diagnostic as CBOR `{0:3, 1: "panic", 2: module_name,
+3: message_bytes}` and the caller's module address. After reboot, mod_flash
+appends this record through the files log API. It calls `logged` only after a
+successful durable reply; errors retain the record for retry. Quarantine
+remains after logging. RTC holds the last diagnostic and up to 32 disabled
+names; a full list refuses all module starts. A power cycle clears RTC state.
+Older runtimes without this component receive an ordinary reset request.
+
+### Structured native fault diagnostics
+
+Native console PPP port 1 carries CBOR fault records, rendered on the host by
+`dmesh-cli console SERIAL watch`. No firmware printf line surrounds the record.
+Panic record: `{0:3, 1:"panic", 2:module, 3:panic_message_bytes}`. When the same
+module has an allocation failure recorded, fields 4–9 carry requested bytes,
+free heap, largest free block, managed bytes used, quota and rejection reason.
+Allocation denial record: `{0:4, 1:module, 2:bytes, 3:free, 4:largest,
+5:used, 6:quota, 7:reason}`; reason 1 is host reserve, 2 is managed allocator
+failure (heap/quota), 3 is post-allocation host reserve. These are diagnostics, not ABI
+return codes. RTC holds diagnostics before reboot; mod_flash persists them
+through the ordinary telemetry commit path after boot.

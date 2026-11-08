@@ -118,11 +118,11 @@
       }
     },
     {
-      "doc": "The `system` component table.",
-      "name": "system",
+      "doc": "The `sys` component table.",
+      "name": "sys",
       "x-c": {
         "mode": "hosted",
-        "table": "System",
+        "table": "Sys",
         "version": ""
       }
     }
@@ -2813,10 +2813,10 @@
       }
     },
     {
-      "component": "system",
+      "component": "sys",
       "doc": "1. Free, minimum-free and largest-block values, in bytes.",
       "method": "heap",
-      "name": "system.heap",
+      "name": "sys.heap",
       "note": "",
       "summary": "1. Free, minimum-free and largest-block values, in bytes.",
       "x-c": {
@@ -2828,17 +2828,17 @@
               "size": 24
             },
             "name": "response",
-            "type": "*mut SystemHeapInfo"
+            "type": "*mut SysHeapInfo"
           }
         ],
-        "table": "System"
+        "table": "Sys"
       }
     },
     {
-      "component": "system",
+      "component": "sys",
       "doc": "2. Kinds: 0 memory regions, 1 block snapshot, 3 trace start, 4 trace dump, 5 trace stop, 6 CBOR block records over native PPP.",
       "method": "heap_dump",
-      "name": "system.heap_dump",
+      "name": "sys.heap_dump",
       "note": "",
       "summary": "2. Kinds: 0 memory regions, 1 block snapshot, 3 trace start, 4 trace dump, 5 trace stop, 6 CBOR block records over native PPP.",
       "x-c": {
@@ -2850,23 +2850,23 @@
               "size": 4
             },
             "name": "request",
-            "type": "*const SystemHeapDump"
+            "type": "*const SysHeapDump"
           }
         ],
-        "table": "System"
+        "table": "Sys"
       }
     },
     {
-      "component": "system",
+      "component": "sys",
       "doc": "3. Clients debugging scheduling or memory usage request task names, priorities and remaining stack bytes.",
       "method": "dump_tasks",
-      "name": "system.dump_tasks",
+      "name": "sys.dump_tasks",
       "note": "",
       "summary": "3. Clients debugging scheduling or memory usage request task names, priorities and remaining stack bytes.",
       "x-c": {
         "index": 2,
         "params": [],
-        "table": "System"
+        "table": "Sys"
       }
     }
   ],

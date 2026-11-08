@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "args": {
+          "type": "array",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "i64[]"
+        },
+        "export": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        },
+        "memory_cap": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "wasm3.run"
+        },
+        "program": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 51,
+      "x-method-index": 1
+    },
+    {
+      "properties": {
+        "args": {
+          "type": "array",
+          "x-protobuf-index": 3,
+          "x-protobuf-type": "i64[]"
+        },
+        "export": {
+          "type": "string",
+          "x-protobuf-index": 2,
+          "x-protobuf-type": "string"
+        },
+        "memory_cap": {
+          "type": "integer",
+          "x-protobuf-index": 4,
+          "x-protobuf-type": "u32"
+        },
+        "method": {
+          "const": "wasm3.run_file"
+        },
+        "name": {
+          "type": "string",
+          "x-protobuf-index": 1,
+          "x-protobuf-type": "bytes"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object",
+      "x-component-index": 51,
+      "x-method-index": 2
+    }
+  ]
+}
