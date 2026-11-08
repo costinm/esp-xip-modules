@@ -19,8 +19,10 @@
 //! int xip_handle(const xip_host *host, void *state, const xip_call *call);
 //! ```
 //!
-//! * `state` is a zeroed block of `state_bytes` (image header) that the host keeps for the module. An image has no
-//!   writable data, so everything the module remembers between calls lives there.
+//! * `state` is the root object: a zeroed block of `state_bytes` (image header), or NULL when the header asks for none. An image has no
+//!   writable data, so what the module remembers between calls lives in state objects (`Host::state_resize`: instance objects
+//!   freed when the instance ends, retained objects kept for the next start of the module). A module returns `RET_DONE` when it is
+//!   idle; see `Hw::state_resize`.
 //! * `call->component` and `call->method` say what happened. They are a pair of integers chosen by **whoever
 //!   created the event** and returned unchanged, as in the ssh-mesh envelope (keys `component`, `method`): the
 //!   module picks them when it registers an alarm or an interrupt, main picks them when it posts a request. A
@@ -94,7 +96,7 @@ pub use identity::*;
 mod native;
 pub use native::*;
 
-/// The host calls of a module compiled to WebAssembly (`modules/WASM.md`): named imports of the module `xip`, in the one
+/// The host calls of a module compiled to WebAssembly (`modules/mod_wasm3/WASM.md`): named imports of the module `xip`, in the one
 /// address space the host and all modules share. Only the calls listed here exist so far; the rest answer `ERR_UNSUPPORTED`.
 /// cbindgen:ignore
 #[cfg(target_arch = "wasm32")]
@@ -144,6 +146,8 @@ mod wasm {
         pub fn heap_info(out: *mut u8, cap: usize) -> i32;
         pub fn heap_dump(kind: i32) -> i32;
         pub fn nv(key: *const u8, key_len: usize, value: *const u8, value_len: usize, out: *mut u8, cap: usize) -> i32;
+        pub fn state_resize(key: u32, class: u32, size: usize, out: *mut *mut u8) -> i32;
+        pub fn state_get(key: u32, out: *mut *mut u8, size: *mut usize) -> i32;
         pub fn flash_erase(address: u32, offset: u32, len: u32, component: i32, method: i32, id: u64) -> i32;
         pub fn flash_write(address: u32, offset: u32, pkt: u32, start: u32, len: u32, component: i32, method: i32, id: u64) -> i32;
         pub fn flash_read(address: u32, offset: u32, out: *mut u8, len: usize) -> i32;
@@ -199,6 +203,8 @@ macro_rules! wasm_imp {
     (heap_info ( $($a:expr),* )) => { unsafe { wasm::heap_info($($a),*) } };
     (heap_dump ( $($a:expr),* )) => { unsafe { wasm::heap_dump($($a),*) } };
     (nv ( $($a:expr),* )) => { unsafe { wasm::nv($($a),*) } };
+    (state_resize ( $($a:expr),* )) => { unsafe { wasm::state_resize($($a),*) } };
+    (state_get ( $($a:expr),* )) => { unsafe { wasm::state_get($($a),*) } };
     (flash_erase ( $($a:expr),* )) => { unsafe { wasm::flash_erase($($a),*) } };
     (flash_write ( $($a:expr),* )) => { unsafe { wasm::flash_write($($a),*) } };
     (flash_read ( $($a:expr),* )) => { unsafe { wasm::flash_read($($a),*) } };
@@ -522,6 +528,25 @@ impl Hw {
         let (vp, vl) = match value { Some(v) => (v.as_ptr(), v.len()), None => (core::ptr::null(), 0) };
         call!(self, NV, nv(key.as_ptr(), key.len(), vp, vl, out.as_mut_ptr(), out.len()))
     }
+    /// The state object `key` of `class` (`STATE_INSTANCE` or `STATE_RETAINED`): created zeroed, resized (contents kept up to the
+    /// smaller size), or freed with `size` 0. Returns its pointer (NULL after a free). Pointers are valid until the next resize or
+    /// free of the key, or the end of the instance; see `Host::state_resize`.
+    pub fn state_resize(&self, key: u32, class: u32, size: usize) -> Result<*mut u8, i32> {
+        let mut out: *mut u8 = core::ptr::null_mut();
+        match call!(self, STATE_RESIZE, state_resize(key, class, size, &mut out)) {
+            rc if rc < 0 => Err(rc),
+            _ => Ok(out),
+        }
+    }
+    /// The state object `key` (instance first, then retained): its pointer and size, or `ERR_NOTFOUND`.
+    pub fn state_get(&self, key: u32) -> Result<(*mut u8, usize), i32> {
+        let mut out: *mut u8 = core::ptr::null_mut();
+        let mut size = 0usize;
+        match call!(self, STATE_GET, state_get(key, &mut out, &mut size)) {
+            rc if rc < 0 => Err(rc),
+            _ => Ok((out, size)),
+        }
+    }
 
     /// The `wifi` component (the wanted state of the radio), or None when this host has none.
     pub fn wifi(&self) -> Option<&'static Wifi> {
@@ -789,10 +814,176 @@ pub trait Module: Sized {
     }
 }
 
-/// Export `xip_handle` for a [`Module`] type; `state = N` asserts at compile time that the type fits the state
+/// Check of a component table, run at compile time by [`export_module!`]: at most 8 entries, component IDs distinct and positive.
+#[doc(hidden)]
+pub const fn component_table_ok(table: &[(i32, u32)]) -> bool {
+    if table.len() > 8 {
+        return false;
+    }
+    let mut i = 0;
+    while i < table.len() {
+        if table[i].0 <= 0 {
+            return false;
+        }
+        let mut j = i + 1;
+        while j < table.len() {
+            if table[j].0 == table[i].0 {
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The state of a module declared with `state = dynamic` ([`export_module!`]): the root object (key 0), an instance object of the
+/// type's size, created zeroed. The host passes the root once it exists (a header with a state block preallocates it), so the
+/// host call is made only on the first call, when `state` is null. A zero-sized type
+/// needs no object.
+#[doc(hidden)]
+pub fn dynamic_state<T>(hw: &Hw, state: *mut u8) -> Result<*mut T, i32> {
+    let size = core::mem::size_of::<T>();
+    if size == 0 {
+        return Ok(core::ptr::NonNull::dangling().as_ptr());
+    }
+    if !state.is_null() {
+        return Ok(state.cast());
+    }
+    hw.state_resize(0, STATE_INSTANCE, size).map(|p| p.cast())
+}
+
+/// Export `xip_handle` for a [`Module`] type. `state = dynamic` makes the state a root object of the type's size, created by the
+/// host on the first call (the image asks for no state block: `--state 0`); the forms below take the state block of the image.
+///
+/// `state = N` asserts at compile time that the type fits the state
 /// block that the image header asks for (`mkmod.py --state N`).
+///
+/// `components = [(ID, VERSION, function), ...]` (optional) makes the module's wire components static: every call
+/// whose component is ID goes to `function(&mut Ty, &Hw, &CallView) -> i32` through a plain `match` (no table of
+/// function pointers: an image has no relocations). Host calls and components not in the table still go to
+/// [`Module::handle_owned`]. The table is also emitted as `.xip_comp` (LE `i32` ID, `u32` version pairs), which
+/// `tools/mkmod.py` checks against the manifest's key 13 (`--wire`). Packets are released when the function returns.
+///
+/// `components = [(ID, VERSION, field, function), ...]` is the projection form for a module that composes independent
+/// components: the call goes to `function(&mut Ty.field, &Hw, &CallView) -> i32`, where `field` is a public field of the
+/// module type (a component's state, see the component crate). The field must be `pub` and reachable from the expansion.
 #[macro_export]
 macro_rules! export_module {
+    ($ty:ty, state = dynamic, components = [$(($id:literal, $ver:literal, $field:ident, $f:path)),* $(,)?]) => {
+        const _: () = assert!(core::mem::align_of::<$ty>() <= 16);
+        #[used]
+        #[link_section = ".xip_comp"]
+        static XIP_COMPONENTS: [(i32, u32); [$($id),*].len()] = [$(($id, $ver)),*];
+        const _: () = assert!($crate::component_table_ok(&[$(($id, $ver)),*]), "component table: at most 8 distinct positive IDs");
+        #[no_mangle]
+        pub unsafe extern "C" fn xip_handle(host: *const $crate::Host, state: *mut u8, call: *const $crate::Call) -> i32 {
+            let Some(hw) = $crate::Hw::new(host) else { return $crate::ERR_ARG };
+            let Some(view) = $crate::CallView::new(call) else { return $crate::ERR_ARG };
+            let packet=(view.pkt!=0).then(|| $crate::Packet::from_raw(hw,view.pkt));
+            let module = match $crate::dynamic_state::<$ty>(&hw, state) { Ok(p) => &mut *p, Err(rc) => return rc };
+            let saved = $crate::heap::enter(host);
+            let rc = if view.component == $crate::HOST_COMPONENT as i32 {
+                <$ty as $crate::Module>::handle_owned(module, &hw, &view, packet)
+            } else {
+                match view.component {
+                    $($id => $f(&mut module.$field, &hw, &view),)*
+                    _ => <$ty as $crate::Module>::handle_owned(module, &hw, &view, packet),
+                }
+            };
+            $crate::heap::leave(saved);
+            rc
+        }
+    };
+    ($ty:ty, state = dynamic, components = [$(($id:literal, $ver:literal, $f:path)),* $(,)?]) => {
+        const _: () = assert!(core::mem::align_of::<$ty>() <= 16);
+        #[used]
+        #[link_section = ".xip_comp"]
+        static XIP_COMPONENTS: [(i32, u32); [$($id),*].len()] = [$(($id, $ver)),*];
+        const _: () = assert!($crate::component_table_ok(&[$(($id, $ver)),*]), "component table: at most 8 distinct positive IDs");
+        #[no_mangle]
+        pub unsafe extern "C" fn xip_handle(host: *const $crate::Host, state: *mut u8, call: *const $crate::Call) -> i32 {
+            let Some(hw) = $crate::Hw::new(host) else { return $crate::ERR_ARG };
+            let Some(view) = $crate::CallView::new(call) else { return $crate::ERR_ARG };
+            let packet=(view.pkt!=0).then(|| $crate::Packet::from_raw(hw,view.pkt));
+            let module = match $crate::dynamic_state::<$ty>(&hw, state) { Ok(p) => &mut *p, Err(rc) => return rc };
+            let saved = $crate::heap::enter(host);
+            let rc = if view.component == $crate::HOST_COMPONENT as i32 {
+                <$ty as $crate::Module>::handle_owned(module, &hw, &view, packet)
+            } else {
+                match view.component {
+                    $($id => $f(module, &hw, &view),)*
+                    _ => <$ty as $crate::Module>::handle_owned(module, &hw, &view, packet),
+                }
+            };
+            $crate::heap::leave(saved);
+            rc
+        }
+    };
+    ($ty:ty, state = dynamic) => {
+        const _: () = assert!(core::mem::align_of::<$ty>() <= 16);
+        #[no_mangle]
+        pub unsafe extern "C" fn xip_handle(host: *const $crate::Host, state: *mut u8, call: *const $crate::Call) -> i32 {
+            let Some(hw) = $crate::Hw::new(host) else { return $crate::ERR_ARG };
+            let Some(view) = $crate::CallView::new(call) else { return $crate::ERR_ARG };
+            let packet=(view.pkt!=0).then(|| $crate::Packet::from_raw(hw,view.pkt));
+            let module = match $crate::dynamic_state::<$ty>(&hw, state) { Ok(p) => &mut *p, Err(rc) => return rc };
+            let saved = $crate::heap::enter(host);
+            let rc = <$ty as $crate::Module>::handle_owned(module, &hw, &view, packet);
+            $crate::heap::leave(saved);
+            rc
+        }
+    };
+    ($ty:ty, state = $n:expr, components = [$(($id:literal, $ver:literal, $field:ident, $f:path)),* $(,)?]) => {
+        const _: () = assert!(core::mem::size_of::<$ty>() <= $n && core::mem::align_of::<$ty>() <= 8);
+        #[used]
+        #[link_section = ".xip_comp"]
+        static XIP_COMPONENTS: [(i32, u32); [$($id),*].len()] = [$(($id, $ver)),*];
+        const _: () = assert!($crate::component_table_ok(&[$(($id, $ver)),*]), "component table: at most 8 distinct positive IDs");
+        #[no_mangle]
+        pub unsafe extern "C" fn xip_handle(host: *const $crate::Host, state: *mut u8, call: *const $crate::Call) -> i32 {
+            let Some(hw) = $crate::Hw::new(host) else { return $crate::ERR_ARG };
+            let Some(view) = $crate::CallView::new(call) else { return $crate::ERR_ARG };
+            let module = &mut *(state as *mut $ty);
+            let saved = $crate::heap::enter(host);
+            let packet=(view.pkt!=0).then(|| $crate::Packet::from_raw(hw,view.pkt));
+            let rc = if view.component == $crate::HOST_COMPONENT as i32 {
+                <$ty as $crate::Module>::handle_owned(module, &hw, &view, packet)
+            } else {
+                match view.component {
+                    $($id => $f(&mut module.$field, &hw, &view),)*
+                    _ => <$ty as $crate::Module>::handle_owned(module, &hw, &view, packet),
+                }
+            };
+            $crate::heap::leave(saved);
+            rc
+        }
+    };
+    ($ty:ty, state = $n:expr, components = [$(($id:literal, $ver:literal, $f:path)),* $(,)?]) => {
+        const _: () = assert!(core::mem::size_of::<$ty>() <= $n && core::mem::align_of::<$ty>() <= 8);
+        #[used]
+        #[link_section = ".xip_comp"]
+        static XIP_COMPONENTS: [(i32, u32); [$($id),*].len()] = [$(($id, $ver)),*];
+        const _: () = assert!($crate::component_table_ok(&[$(($id, $ver)),*]), "component table: at most 8 distinct positive IDs");
+        #[no_mangle]
+        pub unsafe extern "C" fn xip_handle(host: *const $crate::Host, state: *mut u8, call: *const $crate::Call) -> i32 {
+            let Some(hw) = $crate::Hw::new(host) else { return $crate::ERR_ARG };
+            let Some(view) = $crate::CallView::new(call) else { return $crate::ERR_ARG };
+            let module = &mut *(state as *mut $ty);
+            let saved = $crate::heap::enter(host);
+            let packet=(view.pkt!=0).then(|| $crate::Packet::from_raw(hw,view.pkt));
+            let rc = if view.component == $crate::HOST_COMPONENT as i32 {
+                <$ty as $crate::Module>::handle_owned(module, &hw, &view, packet)
+            } else {
+                match view.component {
+                    $($id => $f(module, &hw, &view),)*
+                    _ => <$ty as $crate::Module>::handle_owned(module, &hw, &view, packet),
+                }
+            };
+            $crate::heap::leave(saved);
+            rc
+        }
+    };
     ($ty:ty, state = $n:expr) => {
         const _: () = assert!(core::mem::size_of::<$ty>() <= $n && core::mem::align_of::<$ty>() <= 8);
         #[no_mangle]
@@ -816,9 +1007,9 @@ pub use nan_vtable::Nan;
 mod lora_vtable;
 pub use lora_vtable::Lora;
 
-mod system;
+mod sys;
 pub mod files;
 pub use files::*;
-pub use system::{SystemHeapInfo, SystemHeapDump};
-mod system_vtable;
-pub use system_vtable::System;
+pub use sys::{SysHeapInfo, SysHeapDump};
+mod sys_vtable;
+pub use sys_vtable::Sys;

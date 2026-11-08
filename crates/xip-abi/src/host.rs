@@ -109,7 +109,7 @@ pub const ADDR_MAIN: u32 = 0;
 /// `link.open` can return an address like a result, positive, and an error stays negative. Module addresses (component numbers) are below it.
 pub const ADDR_LINK: u32 = 0x4000_0000;
 /// `send` to this address hands the runtime a CBOR envelope `{1: component, 2: method, 3: id, 5: fields}` to dispatch, the way it dispatches a 0x444d0002 datagram: parsed
-/// by the runtime, delivered to the module of the component (or to the console module for a native component) as an ordinary request (`CALL_ENVELOPE`), with `from` the
+/// by the runtime, delivered to the module of the component (or to the sys module, the native fallback, for a native component) as an ordinary request (`CALL_ENVELOPE`), with `from` the
 /// sender and `id` the `id` argument of the `send`. The answer comes back to the sender as a message from the module, wrapped as `{1, 2, 3, 6: result}` or `{.., 7: error}`,
 /// with the request's component and method and the same `id`. `ERR_ARG` if it is not a valid request envelope, `ERR_NOTFOUND` if no module serves it.
 pub const ADDR_ENVELOPE: u32 = 0x3fff_fff0;
@@ -357,7 +357,7 @@ pub struct Host {
     pub alarm_cancel: Option<unsafe extern "C" fn(user: *mut c_void, alarm: core::ffi::c_int) -> core::ffi::c_int>,
     /// Every module slot.
     ///
-    /// One CBOR array with a map per slot, keyed as the `slot` record of `modules/mod_con/API.md`: name, tag, installed, running,
+    /// One CBOR array with a map per slot, keyed as the `slot` record of `crates/sys/API.md`: name, tag, installed, running,
     /// version, last result, runs, duration of the last run, stack high-water mark, result of the last image check.
     ///
     /// # Returns
@@ -499,12 +499,10 @@ pub struct Host {
     ///
     /// A module image carries a **manifest** at the offset its header gives (`manifest_offset`, `manifest_size`), read from flash
     /// without starting the module, so it is available for an installed module that is not running and for one installed after the
-    /// console was built. It is the module's `API.md` as a compact CBOR catalog, written by `tools/mkmod.py`: the module's name and
-    /// component, its methods (id, name, and which request and response field list each uses), the field lists (tag, name, kind
-    /// and, for a record, its type) and the record types. It is the equivalent of an MCP `tools.json` and carries what a text or
-    /// JSON front end needs to turn `NAME.METHOD key=value` into the module's request without any ID compiled into it: the
-    /// component of a module is found by name in `modules_info`, everything below it in the manifest. The module's own code never
-    /// reads it. (Format: `tools/mkmod.py`, `manifest_of_api`.)
+    /// console was built. Written by `tools/mkmod.py`: the module's name (key 1), its component number (key 2) and what only the build
+    /// knows (start, ports, components, wire components, version). The API catalog of its `API.md` (methods, field lists, records) is
+    /// not in the image: the clients read the schemas generated from that file. The module's own code never reads it.
+    /// (Format: `tools/mkmod.py`, `catalog_free` and `manifest_with`.)
     ///
     /// Physical flash HAL calls do not interpret manifests; the control plane and upload module own image policy.
     ///
@@ -521,7 +519,7 @@ pub struct Host {
     pub module_manifest: Option<unsafe extern "C" fn(user: *mut c_void, name: *const u8, name_len: usize, out: *mut u8, capacity: usize) -> core::ffi::c_int>,
     /// Free memory of the device.
     ///
-    /// RAM is the scarce resource on these chips, so the host reports it to any module that asks (the console's `heap`). One CBOR map of
+    /// RAM is the scarce resource on these chips, so the host reports it to any module that asks (the sys component's `heap`). One CBOR map of
     /// byte counts: `{1: free, 2: largest block, 3: lowest free since boot, 4: total, 5: free internal RAM, 6: largest internal block}`.
     /// "Largest block" is the biggest single allocation that would succeed now; a heap can have plenty free and still refuse a
     /// request (fragmentation). Free memory is **tracked**, not only reported: a build that logs it on a change or at boot has the
@@ -545,7 +543,7 @@ pub struct Host {
     /// `wifi.tx_dynamic`, `wifi.rx_ba` (the Wi-Fi driver's buffer counts, which are RAM) from the loader, `flash.auth`
     /// (`strict` by default or `unsigned`, applied when the upload module starts), and whatever else the application
     /// lists (DMesh: `quic.pool`, ...). The runtime handles shared settings and delegates application names. This is for a
-    /// console or a tool; a module's own settings are `get_setting` / `set_setting`. With `value` NULL it reads; with a value it writes
+    /// tool; a module's own settings are `get_setting` / `set_setting`. With `value` NULL it reads; with a value it writes
     /// (an empty value restores the default). Most settings apply at the next start of the thing they configure, or after a reboot.
     ///
     /// # Returns
@@ -734,7 +732,7 @@ pub struct Host {
     /// Packets is the global delivery queue/pool snapshot described by host.API.md; empty when unsupported.
     /// Times are milliseconds since boot. Built-in records are read during the call; contributed
     /// records are cached and may be stale. This call never invokes another module handler.
-    /// No console module is needed. No partial record is returned on buffer overflow.
+    /// No sys module is needed. No partial record is returned on buffer overflow.
     ///
     /// # Returns
     ///
@@ -825,9 +823,55 @@ pub struct Host {
     /// * `data` (`const uint8_t *`): Bytes to send.
     /// * `len` (`size_t`): Byte count.
     pub udp_send: Option<unsafe extern "C" fn(user: *mut c_void, handle: u32, ip: *const u8, port: u16, scope: u32, data: *const u8, len: usize) -> core::ffi::c_int>,
+    /// Create, resize or free the state object `key` of `class` (`STATE_INSTANCE` or `STATE_RETAINED`). A new object is zeroed; a
+    /// resize keeps the contents up to the smaller size and zeroes the new bytes; `size` 0 frees it. `*out` is the (possibly moved)
+    /// pointer, NULL after a free. Key 0 is the root: the `state` argument of `xip_handle`, always an instance object.
+    /// Pointers stay valid until the next resize or free of that key, or the end of the instance. Retained data must not hold
+    /// pointers into the instance (its memory is released at the end, and a restart maps no pointer of the old one).
+    ///
+    /// Instance objects count against the module's memory quota (like `mem_alloc`) and are freed when the instance is released.
+    /// Retained objects count against the device-wide retained cap and at most 8 per module name; they are kept for the next
+    /// instance of the same name and manifest version, and dropped when an instance with another version starts. Retained
+    /// memory is not reported as a leak. Classes `STATE_PSRAM` and `STATE_RTC` are reserved and return `ERR_UNSUPPORTED`.
+    /// Appended: a host with a shorter `size` does not have it.
+    ///
+    /// # Returns
+    ///
+    /// `int` — `OK`, `ERR_ARG` (bad class or key, or the key exists with another class), `ERR_NOMEM`, `ERR_SIZE` (over the quota or
+    /// the retained cap), or `ERR_UNSUPPORTED`.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` (`uint32_t`): Object number; 0 is the root.
+    /// * `class` (`uint32_t`): `STATE_INSTANCE`, `STATE_RETAINED`.
+    /// * `size` (`size_t`): New size in bytes; 0 frees.
+    /// * `out` (`void **`): Receives the pointer.
+    pub state_resize: Option<unsafe extern "C" fn(user: *mut c_void, key: u32, class: u32, size: usize, out: *mut *mut u8) -> core::ffi::c_int>,
+    /// The state object `key` of this module: its pointer and size. Looks at instance objects, then retained ones of the module.
+    /// Appended: a host with a shorter `size` does not have it.
+    ///
+    /// # Returns
+    ///
+    /// `int` — `OK`, or `ERR_NOTFOUND`.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` (`uint32_t`): Object number.
+    /// * `out` (`void **`): Receives the pointer.
+    /// * `size` (`size_t *`): Receives the size.
+    pub state_get: Option<unsafe extern "C" fn(user: *mut c_void, key: u32, out: *mut *mut u8, size: *mut usize) -> core::ffi::c_int>,
 }
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<Host>() == 172);
+const _: () = assert!(core::mem::size_of::<Host>() == 180);
+
+/// `state_resize` class: the object lives as long as the instance (freed when it is released, counted in its quota).
+pub const STATE_INSTANCE: u32 = 0;
+/// `state_resize` class: the object survives the release and restart of an instance of the same name and version.
+pub const STATE_RETAINED: u32 = 1;
+/// `state_resize` class, reserved for PSRAM (not implemented yet: `ERR_UNSUPPORTED`).
+pub const STATE_PSRAM: u32 = 2;
+/// `state_resize` class, reserved for RTC memory (not implemented yet: `ERR_UNSUPPORTED`).
+pub const STATE_RTC: u32 = 3;
 
 /// Byte offset of each host call, for `Hw`'s check that an older host has the slot.
 pub mod slot {
@@ -868,6 +912,8 @@ pub mod slot {
     pub const INFO_PUBLISH: usize = core::mem::offset_of!(Host, info_publish);
     pub const GET_COMPONENT: usize = core::mem::offset_of!(Host, get_component);
     pub const MODULE_RESCAN: usize = core::mem::offset_of!(Host, module_rescan);
+    pub const STATE_RESIZE: usize = core::mem::offset_of!(Host, state_resize);
+    pub const STATE_GET: usize = core::mem::offset_of!(Host, state_get);
 }
 
 /// Geometry of the shared pool; no per-module allocation budget.

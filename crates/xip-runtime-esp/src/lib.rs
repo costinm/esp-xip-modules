@@ -19,7 +19,7 @@ pub mod settings;
 
 pub use loader::{post, PacketHandler, autostart, call, find, init, manifest, request_raw, slot_manifest, slot_count, start, status, stop, stop_all, EventHandler, Features, PoolOps, SlotStatus, WifiOwner};
 
-/// Read host status without depending on a console module.
+/// Read host status without depending on a sys module.
 #[cfg(target_os = "espidf")]
 pub fn device_info(out: &mut [u8]) -> Result<usize, i32> {
     extern "C" { fn xip_device_info(out: *mut u8, capacity: usize) -> i32; }
@@ -48,6 +48,3 @@ mod tests {
         assert!(stop_all(10));
     }
 }
-
-/// Validated installed module API metadata.
-pub mod module_api;

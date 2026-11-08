@@ -1,7 +1,7 @@
 //! A compact schema of the component tables: for each component its methods, in table order, with their names and the shape of their
 //! arguments. It is static data (`no_std`, no allocation) that every side can carry: the wasm bridge (`xip-wasm`) calls a native table
-//! method from it without a `match` per method, a gateway or `mod_con` can turn a CBOR request into a call, and a proxy of the hardware over
-//! a stream can name the methods it forwards (`modules/WASM-PORTING.md`).
+//! method from it without a `match` per method, a gateway or the console (`mod_system`) can turn a CBOR request into a call, and a proxy of the hardware over
+//! a stream can name the methods it forwards (`modules/mod_wasm3/WASM-PORTING.md`).
 //!
 //! A component has no number: a caller finds it by name (`get_component`, or [`component`] for the tables the host provides), and a
 //! method is its index in the table, whose order and version keep callers compatible. A module that hosts a table carries the schema of

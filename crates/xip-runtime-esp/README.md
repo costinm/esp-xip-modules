@@ -1,7 +1,7 @@
 # xip-runtime-esp
 
 Rust integration for ESP firmware using the C module runtime and loader. Use it
-to initialize the host, load installed modules, and start, stop or call them.
+to initialize the host, load installed modules, and create, release or call their instances.
 
 ```rust
 use xip_runtime_esp::{autostart, init, Features};

@@ -39,8 +39,8 @@ pub static SCHEMA_LORA: &[u8] = b"configure\x00\x00\x02b\x01vsuspend\x00\x00\x00
 /// The schema of `nan` (5 methods, in table order).
 pub static SCHEMA_NAN: &[u8] = b"usb\x00\x00\x01vwake\x00\x00\x01vsleepy\x00\x00\x04vvvvset_announce\x00\x00\x02b\x01vtransport_set\x00\x00\x01i\x28\x00\x00";
 
-/// The schema of `system` (3 methods, in table order).
-pub static SCHEMA_SYSTEM: &[u8] = b"heap\x00\x00\x01o\x18\x00heap_dump\x00\x00\x01i\x04\x00dump_tasks\x00\x00\x00\x00";
+/// The schema of `sys` (3 methods, in table order).
+pub static SCHEMA_SYS: &[u8] = b"heap\x00\x00\x01o\x18\x00heap_dump\x00\x00\x01i\x04\x00dump_tasks\x00\x00\x00\x00";
 
 /// The components the host provides, by name.
 pub static COMPONENTS: [(&str, &[u8]); 10] = [

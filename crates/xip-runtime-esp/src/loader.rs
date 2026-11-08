@@ -62,7 +62,7 @@ pub type PacketHandler = unsafe extern "C" fn(*mut core::ffi::c_void, *const cor
 /// What the application offers its modules through the ABI beyond the hardware.
 #[derive(Clone, Copy, Default)]
 pub struct Features {
-    /// `status`, `start`, `stop` of module slots for the console module (links `xip_loader`'s by-name calls).
+    /// `status`, `start`, `stop` of module slots for the sys module (links `xip_loader`'s by-name calls).
     pub modules: bool,
     /// The application's own device settings (`nv`, include/xip.h): called with a name, a value or NULL to read, and a buffer; returns
     /// the length read, 0 written, or -1 bad argument, -3 storage, -4 unknown, -5 buffer too small.
@@ -240,7 +240,7 @@ mod imp {
 pub fn init(partition: &'static str, features: Features, on_event: Option<EventHandler>) -> i32 {
     imp::init(partition, features, on_event)
 }
-/// Start the installed modules whose manifest asks to run at boot (a console). The application calls it last, once everything a
+/// Start the installed modules whose manifest asks to run at boot (a debug module). The application calls it last, once everything a
 /// module may use is up; an application that owns the serial port itself (DMesh with its PPP bearer) does not call it. Few modules should ask.
 pub fn autostart() -> i32 { imp::autostart() }
 /// The slot of a module name.
