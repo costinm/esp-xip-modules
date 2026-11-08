@@ -8,6 +8,9 @@ fn schema() -> Result<TaggedSchema, String> {
     let mut tools = Vec::new();
     for text in [
         include_str!("../../../api/generated/schemas/xip-con/tools.json"),
+        include_str!("../../../api/generated/schemas/xip-files/tools.json"),
+        include_str!("../../../api/generated/schemas/xip-berry/tools.json"),
+        include_str!("../../../api/generated/schemas/xip-wasm3/tools.json"),
         include_str!("../../../api/generated/schemas/xip-system/tools.json"),
         include_str!("../../../api/generated/schemas/xip-wifi/tools.json"),
         include_str!("../../../api/generated/schemas/xip-transport/tools.json"),
@@ -50,6 +53,26 @@ struct Request {
     id: u64,
 }
 
+fn filename_args(method: &str, args: &[String]) -> Vec<String> {
+    let mut args = args.to_vec();
+    if !method.starts_with("files.") && !matches!(method,"berry.eval_file"|"wasm3.run_file") {
+        return args;
+    }
+    for arg in &mut args {
+        let prefix = if arg.starts_with("--name=") { Some("--name=") }
+            else if arg.starts_with("--after=") { Some("--after=") }
+            else { None };
+        if let Some(prefix) = prefix {
+            let value = &arg[prefix.len()..];
+            if !value.starts_with("hex:") {
+                let hex: String = value.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+                *arg = format!("{prefix}hex:{hex}");
+            }
+        }
+    }
+    args
+}
+
 fn request(words: &[String], id: u64) -> Result<Request, String> {
     let method = words.first().map_or("console.status", String::as_str);
     let alias=method.strip_prefix("rtest.").map(|name|format!("test.{name}"));
@@ -79,8 +102,9 @@ fn request(words: &[String], id: u64) -> Result<Request, String> {
         }
     }
     let schema = schema()?;
+    let args = filename_args(&method, words.get(1..).unwrap_or_default());
     let mut record = schema
-        .parse_argv(&method, words.get(1..).unwrap_or_default())
+        .parse_argv(&method, &args)
         .map_err(|e| e.to_string())?;
     record.id = Some(Value::from(id));
     let bytes = schema.encode_request(&record).map_err(|e| e.to_string())?;
@@ -159,6 +183,19 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Value, String> {
     Ok(v)
 }
 
+fn diagnostic(bytes: &[u8]) -> Result<Value,String> {
+    let mut record=decode(bytes)?;
+    if record["0"].as_u64()==Some(3) {
+        if let Some(hex)=record["3"].as_str().and_then(|s|s.strip_prefix("hex:")) {
+            let data=(0..hex.len()).step_by(2).map(|i|hex.get(i..i+2).ok_or(()).and_then(|s|u8::from_str_radix(s,16).map_err(|_|()))).collect::<Result<Vec<_>,_>>();
+            if let Ok(text)=data.and_then(|b|String::from_utf8(b).map_err(|_|())) {
+                if let Some(object)=record.as_object_mut(){object.insert("message".into(),text.into());}
+            }
+        }
+    }
+    Ok(record)
+}
+
 fn response(
     reader: &mut Reader,
     bytes: &[u8],
@@ -202,7 +239,7 @@ fn response(
 
 /// Native C Main operations use the same target/method form as other CLI calls.
 pub(crate) fn is_native(method: &str) -> bool {
-    matches!(method,"wake"|"sleep"|"nv"|"watch"|"transport.set") || ["system.","nan.","wifi.","ble.","disc.","quic.","lora.","hw.","rtest.","test.","console."].iter().any(|p|method.starts_with(p))
+    matches!(method,"wake"|"sleep"|"nv"|"watch"|"transport.set") || ["files.","berry.","wasm3.","system.","nan.","wifi.","ble.","disc.","quic.","lora.","hw.","rtest.","test.","console."].iter().any(|p|method.starts_with(p))
 }
 fn native_words(words: &[String]) -> Result<Vec<String>,String> {
     match words.first().map(String::as_str) {
@@ -244,19 +281,23 @@ pub(crate) fn report(bytes: &[u8]) -> Result<Value,String> {
     }
     Ok(Value::Object(out))
 }
-fn watch(owner: &mut XipPort) -> Result<(),String> {
+fn watch(owner: &mut XipPort, duration: Option<Duration>) -> Result<(),String> {
     let mut reader=Reader::default();
-    loop {
+    let until=duration.map(|d|Instant::now()+d);
+    while until.is_none_or(|deadline|Instant::now()<deadline) {
         let bytes=owner.read().map_err(|e|e.to_string())?;
         for event in reader.feed(&bytes) {
-            if let Event::Record(PORT_NAN_REPORT,data)=event {
-                if let Ok(report)=report(&data) {println!("{report}");}
+            match event {
+                Event::Record(1,data)=>{if let Ok(value)=diagnostic(&data){println!("{value}");}},
+                Event::Record(PORT_NAN_REPORT,data)=>{if let Ok(report)=report(&data){println!("{report}");}},
+                _=>{}
             }
         }
         let text=reader.take_text();
         if !text.is_empty() {eprint!("{}",String::from_utf8_lossy(&text));}
         if bytes.is_empty() {std::thread::sleep(Duration::from_millis(5));}
     }
+    Ok(())
 }
 pub(crate) fn run_native(arguments: &[String]) -> Result<(),String> {
     if arguments.iter().any(|a|a=="--via" || a.starts_with("--via=")) {
@@ -296,7 +337,7 @@ pub(crate) fn run_native(arguments: &[String]) -> Result<(),String> {
     // Encode/validate before touching the physical port.
     let req=if waking || watching {None} else {Some(request(&words,crate::client::fresh_request_id())?)};
     let mut owner=XipPort::open_baud(path,baud).map_err(|e|e.to_string())?;
-    if watching {return watch(&mut owner);}
+    if watching {return watch(&mut owner,None);}
     owner.wake()?;
     let Some(req)=req else {println!("{}",json!({"awake":true}));return Ok(());};
     run_request(&mut owner,PORT_QUIC,&req,Duration::from_secs(6))
@@ -360,6 +401,10 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     if !seconds.is_finite() || seconds <= 0.0 || seconds > 300.0 {
         return Err("--seconds must be greater than zero and at most 300".into());
     }
+    if words.as_slice()==["watch"] {
+        let mut owner=XipPort::open(path).map_err(|e|e.to_string())?;
+        return watch(&mut owner,Some(Duration::from_secs_f64(seconds)));
+    }
     let request = request(&words, crate::client::fresh_request_id())?;
     if path.starts_with("udp://") {return run_udp(path,&request);}
     let mut owner = XipPort::open(path).map_err(|e| e.to_string())?;
@@ -370,6 +415,14 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn structured_panic_is_rendered_on_host() {
+        let mut e=minicbor::Encoder::new(Vec::new());
+        e.map(4).unwrap().u8(0).unwrap().u8(3).unwrap().u8(1).unwrap().str("panic").unwrap()
+         .u8(2).unwrap().str("ptest").unwrap().u8(3).unwrap().bytes(b"intentional failure").unwrap();
+        let value=diagnostic(&e.into_writer()).unwrap();
+        assert_eq!(value["2"],"ptest");assert_eq!(value["message"],"intentional failure");
+    }
     #[test]
     fn set_tuning_encodes_power_as_a_number() {
         let req=request(&["wifi.set_tuning".into(),"--power=2".into()],7).unwrap();
@@ -395,6 +448,25 @@ mod tests {
         assert_eq!(v["5"]["7"],"0123456789");
         assert_eq!(v["5"]["2"],true);
         assert_eq!(v["5"]["10"],false);
+    }
+    #[test]
+    fn direct_files_and_stored_programs_use_runtime_component_ids() {
+        let req=request(&["files.file.put".into(),"--name=hex:636667".into(),"--data=hex:0001".into()],11).unwrap();
+        let v=decode(&req.bytes).unwrap();assert_eq!(v["1"],15);assert_eq!(v["2"],18);assert_eq!(v["5"]["13"],"hex:0001");
+        for (name,component) in [("berry.eval_file",50),("wasm3.run_file",51)] {
+            assert!(is_native(name));let req=request(&[name.into(),"--name=hex:70726f67".into()],12).unwrap();
+            let v=decode(&req.bytes).unwrap();assert_eq!(v["1"],component);assert_eq!(v["2"],2);
+        }
+    }
+    #[test]
+    fn filenames_accept_plain_text_and_explicit_binary_names() {
+        for (method,name,hex) in [("files.file.get","cfg","636667"),("berry.eval_file","berry","6265727279"),("wasm3.run_file","wasm","7761736d"),("files.file.get","deadbeef","6465616462656566"),("files.file.get","é","c3a9")] {
+            let plain=request(&[method.into(),format!("--name={name}")],13).unwrap();
+            let binary=request(&[method.into(),format!("--name=hex:{hex}")],13).unwrap();
+            assert_eq!(plain.bytes,binary.bytes);
+        }
+        let a=request(&["files.file.list".into(),"--after=cfg".into()],14).unwrap();
+        assert_eq!(decode(&a.bytes).unwrap()["5"]["1"],"hex:636667");
     }
     #[test]
     fn native_transport_uses_current_runtime_wire_tags() {

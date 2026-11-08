@@ -74,6 +74,7 @@ pub(super) fn run() -> Result<(), String> {
         match exchange_discovery_nodes(peer.peer, &request) {
             Ok(bytes) => match decode_nodes(&vip(&peer.announce), &bytes) {
                 Ok(rows) => {
+                    persist_nodes(&vip(&peer.announce), &bytes)?;
                     let mut latest = BTreeMap::new();
                     for row in rows {
                         latest.insert(
@@ -298,4 +299,22 @@ mod tests {
         assert_eq!(mac(&a,"[fe80::1234%3]:3339".parse().unwrap()),Some([0x2e,0x41,0xee,0x44,0xbd,0x03]));
     }
 
+}
+
+/// Persist only complete, validated streams; the decoder remains side-effect free.
+fn persist_nodes(reporter: &str, data: &[u8]) -> Result<(), String> {
+    use dmesh_server::discovery_nodes as wire;
+    decode_nodes(reporter, data)?;
+    let inventory = crate::inventory::Inventory::from_env()?;
+    let mut d = minicbor::Decoder::new(data);
+    take_item(data, &mut d)?;
+    while d.position() < data.len() {
+        let item = take_item(data, &mut d)?;
+        if item == wire::END { break; }
+        let row = wire::Observation::decode(item).ok_or("invalid discovery observation")?;
+        if let Some(a) = announce::decode_announce(row.record) {
+            inventory.observe_signed(&a, row.peer, &format!("discovery.nodes:{reporter}:{}",row.bearer), "")?;
+        }
+    }
+    Ok(())
 }

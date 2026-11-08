@@ -12,8 +12,35 @@ pub const DEFAULT_UDP_PORT: u16 = 3339;
 
 /// The CLI's device records: `DMESH_NODES_DIR` / `DMESH_PAIRED_DEVICES_DIR` when set, else the
 /// user's `~/.config/dmesh/nodes`. The first directory is written.
-pub fn store() -> DeviceStore {
-    DeviceStore::from_env(None)
+pub fn store() -> Catalog {
+    Catalog { legacy: DeviceStore::from_env(None) }
+}
+/// Read legacy records for connection compatibility; discovery writes only transient state.
+pub struct Catalog { legacy: DeviceStore }
+impl Catalog {
+    pub fn directories(&self) -> &[PathBuf] { self.legacy.directories() }
+    pub fn list(&self) -> Result<Vec<DeviceRecord>, String> {
+        let mut records = self.legacy.list()?;
+        for managed in crate::inventory::Inventory::from_env()?.records()? {
+            records.retain(|old| old.public_key != managed.public_key && old.vip6 != managed.vip6);
+            records.push(managed);
+        }
+        Ok(records)
+    }
+    pub fn find(&self, target: &str) -> Result<Option<DeviceRecord>, String> {
+        let matches: Vec<_> = self.list()?.into_iter().filter(|r| {
+            r.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(target)
+                || r.domain.as_ref().is_some_and(|d| format!("{n}.{d}").eq_ignore_ascii_case(target)))
+                || r.device_id.eq_ignore_ascii_case(target)
+                || r.vip6.as_deref().is_some_and(|v| v.parse::<Ipv6Addr>().ok() == target.parse::<Ipv6Addr>().ok() && target.parse::<Ipv6Addr>().is_ok())
+        }).collect();
+        if matches.len() > 1 { return Err(format!("ambiguous device {target}")); }
+        Ok(matches.into_iter().next())
+    }
+    pub fn load(&self, target: &str) -> Result<Option<DeviceRecord>, String> { self.find(target) }
+    pub fn observe(&self, r: &DeviceRecord) -> Result<bool, String> {
+        crate::inventory::Inventory::from_env()?.discovery_store().observe(r)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

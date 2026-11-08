@@ -7,6 +7,7 @@
 
 pub mod client;
 mod device;
+pub mod inventory;
 mod http;
 mod node_client;
 mod schema;
@@ -51,3 +52,5 @@ mod nan_stream;
 mod via;
 
 mod relay_cli;
+
+mod tcp;

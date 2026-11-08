@@ -6,6 +6,14 @@ examples, DEVICE is the name of a device record, OBSERVER is a reachable
 device that can observe NAN, and SERIAL is a local /dev/serial/by-id/... path.
 Use your own names and addresses; the examples are syntax, not lab targets.
 
+Firmware and module updates normally use mod_flash over TCP 5227. Recovery needs
+only Main + mod_flash. `dmesh-cli SERIAL flash.wifi.join --ssid=NETWORK
+--psk=PASSPHRASE` watches logs and waits for an IP without saving credentials;
+`flash.wifi.info` reads the current network/IP. Append `-- flash.module.write ...`
+or `-- flash.runtime.write ...` to upload over TCP while continuing to show logs.
+Without serial, `flash-discover INTERFACE` finds reachable recovery devices.
+See [manual commands](../../notes/ai/modules/flash-commands.md).
+
 To use the current checkout's CLI and matching catalogs:
 
 ```sh

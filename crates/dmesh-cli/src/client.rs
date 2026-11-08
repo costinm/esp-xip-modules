@@ -51,7 +51,7 @@ pub(crate) fn is_fatal_diagnostic(line: &str) -> bool {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: dmesh-cli SERIAL|DEVICE --reset\n       dmesh-cli SERIAL|DEVICE --wake [--baud PHYSICAL_UART_BAUD]\n       dmesh-cli SERIAL|DEVICE --watch [--reset] [--interactive] [--baud PHYSICAL_UART_BAUD] [--timeout-secs N]\n       dmesh-cli DEVICE METHOD [--field=value ...] [--bearer udp[,uart]]\n       dmesh-cli SERIAL METHOD [--baud PHYSICAL_UART_BAUD] [--timeout-secs N] [--linger-secs N] [--repeat-secs N] [--field=value ...]\n       dmesh-cli devices check|sync [--dry-run]\n       dmesh-cli discover\n       dmesh-cli DEVICE wake|sleep|nv KEY[=VALUE]\n       dmesh-cli DEVICE nan.METHOD|power.METHOD [--field=value ...]\n       dmesh-cli lmesh METHOD [--field=value ...]\n       dmesh-cli NODE check\n       dmesh-cli udp://HOST:PORT --socket PATH\n       dmesh-cli http://HOST:PORT SERVICE.METHOD [--field=value ...]"
+        "usage: dmesh-cli SERIAL|DEVICE --reset\n       dmesh-cli SERIAL|DEVICE --wake [--baud PHYSICAL_UART_BAUD]\n       dmesh-cli SERIAL|DEVICE --watch [--reset] [--interactive] [--baud PHYSICAL_UART_BAUD] [--timeout-secs N]\n       dmesh-cli DEVICE METHOD [--field=value ...] [--bearer udp[,uart]]\n       dmesh-cli SERIAL METHOD [--baud PHYSICAL_UART_BAUD] [--timeout-secs N] [--linger-secs N] [--repeat-secs N] [--field=value ...]\n       dmesh-cli devices check|sync [--dry-run]\n       dmesh-cli discover\n       dmesh-cli tcp://HOST:5227 flash.METHOD [--input=PATH] [--output=PATH] [--field=value ...]\n       dmesh-cli SERIAL flash.wifi.join --ssid=NAME [--psk=PASSPHRASE] [-- flash.module.write|flash.runtime.write ...]\n       dmesh-cli SERIAL flash.wifi.info [-- flash.module.write|flash.runtime.write ...]\n       dmesh-cli flash-discover INTERFACE|HOST:PORT|SERIAL\n       dmesh-cli flash-listen INTERFACE\n       dmesh-cli DEVICE wake|sleep|nv KEY[=VALUE]\n       dmesh-cli DEVICE nan.METHOD|power.METHOD [--field=value ...]\n       dmesh-cli lmesh METHOD [--field=value ...]\n       dmesh-cli NODE check\n       dmesh-cli udp://HOST:PORT --socket PATH\n       dmesh-cli http://HOST:PORT SERVICE.METHOD [--field=value ...]"
     );
     std::process::exit(2)
 }
@@ -84,6 +84,12 @@ pub fn run_dmesh_cli() -> Result<(), String> {
 /// gateway keep one L2/session implementation.
 pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     let mut arguments: Vec<String> = args.into_iter().collect();
+    if arguments.get(1).is_some_and(|s| matches!(s.as_str(), "flash.wifi.join" | "flash.wifi.info")) {
+        return crate::tcp::wifi(&arguments);
+    }
+    if arguments.first().is_some_and(|s|s.starts_with("tcp://")) {return crate::tcp::run(&arguments);}
+    if arguments.first().is_some_and(|s|s=="flash-listen") {return crate::tcp::listen(arguments.get(1).ok_or("flash-listen INTERFACE [MAC]")?,arguments.get(2).map(String::as_str));}
+    if arguments.first().is_some_and(|s|s=="flash-discover") {return crate::tcp::discover(arguments.get(1).ok_or("flash-discover INTERFACE|HOST:PORT|SERIAL")?);}
     if arguments.iter().any(|a|a=="--via-now" || a.starts_with("--via-now=")) {return Err("--via-now was removed; install explicit disc relay routes and use --via FIRST_HOP:DCID".into());}
     if arguments
         .first()
@@ -103,6 +109,9 @@ pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), 
     }
     if native_control_command(&arguments) {
         return crate::console::run_native(&arguments);
+    }
+    if arguments.first().is_some_and(|s|s=="devices") && arguments.get(1).is_some_and(|s|!matches!(s.as_str(),"check"|"sync"|"backfill")) {
+        return crate::inventory::run(&arguments[1..]);
     }
     if arguments.as_slice() == ["devices", "check"] {
         return run_devices_check();
@@ -571,6 +580,7 @@ fn run_serial_direct_discovery(path: &str, baud: Option<u32>) -> Result<(), Stri
         return Err("check response ID mismatch".into());
     }
     let announce = announce::decode_record(record).ok_or("invalid discovery response")?;
+    crate::inventory::Inventory::from_env()?.observe_signed(&announce, None, "serial", path)?;
     println!(
         "dmesh_direct_check target={} device={} elapsed_us={}",
         path,
@@ -1478,7 +1488,7 @@ fn mac_of_direct_peer(peer: &DiscoveredPeer) -> Option<[u8; 6]> {
 /// directory without touching a paired node's secret. Dynamic facts are not written.
 fn run_devices_sync(dry_run: bool) -> Result<(), String> {
     let store = crate::device::store();
-    let reachable = multicast_discover_peers()?;
+    let reachable = multicast_discover_peers_save(!dry_run)?;
     let mut changed = 0usize;
     for peer in &reachable {
         let Some(record) = dmesh_server::device_record::DeviceRecord::from_announce(
@@ -1621,7 +1631,17 @@ fn announce_log_fields(announce: &announce::Announce) -> Vec<String> {
 }
 
 pub(crate) fn multicast_discover_peers() -> Result<Vec<DiscoveredPeer>, String> {
-    dmesh_server::discovery::discover_multicast_ipv6().map(|discovered| {
+    multicast_discover_peers_save(true)
+}
+fn multicast_discover_peers_save(save: bool) -> Result<Vec<DiscoveredPeer>, String> {
+    let discovered = dmesh_server::discovery::discover_multicast_ipv6()?;
+    if save {
+        let inventory = crate::inventory::Inventory::from_env()?;
+        for entry in &discovered {
+            inventory.observe_signed(&entry.announce, discover::mac(&entry.announce, entry.peer), "multicast", &entry.peer.to_string())?;
+        }
+    }
+    Ok({
         discovered
             .into_iter()
             .map(|entry| {
