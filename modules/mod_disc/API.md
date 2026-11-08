@@ -4,7 +4,7 @@ Discovery/identity policy.
 
 The companion normally supplies signed records. 
 
-Commands activate the module on demand. Lifecycle start parameters: optional CBOR `{1: channel_hint}`; default 6, range 1..13.
+The module starts automatically when installed; commands can also restart it on demand. Lifecycle start parameters: optional CBOR `{1: channel_hint}`; default 6, range 1..13.
 Start generates one cached signed local record. It does not start NAN or publish
 automatically. Stop releases the cache and any bounded publication transaction.
 Name/domain and actual Wi-Fi facts are sampled only on creation/explicit refresh.

@@ -9,6 +9,8 @@
  *                                                       or the error - truncated at 512 bytes; a status:
  *                                                       0 ok, 1 not loadable (parse, link, no such export), 2 trapped, 3 bad request
  *
+ * Method 2 `run_file` takes the same options with {1: name_bytes}, and loads
+ * the program through the direct runtime files service before executing it.
  * The app imports from module `xip`:  log(ptr, len) -> i32   and   now_us() -> i64.
  * Memory pages of any size work: the binary may declare the custom page size proposal `(pagesize 1)`.
  * wasm3 lives in wasm3/ (vendored) and its port in port/. */
@@ -144,15 +146,15 @@ static void w3_reply(const xip_host *host, wasm3_state *st, const xip_call *call
     host->send(host->user, pkt, (size_t)n, call->from, call->component, call->method, call->id);
 }
 
-static void w3_request(const xip_host *host, wasm3_state *st, const xip_call *call)
+static void w3_request(const xip_host *host, wasm3_state *st, const xip_call *call, const uint8_t *program, size_t program_len)
 {
     w3_run r = { 0, 0, 3 };
     st->out.len = 0;
     xip_cbor_r field;
     xip_cbor_item item;
-    const uint8_t *wasm = NULL;
-    size_t wasm_len = 0;
-    if (!xip_cbor_get(call->data, call->len, 1, &field) && !xip_cbor_next(&field, &item) && item.type == XIP_CBOR_BYTES) {
+    const uint8_t *wasm = program;
+    size_t wasm_len = program_len;
+    if (!program && !xip_cbor_get(call->data, call->len, 1, &field) && !xip_cbor_next(&field, &item) && item.type == XIP_CBOR_BYTES) {
         wasm = item.data;
         wasm_len = item.n;
     }
@@ -194,18 +196,26 @@ static void w3_request(const xip_host *host, wasm3_state *st, const xip_call *ca
 XIP_HANDLER(wasm3)(const xip_host *host, void *state, const xip_call *call)
 {
     wasm3_state *st = (wasm3_state *)state;
-    if (call->component == XIP_HOST_COMPONENT && call->method == XIP_HOST_START) {
-        xip_log(host, "hello from mod_wasm3");
-        return XIP_RET_CONTINUE;                 /* stay resident: the interpreter serves requests */
+    int rc=XIP_RET_CONTINUE;
+    st->host=host;void *saved=XIP_CELL[0];XIP_CELL[0]=st;
+    if(call->component==XIP_HOST_COMPONENT && call->method==XIP_HOST_START){
+        xip_log(host,"hello from mod_wasm3");
+    } else if(call->component==XIP_HOST_COMPONENT && call->method==XIP_HOST_STOP){
+        xip_file_load_free(host,st->load);st->load=NULL;rc=XIP_RET_DONE;
+    } else if(st->load && ((call->component==XIP_FILES_COMPONENT && call->method==XIP_FILES_GET && call->id==st->load->token) || (call->component==WASM3_COMPONENT && call->method==XIP_FILES_LOAD_TIMEOUT))){
+        int result=call->component==WASM3_COMPONENT?XIP_ERR_TIMEOUT:xip_file_load_receive(host,st->load,call);
+        if(result!=0){
+            if(result<0)xip_file_error(host,&st->load->request,result);
+            else w3_request(host,st,&st->load->request,st->load->data,st->load->size);
+            xip_file_load_free(host,st->load);st->load=NULL;
+        }
+    } else if(call->component==WASM3_COMPONENT && call->method==2){
+        int result=xip_file_load_start(host,call,&st->load);
+        if(result<0)xip_file_error(host,call,result);
+    } else if(call->component==WASM3_COMPONENT && call->method==WASM3_RUN){
+        w3_request(host,st,call,NULL,0);
     }
-    if (call->component == XIP_HOST_COMPONENT && call->method == XIP_HOST_STOP) return XIP_RET_DONE;
-    if (call->component == WASM3_COMPONENT && call->method == WASM3_RUN) {
-        st->host = host;                         /* the allocator and the imports run through this call's host */
-        void *saved = XIP_CELL[0];
-        XIP_CELL[0] = st;
-        w3_request(host, st, call);
-        XIP_CELL[0] = saved;
-        st->host = NULL;                         /* nothing may allocate for this instance outside a call */
-    }
-    return XIP_RET_CONTINUE;
+    XIP_CELL[0]=saved;st->host=NULL;
+    if(call->pkt)host->pkt_free(host->user,call->pkt);
+    return rc;
 }

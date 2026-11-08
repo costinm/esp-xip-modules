@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include "xip.h"
+#include "xip_files_client.h"
 
 #ifdef XIP_CELL_ADDR
 #define XIP_CELL ((void **)(uintptr_t)(XIP_CELL_ADDR))
@@ -23,4 +24,5 @@ typedef struct {
     const xip_host *host;    /* the host of the call being served (the allocator and the app's imports run through it) */
     wasm3_out out;
     wasm3_rsp rsp;
+    xip_file_load *load;
 } wasm3_state;

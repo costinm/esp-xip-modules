@@ -26,6 +26,19 @@ a smoke image boots on an esp32s3 board and prints what it evaluated (see Device
   `return (source)`, and when that will not compile, the source runs as written. Errors and
   tracebacks name the compiled source `request` (`request:1: in function \`main\``).
 
+## Stored programs
+
+Method 2, `eval_file`, takes `{1: name_bytes}` and evaluates the named file.
+Programs may exceed one packet: Berry reads version-checked ranges through the
+runtime files service supplied by mod_flash. The result has the same shape as
+`eval`; storage failures return a negative ABI error. For example:
+
+```sh
+dmesh-cli "$PORT" berry.eval_file --name=berry
+```
+
+This loads the file named `berry`. Upload it with `flash.file.write` first.
+
 ## Berry in this snapshot
 
 - One VM serves every request, and a top-level assignment is a global variable: `count = 7` in one
@@ -40,7 +53,7 @@ a smoke image boots on an esp32s3 board and prints what it evaluated (see Device
 ## Memory
 
 The state block (1696 bytes, `modules/retained-memory.json`) holds only descriptors: the VM
-pointer, the host pointer, the 512-byte output capture, and a 1152-byte scratch for building the
+pointer, the host pointer, a pending-load pointer, the 512-byte output capture, and a 1152-byte scratch for building the
 CBOR answer (`berry_state` in `port/xip_berry.h`, size-asserted in `mod_berry.c`). All interpreter
 memory - heap, VM stack, strings - is a host `mem_alloc` block with a 16-byte head, through the
 `BE_EXPLICIT_*` shims in `port/xip_berry.c`. Hooks that run without a call in hand (`be_writebuffer`,

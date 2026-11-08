@@ -10,6 +10,12 @@ use core::ptr;
 mod rtc;
 mod state;
 mod extents;
+mod store;
+mod files;
+mod inventory;
+mod tcp;
+mod network;
+mod panic_log;
 mod upload;
 mod crypto;
 mod wire;
@@ -344,7 +350,8 @@ fn start_auth(hw: Hw, request: &[u8]) -> Auth {
         Auth::Strict
     }
 }
-/// The flash range (offset, size) of the application that is running this module (`device_info` keys 5 and 6 of the first map),
+/// The executing runtime range (`device_info` device keys 8/9), with a conservative
+/// fallback to the partition range (keys 5/6) supplied by older runtimes.
 /// None when the host does not say.
 fn running_partition(hw: Hw) -> Option<(u32, u32)> {
     let mut bytes = [0u8; 3072]; // the whole status, the modules list included
@@ -354,6 +361,7 @@ fn running_partition(hw: Hw) -> Option<(u32, u32)> {
         return None;
     };
     let (mut offset, mut size) = (None, None);
+    let (mut image_offset, mut image_size) = (None, None);
     for _ in 0..fields {
         let Some(cbor::Item::Uint(key)) = r.next() else {
             return None;
@@ -361,10 +369,13 @@ fn running_partition(hw: Hw) -> Option<(u32, u32)> {
         match (key, r.next()?) {
             (5, cbor::Item::Uint(v)) => offset = Some(v as u32),
             (6, cbor::Item::Uint(v)) => size = Some(v as u32),
+            (8, cbor::Item::Uint(v)) => image_offset = Some(v as u32),
+            (9, cbor::Item::Uint(v)) => image_size = Some(v as u32),
             (_, cbor::Item::Array(_) | cbor::Item::Map(_)) => return None,
             _ => {}
         }
     }
+    if let (Some(at),Some(len))=(image_offset,image_size){return Some((at,len));}
     Some((offset?, size?))
 }
 struct Operation {
@@ -1008,13 +1019,11 @@ impl Connection {
         let now = hw.now_ms();
         if now.saturating_sub(self.trace_at) < 5000 { return; }
         self.trace_at = now;
-        let mut text = *b"upload phase=0 waiting=0 fed=00000000 base=00000000 at=00000000 job=00000000";
-        text[13] = b'0' + self.work as u8;
-        text[23] = if self.waiting { b'1' } else { b'0' };
-        for (start, value) in [(29,self.fed as u32),(43,self.base),(55,self.at as u32),(68,self.job as u32)] {
-            for k in 0..8 { text[start+k] = b"0123456789abcdef"[((value >> (28-k*4)) & 15) as usize]; }
-        }
-        hw.log(&text);
+        let mut data=[0;64];let mut w=cbor::Writer::new(&mut data);
+        w.map(7).uint(0).uint(16).uint(1).uint(self.work as u64).uint(2).boolean(self.waiting)
+         .uint(3).uint(self.fed as u64).uint(4).uint(self.base as u64).uint(5).uint(self.at as u64).uint(6).uint(self.job);
+        if let Some(data)=w.finish(){let _=hw.info_publish(COMPONENT,101,data);}
+
     }
     #[inline(always)]
     fn advance(&mut self, hw: Hw) -> bool {
@@ -1094,6 +1103,11 @@ fn arm_loader() {
 }
 #[repr(C)]
 pub struct State {
+    tcp: *mut tcp::Tcp,
+    network: *mut network::Network,
+    next_announce: u64,
+    files: *mut files::Files,
+    files_cursor: u32,
     /// Started: the runtime listens on this module's port from the moment it is created, there is no listener to open.
     started: bool,
     connection: *mut Connection,
@@ -1101,10 +1115,24 @@ pub struct State {
     alarm: i32,
     status_published: bool,
     status_busy: bool,
+    panic_inflight: bool,
 }
 impl State {
+    fn close_tcp(&mut self,hw:Hw){
+        if !self.tcp.is_null(){
+            unsafe{(*self.tcp).stop(hw,self.files.as_mut());}
+            unsafe{core::ptr::drop_in_place(self.tcp);}hw.mem_free(self.tcp.cast());self.tcp=ptr::null_mut();
+            self.release_files_if_idle(hw);
+        }
+    }
+    fn release_files_if_idle(&mut self,hw:Hw){
+        if self.tcp.is_null() && !self.files.is_null() && unsafe{(*self.files).releasable()} {
+            unsafe{self.files_cursor=(*self.files).cursor();core::ptr::drop_in_place(self.files);}
+            hw.mem_free(self.files.cast());self.files=core::ptr::null_mut();
+        }
+    }
     fn publish_status(&mut self, hw: Hw) {
-        let busy = !self.connection.is_null();
+        let busy = !self.connection.is_null() || (!self.files.is_null() && unsafe{(*self.files).busy()});
         if self.status_published && self.status_busy == busy { return; }
         let mut map = [0u8; 32];
         let mut w = cbor::Writer::new(&mut map);
@@ -1134,6 +1162,16 @@ impl State {
 }
 impl Module for State {
     fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
+        if self.panic_inflight && panic_log::acknowledge(*hw, call) { self.panic_inflight=false; return 0; }
+        if self.started && call.method==TICK && !self.panic_inflight && self.tcp.is_null() && self.connection.is_null() && panic_log::available(*hw) {
+            if self.files.is_null() {
+                let p=hw.mem_alloc(core::mem::size_of::<files::Files>()).cast::<files::Files>();
+                if !p.is_null() { unsafe { p.write(files::Files::with_cursor(self.files_cursor)); } self.files=p; }
+            }
+            if let Some(files)=unsafe{self.files.as_mut()} {
+                if !files.busy() { self.panic_inflight=panic_log::pending(*hw, files); }
+            }
+        }
         if call.is_host(HOST_START) {
             if self.started {
                 return ERR_BUSY;
@@ -1142,13 +1180,28 @@ impl Module for State {
             if self.alarm < 0 {
                 return self.alarm;
             }
-            self.auth = start_auth(*hw, call.data);
+            #[cfg(any(test,feature="legacy-upload"))]
+            {self.auth = start_auth(*hw, call.data);}
+            if let Some(maintenance)=files::Files::maintenance(*hw) {
+                let p=hw.mem_alloc(core::mem::size_of::<files::Files>()).cast::<files::Files>();
+                if p.is_null(){hw.alarm_cancel(self.alarm);self.alarm=0;return ERR_NOMEM;}unsafe{p.write(maintenance);}self.files=p;
+            }
+            let p=hw.mem_alloc(core::mem::size_of::<network::Network>()).cast::<network::Network>();
+            if p.is_null(){hw.alarm_cancel(self.alarm);self.alarm=0;
+                if !self.files.is_null(){unsafe{(*self.files).stop(*hw);core::ptr::drop_in_place(self.files);}hw.mem_free(self.files.cast());self.files=ptr::null_mut();}
+                return ERR_NOMEM;}
+            unsafe{p.write(network::Network::start(*hw));}self.network=p;
+            self.next_announce=0;
             self.started = true;
             self.publish_status(*hw);
             return 0;
         }
         if call.is_host(HOST_STOP) {
+            self.close_tcp(*hw);
+            if !self.network.is_null(){unsafe{core::ptr::drop_in_place(self.network);}hw.mem_free(self.network.cast());self.network=ptr::null_mut();}
+            #[cfg(any(test,feature="legacy-upload"))]
             self.dispose(*hw);
+            if !self.files.is_null() {unsafe{(*self.files).stop(*hw);core::ptr::drop_in_place(self.files);}hw.mem_free(self.files.cast());self.files=core::ptr::null_mut();}
             if self.alarm > 0 {
                 hw.alarm_cancel(self.alarm);
             }
@@ -1156,12 +1209,69 @@ impl Module for State {
             self.status_published = false;
             return 0;
         }
+        if call.method==TICK && (!self.tcp.is_null() || !self.connection.is_null() || (!self.files.is_null() && unsafe{(*self.files).busy()})) {
+            network::hold(*hw);
+        }
+        if self.started && !self.network.is_null() && unsafe { (*self.network).control(*hw, call) } { return 0; }
+        if (call.component==files::FILES_COMPONENT || (call.component==COMPONENT && matches!(call.method,2|5|6|7|8|12|17..=20))) && call.flags & xip_abi::CALL_STREAM == 0 {
+            if !self.started{return ERR_BUSY;}
+            if self.files.is_null(){let p=hw.mem_alloc(core::mem::size_of::<files::Files>()).cast::<files::Files>();if p.is_null(){return ERR_NOMEM;}unsafe{p.write(files::Files::with_cursor(self.files_cursor));}self.files=p;}
+            let rc=unsafe{(*self.files).request(*hw,call)};
+            if rc<0 {let mut b=[0;9];let mut w=cbor::Writer::new(&mut b);w.int(rc as i64);if let Some(b)=w.finish(){hw.message(call.from,call.component,call.method,call.id,b);}}
+            self.release_files_if_idle(*hw);return 0;
+        }
+        if call.component==COMPONENT && (matches!(call.method,2..=15|23)) && call.flags & xip_abi::CALL_STREAM==0 {
+            if call.wants_response(){let _=hw.reply_error(call,xip_abi::ERR_UNSUPPORTED);}return 0;
+        }
+        if call.flags & xip_abi::CALL_STREAM != 0 && call.method>=2 {
+            if !self.started || call.component!=COMPONENT || !self.tcp.is_null() || !self.connection.is_null() {return ERR_BUSY;}
+            if call.value==xip_abi::STREAM_OPEN {network::hold(*hw);}
+            if self.files.is_null() {
+                if call.value!=xip_abi::STREAM_OPEN{return xip_abi::ERR_NOTFOUND;}
+                let p=hw.mem_alloc(core::mem::size_of::<files::Files>()).cast::<files::Files>();
+                if p.is_null(){return ERR_NOMEM;}unsafe{p.write(files::Files::with_cursor(self.files_cursor));}self.files=p;
+            }
+            let rc=unsafe{(*self.files).handle(*hw,call)};self.release_files_if_idle(*hw);self.publish_status(*hw);return rc;
+        }
+        if !self.files.is_null() && (call.method==103 || call.method==TICK) {unsafe{(*self.files).handle(*hw,call);}self.release_files_if_idle(*hw);self.publish_status(*hw);}
+        if !cfg!(any(test,feature="legacy-upload")) {
+            if call.flags & xip_abi::CALL_LINK!=0 && call.flags & xip_abi::CALL_LINK_EVENT==0 {
+                let version=if self.network.is_null(){0}else{unsafe{(*self.network).version()}};
+                if let Some(src)=call.src {if call.data==b"discover" {network::announce(*hw,call.from,src,version);}}else{network::serial(*hw,call,version);}return 0;
+            }
+            if call.method==TICK && hw.now_ms()>=self.next_announce {
+                if !self.network.is_null(){unsafe{(*self.network).tick(*hw);}}self.next_announce=hw.now_ms()+5000;
+            }
+            if call.component==COMPONENT && call.method==IO && call.value==xip_abi::SOCKET_EVENT_OPEN as i32 {
+                if !self.started || !self.tcp.is_null() || (!self.files.is_null() && unsafe{(*self.files).busy()}) {
+                    hw.socket_close(call.id as u32);return 0;
+                }
+                network::hold(*hw);
+                let p=hw.mem_alloc(core::mem::size_of::<tcp::Tcp>()).cast::<tcp::Tcp>();
+                if p.is_null(){hw.socket_close(call.id as u32);return 0;}
+                match tcp::Tcp::new(*hw,call.id as u32) {Ok(t)=>{unsafe{p.write(t);}self.tcp=p;},Err(_e)=>{hw.mem_free(p.cast());hw.socket_close(call.id as u32);return 0;}}
+                if self.files.is_null(){
+                    let p=hw.mem_alloc(core::mem::size_of::<files::Files>()).cast::<files::Files>();
+                    if p.is_null(){self.close_tcp(*hw);return 0;}
+                    unsafe{p.write(files::Files::with_cursor(self.files_cursor));}self.files=p;
+                }
+            }
+            if !self.tcp.is_null() {
+                let closed=call.method==IO && call.id as u32==unsafe{(*self.tcp).socket()} && call.value==xip_abi::SOCKET_EVENT_CLOSED as i32;
+                if closed || self.files.is_null(){network::event(*hw,15);self.close_tcp(*hw);}else{
+                    match unsafe{(*self.tcp).pump(*hw,&mut *self.files)} {
+                        Ok(false)=>{},Ok(true)=>self.close_tcp(*hw),Err(e)=>{let mut data=[0;16];let mut w=cbor::Writer::new(&mut data);w.map(2).uint(0).uint(2).uint(1).int(e as i64);if let Some(data)=w.finish(){hw.info_publish(COMPONENT,101,data);}self.close_tcp(*hw);}
+                    }
+                }
+            }
+            return 0;
+        }
         if call.flags & xip_abi::CALL_STREAM != 0 {
             if call.component!=COMPONENT || call.method!=1 { return xip_abi::ERR_UNSUPPORTED; }
             match call.value {
                 xip_abi::STREAM_OPEN => {
                     if !self.started {return ERR_BUSY;}
-                    if !self.connection.is_null() { return ERR_BUSY; }
+                    if !self.connection.is_null() || (!self.files.is_null() && unsafe{(*self.files).busy()}) { return ERR_BUSY; }
                     let memory=hw.mem_alloc(core::mem::size_of::<Connection>()).cast::<Connection>();
                     if memory.is_null() { return ERR_NOMEM; }
                     match Connection::new(*hw,call.id as u32,self.auth) {
@@ -1189,7 +1299,7 @@ impl Module for State {
             && call.method == IO
             && call.value == xip_abi::SOCKET_EVENT_OPEN as i32
         {
-            if !self.connection.is_null() {
+            if !self.connection.is_null() || (!self.files.is_null() && unsafe{(*self.files).busy()}) {
                 hw.socket_close(call.id as u32);
                 return 0;
             }
@@ -1238,3 +1348,22 @@ impl Module for State {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature="sim")]
+xip_abi::export_module!(State,state=128);
+#[cfg(feature="sim")]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo)->! {
+    #[cfg(target_arch="wasm32")]
+    {
+        use core::fmt::Write;
+        struct Message {bytes:[u8;128],len:usize}
+        impl core::fmt::Write for Message {fn write_str(&mut self,s:&str)->core::fmt::Result{let n=s.len().min(self.bytes.len()-self.len);self.bytes[self.len..self.len+n].copy_from_slice(&s.as_bytes()[..n]);self.len+=n;Ok(())}}
+        #[link(wasm_import_module="xip")]
+        extern "C" {fn log(data:*const u8,len:usize)->i32;}
+        let mut message=Message{bytes:[0;128],len:0};let _=write!(message,"{}",info.message());unsafe{log(message.bytes.as_ptr(),message.len);}
+        core::arch::wasm32::unreachable()
+    }
+    #[cfg(not(target_arch="wasm32"))]
+    {let _=info;loop{}}
+}

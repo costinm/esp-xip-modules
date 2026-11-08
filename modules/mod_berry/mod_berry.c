@@ -15,6 +15,8 @@
  * A bare expression answers its value: like the Berry REPL, the source is first tried as
  * `return (source)`, and when that will not compile, the source runs as written.
  *
+ * Method 2 `eval_file` takes {1: name_bytes} and loads a program through the
+ * runtime files service, one version-checked range at a time.
  * Stop deletes the VM; every block it held goes back with it, or the runtime reports the leak.
  * The interpreter lives in berry/ (vendored) and its port in port/. */
 #include "xip_module.h"
@@ -111,13 +113,14 @@ static void berry_reply(const xip_host *host, berry_state *st, const xip_call *c
     host->send(host->user, pkt, (size_t)n, call->from, call->component, call->method, call->id);
 }
 
-static void berry_eval(const xip_host *host, berry_state *st, const xip_call *call)
+static void berry_eval(const xip_host *host, berry_state *st, const xip_call *call, const char *source, size_t source_len)
 {
     const char *result = NULL;
     int status = 3;
     xip_cbor_r field;
     xip_cbor_item item;
     if (!st->vm) status = 4;
+    else if (source) result = berry_run(st, "file", source, source_len, &status);
     else if (!xip_cbor_get(call->data, call->len, 1, &field) &&
              !xip_cbor_next(&field, &item) && item.type == XIP_CBOR_TEXT)
         result = berry_run(st, "request", (const char *)item.data, item.n, &status);
@@ -137,7 +140,7 @@ static void berry_eval(const xip_host *host, berry_state *st, const xip_call *ca
     st->out.full = 0;
 }
 
-static int berry_handle(const xip_host *host, berry_state *st, const xip_call *call)
+static int berry_dispatch(const xip_host *host, berry_state *st, const xip_call *call)
 {
     if (call->component == XIP_HOST_COMPONENT && call->method == XIP_HOST_START) {
         xip_log(host, "hello from mod_berry");
@@ -157,11 +160,26 @@ static int berry_handle(const xip_host *host, berry_state *st, const xip_call *c
         return XIP_RET_CONTINUE;                           /* stay resident: the interpreter serves requests */
     }
     if (call->component == XIP_HOST_COMPONENT && call->method == XIP_HOST_STOP) {
+        xip_file_load_free(host,st->load);st->load=NULL;
         if (st->vm) { be_vm_delete(st->vm); st->vm = NULL; } /* every Berry block comes back now or the stop leaks */
         return XIP_RET_DONE;
     }
+    if(st->load && ((call->component==XIP_FILES_COMPONENT && call->method==XIP_FILES_GET && call->id==st->load->token) || (call->component==BERRY_COMPONENT && call->method==XIP_FILES_LOAD_TIMEOUT))) {
+        int rc=call->component==BERRY_COMPONENT?XIP_ERR_TIMEOUT:xip_file_load_receive(host,st->load,call);
+        if(rc!=0){
+            if(rc<0)xip_file_error(host,&st->load->request,rc);
+            else berry_eval(host,st,&st->load->request,(const char*)st->load->data,st->load->size);
+            xip_file_load_free(host,st->load);st->load=NULL;
+        }
+        return XIP_RET_CONTINUE;
+    }
+    if(call->component==BERRY_COMPONENT && call->method==2){
+        int rc=xip_file_load_start(host,call,&st->load);
+        if(rc<0)xip_file_error(host,call,rc);
+        return XIP_RET_CONTINUE;
+    }
     if (call->component == BERRY_COMPONENT && call->method == BERRY_EVAL) {
-        berry_eval(host, st, call);
+        berry_eval(host, st, call, NULL, 0);
         return XIP_RET_CONTINUE;
     }
     return XIP_RET_CONTINUE;
@@ -173,8 +191,9 @@ XIP_HANDLER(berry)(const xip_host *host, void *state, const xip_call *call)
     st->host = host;                     /* the allocator and the capture run through this call's host */
     void *saved = XIP_CELL[0];
     XIP_CELL[0] = st;
-    int rc = berry_handle(host, st, call);
+    int rc = berry_dispatch(host, st, call);
     XIP_CELL[0] = saved;
     st->host = NULL;                     /* nothing may allocate for this instance outside a call */
+    if(call->pkt)host->pkt_free(host->user,call->pkt);
     return rc;
 }

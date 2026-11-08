@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include "xip.h"
+#include "xip_files_client.h"
 
 /* The module cell. A flashed image is read-only flash with no .data and no .bss (tools/mkmod.py), so
  * a packed module reaches its writable word through 16 bytes of platform RAM reserved for its slot at
@@ -31,6 +32,7 @@ typedef struct {
     const xip_host *host;    /* the host of the call being served (the allocator runs through it) */
     berry_out out;
     berry_rsp rsp;
+    xip_file_load *load;
 } berry_state;
 
 /* Send everything captured in st->out to the host log - one log line per line of text - and reset

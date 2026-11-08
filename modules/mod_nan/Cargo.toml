@@ -20,7 +20,7 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 
 [package.metadata]
 # Options for tools/mkmod.py (scripts/build.sh). Virtual NAN port 0xf6.
-mkmod = "--name nan --tag 46 --stack 12288 --state 128 --port 246 --autostart --components nan --envelopes 1"
+mkmod = "--name nan --tag 46 --stack 12288 --state 128 --port 246 --autostart --components nan --wire 1"
 
 [features]
 default = ["runtime"]

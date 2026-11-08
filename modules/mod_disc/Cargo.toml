@@ -18,7 +18,7 @@ sha2 = "0.10"
 p256 = { version = "0.13", features = ["ecdsa"] }
 
 [package.metadata]
-mkmod = "--name disc --tag 47 --stack 8192 --state 8 --port 250"
+mkmod = "--name disc --tag 47 --stack 8192 --state 8 --port 250 --autostart"
 
 [features]
 default = ["runtime"]

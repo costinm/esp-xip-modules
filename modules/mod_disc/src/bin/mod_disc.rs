@@ -3,4 +3,4 @@
 use core::panic::PanicInfo;
 esp_mod_disc::export!();
 #[panic_handler]
-fn panic(_: &PanicInfo) -> ! { loop {} }
+fn panic(info: &PanicInfo) -> ! { xip_abi::heap::module_panic(info) }

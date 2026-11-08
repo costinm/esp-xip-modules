@@ -1,5 +1,7 @@
 # mod_hw
 
+Deprecated; do not install on new devices.
+
 Hardware-policy module for the [esp-xip-modules](https://github.com/costinm/esp-xip-modules) host: battery level, ADC probing and
 a GPIO button with short/long/double press events. `no_std`, only the host table (ADC, GPIO, interrupts, settings).
 

@@ -1,7 +1,7 @@
 # mod_disc
 
-Optional local discovery policy for devices operating without a companion, and
-for discovery/certificate experiments. It generates a signed record on start,
+Local discovery policy for devices operating without a companion, and
+for discovery/certificate experiments. It starts automatically when installed, generates a signed record,
 caches it, and publishes through `nan.set_announce`. Native runtime services own
 crypto and the private signing key. NAN has no dependency on this module.
 

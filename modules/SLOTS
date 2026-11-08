@@ -5,7 +5,7 @@
 # Changing a slot changes the image: every deployed copy of that module must be rebuilt and reinstalled.
 # This is due to Xtensa lacking PIC support.
 mod_con    0
-mod_flash  1
+mod_flash  18 2
 mod_hw     2
 mod_lora   3
 mod_disc   4

@@ -1,5 +1,18 @@
 # `console` API (20)
 
+Deprecated: existing methods remain available during the split. Planned owners:
+
+| Operations | Destination |
+|---|---|
+| `reset`, `nv`, `stop` | `mod_flash`; settings become files. Stop remains available for upgrades. |
+| Wi-Fi configuration and state | `mod_flash`, through virtual file operations and change callbacks; recovery Wi-Fi remains self-contained. |
+| `status`, `link.send`, Wi-Fi `monitor` with a filter | `mod_system` |
+| Wi-Fi `scan` | `mod_disc` |
+
+`mod_flash` is intended to be the filesystem driver and the only required module.
+The future placement of explicit `start` is undecided. This table describes the
+planned split, not implemented replacements.
+
 CBOR device control, and the home of the native components that no module hosts (Wi-Fi 10, ...). The module has no port. Methods are reached
 as a numeric envelope in a 0x444d0002 datagram (the runtime parses it and sends the answer back the same way), or as direct calls from the application. The native components without a hosting module (`wifi.*`) are served from the native method table. Method IDs 1–4 are retired (4 was `dispatch`: an envelope as an argument; a module that holds an envelope sends it to `ADDR_ENVELOPE` and the runtime dispatches it).
 Text lines, parsing, rendering and TCP console connections are not supported.
@@ -26,6 +39,7 @@ replaces the whole intent.
 | 11 | `reboot` | `bool` | The module stopped with memory it had not freed: it cannot be replaced until the device restarts. |
 | 12 | `page` | `uint` | The 64 KiB page of the module partition the active image sits on. |
 | 13 | `shadowed` | `Shadowed[]` | The other installed images of this module name: lower versions (kept for recovery, the first pages to be reused) and duplicates. Empty when none. |
+| 14 | `quarantined` | `bool` | A Rust panic disabled this module until power-on; start requests are rejected. |
 
 `Shadowed` fields:
 

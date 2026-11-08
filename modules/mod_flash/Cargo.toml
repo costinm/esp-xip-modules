@@ -7,7 +7,7 @@ publish = false
 
 [package.metadata]
 # component 44; upload is stream-only. Stream port 2 = TCP 5227 (PORT_NET + 2), open from boot
-mkmod = "--name flash --tag 44 --stack 12288 --state 128 --stream 2 --autostart"
+mkmod = "--name flash --tag 44 --stack 12288 --state 128 --stream 2 --port 250 --wire 15 --autostart"
 
 [workspace]
 
@@ -20,6 +20,8 @@ sha2 = { version = "0.10", default-features = false }
 p256 = { version = "0.13", features = ["ecdsa"] }
 
 [features]
+legacy-upload = []
+sim = ["xip-abi/global-alloc"]
 flat-image = ["xip-abi/global-alloc"]
 esp32 = []
 esp32s3 = []

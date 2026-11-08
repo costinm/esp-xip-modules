@@ -1,5 +1,10 @@
 # mod_con
 
+Deprecated; existing commands remain available during migration. Settings, reset,
+upgrade stop and Wi-Fi configuration will move to mod_flash through file and
+virtual file operations; status, link.send and filtered monitoring to mod_system;
+Wi-Fi scan to mod_disc. See [API.md](API.md) for the planned split.
+
 Debug and special handlers for module lifecycle, status, reset and saved
 settings; not a console. It has no port: requests arrive as envelopes in QUIC
 packets (UDP 3339 by default, PPP port 0xf7, `ble`, `espnow`) and the runtime
