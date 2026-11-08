@@ -1,4 +1,4 @@
-//! Loads and runs modules compiled to WebAssembly (`modules/WASM.md`) for a runtime that has its own host table.
+//! Loads and runs modules compiled to WebAssembly (`modules/mod_wasm3/WASM.md`) for a runtime that has its own host table.
 //!
 //! This is not a runtime: the C runtime and `xip-runtime-host` keep their pools, alarms, pins and links. A [`WasmSpace`] is
 //! only the place wasm modules live in and the bridge to the runtime: [`WasmSpace::invoke`] calls `xip_handle` of a module
@@ -186,6 +186,18 @@ impl WasmSpace {
                 Some(p) => c.host().mem_free(p),
                 None => ERR_ARG,
             }
+        });
+        imp!(linker, "state_resize", |c, key: u32, class: u32, size: u32, out: u32| -> i32 {
+            let mut p: *mut u8 = std::ptr::null_mut();
+            let rc = tfn(c, |t| Some(unsafe { (t.state_resize?)(t.user, key, class, size as usize, &mut p) }));
+            if rc < 0 { return rc; }
+            if c.put32(out, c.addr(p)) { 0 } else { ERR_ARG }
+        });
+        imp!(linker, "state_get", |c, key: u32, out: u32, size: u32| -> i32 {
+            let (mut p, mut n): (*mut u8, usize) = (std::ptr::null_mut(), 0);
+            let rc = tfn(c, |t| Some(unsafe { (t.state_get?)(t.user, key, &mut p, &mut n) }));
+            if rc != 0 { return rc; }
+            if c.put32(out, c.addr(p)) && c.put32(size, n as u32) { 0 } else { ERR_ARG }
         });
         imp!(linker, "pkt_info", |c, headroom: u32, max: u32| -> i32 {
             match c.host().pkt_info() {
@@ -443,7 +455,12 @@ impl WasmSpace {
         let handle = self.modules.borrow().get(slot).and_then(|m| m.as_ref()).ok_or("no module in that slot")?.handle;
         let mark = self.scratch_next.get();
         let c = self.marshal(call)?;
-        let state_addr = (state as usize).checked_sub(self.base).filter(|a| *a < self.size).ok_or("state block outside the wasm memory")? as u32;
+        // no state block (a module that keeps its state in state objects): the module sees a null state
+        let state_addr = if state.is_null() {
+            0
+        } else {
+            (state as usize).checked_sub(self.base).filter(|a| *a < self.size).ok_or("state block outside the wasm memory")? as u32
+        };
         let args = (1, state_addr, c);
         let outer = ACTIVE.with(|a| a.get());
         let rc = if outer.is_null() {

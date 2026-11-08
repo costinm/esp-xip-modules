@@ -1,5 +1,5 @@
 //! The behaviour of wasm modules is tested through the host runtime (`crates/xip-runtime-host/tests`, which load `mod_rtest`,
-//! `mod_con`, `mod_ble` and `mod_system` as wasm). Here: what needs no runtime.
+//! `mod_system` (with its sys component) and `mod_ble` as wasm). Here: what needs no runtime.
 use xip_wasm::WasmSpace;
 
 #[test]

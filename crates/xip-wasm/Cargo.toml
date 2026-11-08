@@ -3,7 +3,7 @@ name = "xip-wasm"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Loads modules compiled to WebAssembly (modules/WASM.md) for the xip host runtime"
+description = "Loads modules compiled to WebAssembly (modules/mod_wasm3/WASM.md) for the xip host runtime"
 publish = false
 
 [dependencies]

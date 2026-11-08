@@ -1,4 +1,4 @@
-//! Prototype of the memory layout where Linux does the mapping (see `modules/WASM-PORTING.md`): every module instance gets its own linear
+//! Prototype of the memory layout where Linux does the mapping (see `modules/mod_wasm3/WASM-PORTING.md`): every module instance gets its own linear
 //! memory, `private` bytes of anonymous memory at address 0 (data, stack, heap: nothing else can reach them) and, right above, the same
 //! shared pool in every instance at the same address (`private`), a `memfd` mapped `MAP_SHARED`. Packets live in the pool; nothing else is shared,
 //! so code that depends on another module's heap faults (an out-of-bounds trap) instead of working by accident.
