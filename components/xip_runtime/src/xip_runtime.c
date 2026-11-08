@@ -22,6 +22,7 @@
 #include "xip_cbor.h"
 #include "internal.h"
 #include "xip_wifi.h"
+#include "xip_state.h"
 
 #include "packet_queue.inc"
 static packet_delivery_queue packet_queue;
@@ -70,8 +71,8 @@ static void packet_rx_storage_shortage(void);
 static uint32_t now_us32(void);
 static void link_fanout(uint32_t addr, uint32_t port, int slot, uint16_t start, uint16_t len, uint64_t source, int32_t signal, uint32_t time_us, const xip_udp_address *src);
 static bool quic_common_rx(uint32_t addr, uint32_t port, int slot, uint16_t start, uint16_t len, uint64_t source, int32_t signal, uint32_t time_us, const xip_udp_address *src);
-#ifndef QUIC_CONSOLE_COMPONENT
-#define QUIC_CONSOLE_COMPONENT 20                /* answers console and native envelope methods (mod_con) */
+#ifndef NATIVE_FALLBACK_COMPONENT
+#define NATIVE_FALLBACK_COMPONENT 49             /* answers the envelopes of components nobody hosts, and the sys component (mod_system) */
 #endif
 static struct xip_instance *by_component(int component, const struct xip_instance *except);
 static bool known_locked(const struct xip_instance *in);
@@ -516,6 +517,10 @@ int xip_component_register(const char *name, const void *table)
  * call another module through such a table (it runs inline on the worker, under the same lock); other tasks may. */
 static SemaphoreHandle_t exec_lock;
 static StaticSemaphore_t exec_lock_buf;
+/* the retained state of the modules (xip_state.h): taken by state calls on the worker and by instance creation */
+static StaticSemaphore_t retained_lock_buf;
+static SemaphoreHandle_t retained_lock;
+static xip_retained_store retained_store;
 #define XIP_THUNKS 24
 #define XIP_THUNK_TABLES 4
 static struct { char name[16]; uint8_t *copy; } thunk_tables[XIP_THUNK_TABLES];
@@ -604,9 +609,9 @@ static struct xip_instance *request_target(int component,uint32_t port,int *erro
             if(!in)rc=XIP_ERR_NOTFOUND;
         }
     }
-    if(!in && rc==XIP_ERR_NOTFOUND && component>0 && component!=QUIC_CONSOLE_COMPONENT){
-        in=envelope_target(QUIC_CONSOLE_COMPONENT);
-        if(!in && hooks.request_start){rc=hooks.request_start(QUIC_CONSOLE_COMPONENT,0);if(!rc)in=envelope_target(QUIC_CONSOLE_COMPONENT);}
+    if(!in && rc==XIP_ERR_NOTFOUND && component>0 && component!=NATIVE_FALLBACK_COMPONENT){
+        in=envelope_target(NATIVE_FALLBACK_COMPONENT);
+        if(!in && hooks.request_start){rc=hooks.request_start(NATIVE_FALLBACK_COMPONENT,0);if(!rc)in=envelope_target(NATIVE_FALLBACK_COMPONENT);}
     }
     if(in){rc=instance_start_result(in);if(rc<0)in=NULL;}
     *error=in?0:rc<0?rc:XIP_ERR_NOTFOUND;
@@ -779,6 +784,34 @@ static int h_reset(void *user)
 #include "module_alloc.inc"
 
 static int h_mem_free(void *user, void *ptr) { return xip_mem_free(&I(user)->mem, ptr) == 0 ? XIP_OK : XIP_ERR_ARG; }
+
+/* ---- state objects (xip_state.h): instance objects are counted in the heap quota and freed with the instance; retained ones
+ * are kept for the next instance of the name and version. Growing keeps the mem_alloc margin of the host. ---- */
+static int h_state_resize(void *user, uint32_t key, uint32_t cls, size_t size, uint8_t **out)
+{
+    struct xip_instance *in = I(user);
+    *out = NULL;
+    xSemaphoreTake(retained_lock, portMAX_DELAY);
+    size_t cur = 0;
+    (void)xip_state_get(&in->state_set, &retained_store, in->name, in->version, key, NULL, &cur);
+    int rc = XIP_OK;
+    if (size > cur) {
+        const size_t margin = 32768, avail = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+        if (avail <= margin || size - cur > avail - margin) rc = XIP_ERR_NOMEM;
+    }
+    if (rc == XIP_OK) rc = xip_state_resize(&in->state_set, &in->mem, &retained_store, in->name, in->version, key, cls, size, out);
+    if (rc == XIP_OK && key == 0) in->state = *out;
+    xSemaphoreGive(retained_lock);
+    return rc;
+}
+static int h_state_get(void *user, uint32_t key, uint8_t **out, size_t *size)
+{
+    struct xip_instance *in = I(user);
+    xSemaphoreTake(retained_lock, portMAX_DELAY);
+    const int rc = xip_state_get(&in->state_set, &retained_store, in->name, in->version, key, out, size);
+    xSemaphoreGive(retained_lock);
+    return rc;
+}
 
 /* ---- packets (include/xip.h, PKT): the C pool, and what each module holds ---- */
 
@@ -1121,7 +1154,7 @@ static int h_send(void *user, uint32_t pkt, size_t len, uint32_t dst, int compon
         return rc;
     } else if (dst == XIP_ADDR_ENVELOPE) {
         /* A module hands the runtime an envelope to dispatch, the way the 0x444d0002 path does: parsed here, delivered to the module of its component
-         * (or the console for a native one) as an ordinary request from this module with `id` as the token; the answer returns as a message. */
+         * (or the native fallback for a native one) as an ordinary request from this module with `id` as the token; the answer returns as a message. */
         xip_envelope env;
         if (xip_envelope_parse(xip_pool_slot(pool, e.slot) + e.start, len, &env) != XIP_ENV_REQUEST) rc = XIP_ERR_ARG;
         else {
@@ -2130,6 +2163,8 @@ static void finish(struct xip_instance *in, int result)
     serial_release(in);
     links_release(in);
     packets_release(in);
+    xip_state_release_instance(&in->state_set, &in->mem);     /* instance objects give their heap back before the balance is read */
+    in->state = NULL;
     const uint32_t leaked_bytes = xip_mem_used(&in->mem);        /* cannot be freed: nobody knows where it is */
     in->stats.mem_leaked = leaked_bytes;
     if (leaked_bytes) {
@@ -2141,7 +2176,7 @@ static void finish(struct xip_instance *in, int result)
     void *ctx = in->done_ctx;
     xip_stats_t stats = in->stats;
     ESP_LOGI(TAG, "%s ended: %d (%u calls, max %u us)", in->name, result, (unsigned)stats.calls, (unsigned)stats.max_handler_us);
-    free(in->state); free(in->inbox); free(in->start_request); free(in->response);
+    free(in->inbox); free(in->start_request); free(in->response);
     free(in);
     if (done) done(ctx, result, &stats);
     if (exec_lock) xSemaphoreGiveRecursive(exec_lock);
@@ -2285,7 +2320,7 @@ static void handle_packet(const packet_delivery *packet)
     size_t dlen = len;
     bool envelope = false;
     if (lflags & XIP_CALL_ENVELOPE) {
-        /* a 0x444d0002 datagram (xip_quic_common_rx routed it to this module: the component's own, or the console for the native components): the runtime
+        /* a 0x444d0002 datagram (xip_quic_common_rx routed it to this module: the component's own, or the native fallback of the sys module): the runtime
          * parses the envelope and the module gets an ordinary request. Module ports and everything else deliver raw frames. */
         lflags &= ~(uint32_t)XIP_CALL_ENVELOPE;
         xip_envelope env;
@@ -2463,6 +2498,8 @@ esp_err_t xip_host_init(const xip_host_hooks_t *h)
     if (inited) return ESP_OK;
     if (xip_info_init()) return ESP_ERR_NO_MEM;
     exec_lock = xSemaphoreCreateRecursiveMutexStatic(&exec_lock_buf);
+    retained_lock = xSemaphoreCreateMutexStatic(&retained_lock_buf);
+    retained_store.cap = CONFIG_XIP_RETAINED_MAX;
     for (int i = 0; i < XIP_THUNKS; i++) thunk_slots[i].table = -1;
     if(!packet_deliveries_prepare())return ESP_ERR_NO_MEM;
     worker_queue = xQueueCreate(CONFIG_XIP_EVENT_QUEUE, sizeof(xip_event_t));
@@ -2574,7 +2611,7 @@ xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_
     if (!inited || !name || !*name || !cfg || !cfg->handler || cfg->state_bytes > 4096) return NULL;
     for (int a = 0; a < XIP_WIRE_MAX; a++) {
         const int32_t id = cfg->wire[a].id;
-        if (id < 0 || (id && id == cfg->component)) return NULL;
+        if (id < 0) return NULL;   /* an entry equal to the module's own tag is allowed: a module lists every component it serves */
         for (int b = 0; id && b < a; b++) if (cfg->wire[b].id == id) return NULL;
     }
     struct xip_instance *in = calloc(1, sizeof(*in));
@@ -2588,9 +2625,10 @@ xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_
     memcpy(in->wire, cfg->wire, sizeof(in->wire));
     for (int c = 0; c < XIP_COMPONENTS_MAX; c++) strlcpy(in->comps[c].name, cfg->components[c], sizeof(in->comps[c].name));
     xip_mem_init(&in->mem, CONFIG_XIP_MEM_QUOTA ? CONFIG_XIP_MEM_QUOTA : UINT32_MAX);
-    in->state = calloc(1, cfg->state_bytes ? cfg->state_bytes : 1);
+    in->version = cfg->version;
+    if (cfg->state_bytes) in->state = xip_state_set_root(&in->state_set, cfg->state_bytes);
     in->inbox = malloc(CONFIG_XIP_REQUEST_MAX);
-    if (!in->state || !in->inbox) { free(in->state); free(in->inbox); free(in); return NULL; }
+    if ((cfg->state_bytes && !in->state) || !in->inbox) { xip_state_release_instance(&in->state_set, &in->mem); free(in->inbox); free(in); return NULL; }
     in->table = (xip_host){
         .device_info = h_device_info, .info_publish = h_info_publish, .get_component = h_get_component,
         .abi_version = XIP_ABI_VERSION,
@@ -2607,6 +2645,7 @@ xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_
         .socket_close = h_socket_close, .socket_peer = h_socket_peer, .socket_write_pkt = h_socket_write_pkt,
         .udp_send = h_udp_send,
         .flash_erase = h_flash_erase, .flash_write = h_flash_write, .flash_read = h_flash_read, .pkt_pool_info=h_pkt_pool_info, .pkt_acquire=h_pkt_acquire, .pkt_tx=h_pkt_tx, .module_manifest = h_module_manifest, .module_rescan = h_module_rescan, .nv = h_nv, .heap_info = h_heap_info, .heap_dump = h_heap_dump,
+        .state_resize = h_state_resize, .state_get = h_state_get,
     };
     for (int i = 0; i < XIP_IRQ_SLOTS; i++) in->irq[i].inst = in;
     portENTER_CRITICAL(&registry_lock);
@@ -2624,7 +2663,10 @@ xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_
     }
     if (slot >= 0) { in->slot = slot; in->id = next_id++; registry[slot] = in; }
     portEXIT_CRITICAL(&registry_lock);
-    if (slot < 0) { free(in->state); free(in->inbox); free(in); return NULL; }
+    if (slot < 0) { xip_state_release_instance(&in->state_set, &in->mem); free(in->inbox); free(in); return NULL; }
+    xSemaphoreTake(retained_lock, portMAX_DELAY);     /* a new version of the module drops what the old one retained */
+    xip_retained_forget_other_versions(&retained_store, in->name, in->version);
+    xSemaphoreGive(retained_lock);
     if (in->port) {
         int rc = port_bind(in);
         if (rc) ESP_LOGW(TAG, "%s: port %u not bound: %d", in->name, (unsigned)in->port, rc);

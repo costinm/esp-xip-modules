@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #pragma once
+#include "xip_state.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include "sdkconfig.h"
@@ -94,8 +95,10 @@ struct xip_instance {
     xip_handle_fn handler;
     xip_done_fn done;
     void *done_ctx;
-    uint8_t *state;
+    uint8_t *state;               /* the root object (key 0): NULL without a state block; the state objects own it (xip_state.h) */
     uint32_t state_bytes;
+    xip_state_set state_set;      /* the state objects of the instance, root included */
+    uint32_t version;             /* the manifest version it runs: retained objects are kept for that version */
     bool finishing;
     uint8_t *inbox;               /* the one pending request */
     size_t inbox_len;

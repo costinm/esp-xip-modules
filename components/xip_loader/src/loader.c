@@ -572,9 +572,12 @@ static uint32_t manifest_port(int slot, const xip_dmod_header *h, uint64_t key)
     return (uint32_t)port;
 }
 
-/* Additional wire request owners; module lifecycle/events keep the header tag. */
-static int manifest_envelopes(int slot, const xip_dmod_header *h, int32_t ids[XIP_COMPONENTS_MAX])
+/* Manifest key 13: the wire components the module claims (envelope owners, its module-to-module routing), an array of at most
+ * XIP_WIRE_MAX [id, version] pairs: id a positive int32, distinct within the array; version a uint32. Absent: none. Malformed: XIP_ERR_ARG.
+ * Module lifecycle/events keep the header tag. */
+static int manifest_wire(int slot, const xip_dmod_header *h, xip_wire_component_t wire[XIP_WIRE_MAX])
 {
+    memset(wire, 0, sizeof(xip_wire_component_t) * XIP_WIRE_MAX);
     if (!h->manifest_size) return XIP_OK;
     if (h->manifest_size > 4096) return XIP_ERR_SIZE;
     uint8_t *m = malloc(h->manifest_size);
@@ -583,16 +586,22 @@ static int manifest_envelopes(int slot, const xip_dmod_header *h, int32_t ids[XI
     xip_cbor_r value;
     xip_cbor_item it;
     if (flash_read(em.slots_found[slot].offset + h->manifest_offset, m, h->manifest_size) == ESP_OK) {
-        const int found = xip_cbor_get(m, h->manifest_size, 12, &value);
+        const int found = xip_cbor_get(m, h->manifest_size, 13, &value);
         if (found == 1) rc = XIP_OK;
-        else if (found == 0 && !xip_cbor_next(&value, &it) && it.type == XIP_CBOR_ARRAY && it.n <= XIP_COMPONENTS_MAX) {
+        else if (found == 0 && !xip_cbor_next(&value, &it) && it.type == XIP_CBOR_ARRAY && it.n <= XIP_WIRE_MAX) {
             rc = XIP_OK;
-            for (size_t i = 0; i < it.n; i++) {
-                xip_cbor_item id;
+            for (size_t i = 0; i < it.n && rc == XIP_OK; i++) {
+                xip_cbor_item pair, id, version;
                 int64_t n;
-                if (xip_cbor_next(&value, &id) || xip_cbor_as_int(&id, &n) || n <= 0 || n > INT32_MAX) { rc = XIP_ERR_ARG; break; }
-                ids[i] = (int32_t)n;
-                for (size_t j = 0; j < i; j++) if (ids[j] == ids[i]) rc = XIP_ERR_ARG;
+                if (xip_cbor_next(&value, &pair) || pair.type != XIP_CBOR_ARRAY || pair.n != 2 ||
+                    xip_cbor_next(&value, &id) || xip_cbor_as_int(&id, &n) || n <= 0 || n > INT32_MAX ||
+                    xip_cbor_next(&value, &version) || version.type != XIP_CBOR_UINT || version.arg > UINT32_MAX) {
+                    rc = XIP_ERR_ARG;
+                    break;
+                }
+                wire[i].id = (int32_t)n;
+                wire[i].version = (uint32_t)version.arg;
+                for (size_t j = 0; j < i; j++) if (wire[j].id == wire[i].id) rc = XIP_ERR_ARG;
             }
         }
     }
@@ -619,9 +628,9 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
                  xip_dmod_reason(st->st.last_check));
         return XIP_LOADER_ERR_IMAGE;
     }
-    int32_t envelopes[XIP_COMPONENTS_MAX] = {0};
-    int envelope_rc = manifest_envelopes(slot, &h, envelopes);
-    if (envelope_rc < 0) return envelope_rc;
+    xip_wire_component_t wire[XIP_WIRE_MAX];
+    int wire_rc = manifest_wire(slot, &h, wire);
+    if (wire_rc < 0) return wire_rc;
     uint8_t *copy = NULL;
     if (request_len) {
         copy = malloc(request_len);
@@ -663,12 +672,13 @@ int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
     const xip_instance_config_t ic = {.handler = (xip_handle_fn)((const uint8_t *)base + h.entry_offset),
                                          .state_bytes = h.state_bytes, .done = instance_done,
                                          .done_ctx = (void *)(intptr_t)XIP_SLOT_PAGE(slot), .component = h.tag,
-                                         .port = manifest_port(slot, &h, 9), .stream = manifest_port(slot, &h, 10)};
+                                         .port = manifest_port(slot, &h, 9), .stream = manifest_port(slot, &h, 10),
+                                         .version = em.slots_found[slot].version};
     ESP_LOGI(TAG, "%s: handler %p, image %u bytes, state %u", em.slots_found[slot].name, (void *)ic.handler,
              (unsigned)h.image_size, (unsigned)h.state_bytes);
     xip_instance_config_t config = ic;
     manifest_components(slot, &h, config.components);
-    memcpy(config.envelope_components, envelopes, sizeof(envelopes));
+    memcpy(config.wire, wire, sizeof(wire));
     xip_instance_t *inst = xip_instance_create(em.slots_found[slot].name, &config);
     if (!inst) {
         unmap_image(st);
@@ -846,9 +856,9 @@ int xip_loader_start_request(int32_t component,uint32_t port)
         xip_dmod_header h;if(xip_read_header((int)i,&h)!=ESP_OK)continue;
         bool owns=component>0 && h.tag==component;
         if(component>0){
-            int32_t ids[XIP_COMPONENTS_MAX]={0};
-            int err=manifest_envelopes((int)i,&h,ids);if(err<0){if(owns){rc=err;goto done;}continue;}
-            for(unsigned k=0;k<XIP_COMPONENTS_MAX;k++)owns|=ids[k]==component;
+            xip_wire_component_t wire[XIP_WIRE_MAX];
+            int err=manifest_wire((int)i,&h,wire);if(err<0){if(owns){rc=err;goto done;}continue;}
+            for(unsigned k=0;k<XIP_WIRE_MAX;k++)owns|=wire[k].id==component;
         }else{int64_t p=0;owns=xip_cbor_get_int(m,(size_t)n,9,&p)==0 && p==(int64_t)port;}
         if(!owns)continue;
         if(selected>=0){rc=XIP_ERR_BUSY;goto done;}selected=(int)i;

@@ -1,6 +1,6 @@
 # XIP loader
 
-Maps and starts independently packaged modules. Applications use `xip_runtime`
+Maps independently packaged modules and creates their instances (autostart or a request). Applications use `xip_runtime`
 to provide the module ABI and lifecycle services.
 
 Build modules with `scripts/build.sh <chip>`. `modules/SLOTS` assigns each module

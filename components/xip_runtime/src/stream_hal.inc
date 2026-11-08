@@ -92,8 +92,8 @@ static int stream_bind(module_stream *s,const uint8_t *data,size_t len)
     if(!in || xip_envelope_parse(data,len,&env)!=XIP_ENV_REQUEST)return XIP_ERR_ARG;
     int activation=0;
     /* An explicitly registered stream service wins over the fallback below:
-     * `request_target` answers an unhosted component with the console, and the
-     * console's stream table would otherwise capture every stream — including
+     * `request_target` answers an unhosted component with the native fallback (the sys module), and the
+     * fallback module's stream table would otherwise capture every stream — including
      * the discovery commands a module registered (component 6). A module
      * without a TCP listener has a NULL `stream` (the manifest's key 10 port),
      * so the registry path must not test it. */

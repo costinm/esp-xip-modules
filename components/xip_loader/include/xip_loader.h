@@ -76,20 +76,22 @@ typedef struct {
 /* Once, after xip_host_init(), NVS and the event loop (an upload needs the network). Scans the partition. */
 esp_err_t xip_loader_init(const xip_loader_config_t *config);
 
-/* Start every installed module whose manifest asks for it (manifest key 6: its start request; `mkmod.py --autostart`). What
- * runs at boot is therefore decided by what is installed, not by the build. Returns how many were started. */
+/* Create the instance, and deliver its onBoot event, for every installed module whose manifest asks for autostart (manifest
+ * key 6: its start request; `mkmod.py --autostart`). What runs at boot is therefore decided by what is installed, not by the
+ * build. Returns how many instances were created. */
 int xip_loader_autostart(void);
 
 /* The manifest of the module in `slot`, read from flash (the module need not run): its length, 0 if it has none, or
  * XIP_ERR_SIZE / XIP_LOADER_ERR_*. */
 int xip_loader_manifest(int slot, uint8_t *out, size_t capacity);
 
-/* The module calls of the ABI (modules_info, module_start, module_stop), for xip_host_hooks_t. The stop only queues. */
+/* The module calls of the ABI (modules_info, module_start, module_stop), for xip_host_hooks_t. module_start creates the
+ * module's instance (its onBoot event, HOST_START); module_stop releases it (HOST_STOP) and only queues the release. */
 int xip_loader_modules_info(uint8_t *out, size_t capacity);
 int xip_loader_start_named(const uint8_t *name, size_t name_len, const uint8_t *request, size_t request_len);
 int xip_loader_stop_named(const uint8_t *name, size_t name_len);
-/* Start the installed module that hosts the component `component` (manifest key 11), unless it runs: the `component_start` hook of the runtime's
- * get_component. 0: running now; XIP_ERR_NOTFOUND: no installed module names it; otherwise the start's error. */
+/* Create the instance of the installed module that hosts the component `component` (manifest key 11), unless it has one: the `component_start` hook of the runtime's
+ * get_component. 0: an instance exists now; XIP_ERR_NOTFOUND: no installed module names it; otherwise the creation's error. */
 int xip_loader_start_hosting(const char *component);
 int xip_loader_manifest_named(const uint8_t *name, size_t name_len, uint8_t *out, size_t capacity);
 

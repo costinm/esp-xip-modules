@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* The state of the Wi-Fi, heap_info and heap_dump, as CBOR records: the keys are the `wifi` record of modules/mod_con/API.md, which the console
+/* The state of the Wi-Fi, heap_info and heap_dump, as CBOR records: the keys are the `wifi` record of crates/sys/API.md, which the sys
  * module turns into text. Nothing here formats a string. */
 #include <stdio.h>
 #include <string.h>

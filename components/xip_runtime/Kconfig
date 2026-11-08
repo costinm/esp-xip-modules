@@ -79,6 +79,13 @@ menu "esp-xip-modules host"
             least 32 KiB free at allocation time. A nonzero value also caps
             the total outstanding allocation of each module.
 
+    config XIP_RETAINED_MAX
+        int "Total bytes of retained module state (state_resize class RETAINED, all modules)"
+        default 8192
+        range 0 1048576
+        help
+            Retained objects survive the instance that made them, so they are not in any module's quota. At most 8 per module name.
+
     config XIP_SERIAL_STACK
         int "Stack of the serial reader task (it runs the line handler), bytes"
         default 8192

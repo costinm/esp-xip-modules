@@ -21,7 +21,7 @@ default PSM, the scan filter and the SDU size and buffer count of the CoC pool a
 * **Start and stop.** Nothing runs until `start` (advertise what the module gives and serve the channel; the module's `listen` is a start without an advertisement),
   `scan` or `connect` (central: find a peer with `scan`/`scan_results`, then open the channel to it; the stack must have been started). `stop` ends advertising, scanning and the link.
 * **Send and receive packets.** The channel is the runtime link `ble`: send a pool packet to it with the normal link send (a module's `send`,
-  `console link.send` for debugging); a busy channel answers `ERR_BUSY` and keeps nothing of yours. Received SDUs are pool packets handed to the
+  `sys link.send` for debugging); a busy channel answers `ERR_BUSY` and keeps nothing of yours. Received SDUs are pool packets handed to the
   common QUIC receive function (`xip_quic_rx_set`, `xip_runtime.h`), not to modules.
 * **Pairing.** The peer starts it; the component stores the bond. `status` tells `bonded` and whether the channel is `encrypted`. `bonds_clear`
   forgets the stored peers. One connection, one channel, one peer; two bonds are stored.
@@ -30,8 +30,8 @@ default PSM, the scan filter and the SDU size and buffer count of the CoC pool a
 * **Sleep modes.** `mode` 1 `always` (default): the service stays up and a light sleep is refused while it advertises, scans or is connected.
   `mode` 2 `rendezvous`: advertising and scanning stop for the sleep and restart after it; a live link still refuses the sleep.
   `suspend`/`resume` are for callers that manage sleep themselves.
-* **Boot setting.** `ble.boot` (0/1) in the settings store; `mode` with `boot` 2 or 1 writes it. `mod_ble` starts the service about 5 s after the
-  module starts when it is 1. With `XIP_BLE_RELEASE_WHEN_OFF` a boot with it 0 returns the controller's memory to the heap (BLE then needs a reboot
+* **Boot setting.** `ble.boot` (0/1) in the settings store; `mode` with `boot` 2 or 1 writes it. `mod_ble` starts the service about 5 s after its
+  onBoot event when it is 1. With `XIP_BLE_RELEASE_WHEN_OFF` a boot with it 0 returns the controller's memory to the heap (BLE then needs a reboot
   with it set to 1).
 
 ## At a glance

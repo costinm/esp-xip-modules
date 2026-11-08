@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* The ESP-IDF side of the module ABI (include/xip.h): builds the host table a module calls.
  *
- * One instance per running module. All module code runs on one worker task, one handler call at a time
- * (xip-abi crate docs, Model): the host sleeps until an alarm, an interrupt or a request. An instance owns everything the
- * module acquires (pins, interrupts, SPI devices, alarms, scratch memory) and gives it all back when it ends
- * (STOP, a handler returning XIP_RET_DONE or an error), so nothing is left behind. The instance does not depend
+ * One instance per module in use (created on autostart, a request or get_component). All module code runs on one worker task,
+ * one handler call at a time (xip-abi crate docs, Model): the host sleeps until an alarm, an interrupt or a request. An instance
+ * owns everything the module acquires (pins, interrupts, SPI devices, alarms, scratch memory) and gives it all back when it is
+ * released (HOST_STOP, a handler returning XIP_RET_DONE or an error), so nothing is left behind. The instance does not depend
  * on the loader: an application can create one around a handler it links (how the same module source runs linked
  * or as a flashed image). */
 #pragma once
@@ -208,7 +208,7 @@ void xip_quic_rx_set(const xip_quic_rx_ops *ops);
  *    xip_quic_pkt_send). A RELAY entry forwards the same pool packet to its link and peer address with the DCID replaced (forward or drop and count: no queue, no retransmission). Unknown DCID: offered to the attached module endpoint, otherwise dropped and counted;
  *  - LONG header, version XIP_QUIC_VERSION_CBOR (0x444d0002): after the SCID comes the CBOR envelope {1: component, 2: method, 3: id, 5: fields}. It
  *    goes to the module claiming its component in manifest key 13 (or hosting it as its own tag), or to the module of that component if it has a datagram port or hosts a table; otherwise to the
- *    console module (component 20), which serves console and native methods. This is the only place an envelope is parsed: the runtime parses it
+ *    sys module (component 49, the native fallback), which serves its own methods and native ones. This is the only place an envelope is parsed: the runtime parses it
  *    (xip_envelope.h) and the handler gets an ordinary request, XIP_CALL_ENVELOPE; module ports deliver raw frames. The module's answer to the link and token it came from is sent as a 0x444d0002 long packet (DCIDs
  *    swapped), within XIP_QUIC_REPLY_MS;
  *  - LONG header, any other version (0x444d0001 of quic-lite, versions that are not ours): given to the same `local` callback, else dropped and counted. */
@@ -261,7 +261,7 @@ typedef struct {
 } xip_stats_t;
 
 /* Called on the worker after the instance has ended and been released (it no longer exists): `result` is what the
- * last handler call returned (XIP_RET_DONE or an error), 0 after a STOP, or XIP_ERR_* for a host failure. */
+ * last handler call returned (XIP_RET_DONE or an error), 0 after the host released it (HOST_STOP), or XIP_ERR_* for a host failure. */
 typedef void (*xip_done_fn)(void *ctx, int result, const xip_stats_t *stats);
 
 /* Most wire components one module may claim in manifest key 13 (the envelope owners). */
@@ -285,6 +285,7 @@ typedef struct {
                                     * through to the running module that hosts it: the caller gets a table of runtime thunks that take the global module
                                     * lock, call the module's function with the module's context, and return XIP_ERR_NOTFOUND once the module is gone. */
     xip_wire_component_t wire[XIP_WIRE_MAX];   /* manifest key 13: additional wire components (envelope owners) with their versions; id 0 = unused. */
+    uint32_t version;              /* manifest key 8 (0: none): retained state is kept for this version of the name. Appended. */
 } xip_instance_config_t;
 
 /* `name` (copied, <= 15 bytes) is used in logs and as the settings namespace "em_<name>". The instance is idle until
@@ -409,7 +410,7 @@ bool xip_serial_usb_active(void);
 
 /* Send ESP-IDF log lines to the ROM console. For an application that has no C library stdout: Rust std on ESP-IDF 6.0 with its
  * own `app_main` (main-rs) never registers the console, so every ESP_LOG line is lost. Cheap, no allocation;
- * the one place text is formatted outside mod_con, because a log line is the only way those components report. */
+ * the one place text is formatted outside the sys component of mod_system, because a log line is the only way those components report. */
 void xip_log_to_rom(void);
 void xip_serial_rearm(void);
 
