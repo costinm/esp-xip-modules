@@ -6,14 +6,14 @@ use std::sync::Mutex;
 use xip_abi::{Call, Host};
 
 extern "C" {
-    fn xip_handle(host: *const Host, state: *mut u8, call: *const Call) -> i32;
+    fn wasm3_handle(host: *const Host, state: *mut u8, call: *const Call) -> i32;
 }
 
 /// The entry, serialized: the module keeps its cell in one global because its runtime serves one module call at a time (see `berry-c`).
 unsafe extern "C" fn xip_handle_one_at_a_time(host: *const Host, state: *mut u8, call: *const Call) -> i32 {
     static CALLS: Mutex<()> = Mutex::new(());
     let _one_call_at_a_time = CALLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    xip_handle(host, state, call)
+    wasm3_handle(host, state, call)
 }
 
 /// The module entry, as `xip_runtime_host::Runtime::add_handler` takes it (`HandlerFn`).

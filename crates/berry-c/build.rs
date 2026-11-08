@@ -65,7 +65,7 @@ fn main() {
     // Module and port code: the repository's own warning discipline.
     let mut port = cc::Build::new();
     setup(&mut port, &root);
-    port.std("c11").warnings(true).flag("-Wextra").flag("-Werror");
+    port.define("XIP_LINKED", None).std("c11").warnings(true).flag("-Wextra").flag("-Werror");
     port.file(root.join("modules/mod_berry/mod_berry.c"));
     // the runtime's formatter (the `snprintf` of the `native` table on a device): the very file the firmware links
     port.include(root.join("components/xip_runtime/include"));
