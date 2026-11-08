@@ -286,7 +286,7 @@ static int flash_read_at(void *ctx, uint32_t addr, void *buf, size_t len)
 
 static void inspect_slots(const bootloader_state_t *bs)
 {
-    const size_t n = xip_extent_scan(flash_read_at, NULL, bs->factory.offset, bs->factory.size, XIP_WANT_RUNTIME, slot_ext, SLOTS);
+    const size_t n = xip_extent_scan(flash_read_at, NULL, bs->factory.offset, bs->factory.size, XIP_WANT_RUNTIME | XIP_WANT_STOP, slot_ext, SLOTS);
     for (size_t i = 0; i < SLOTS; i++)
         slot_info[i] = i < n ? (xip_image_info_t){.valid = true, .version = slot_ext[i].version, .extent = slot_ext[i].size} : (xip_image_info_t){0};
 }
@@ -405,11 +405,10 @@ void __attribute__((noreturn)) call_start_cpu0(void)
     esp_rom_printf("WL stage2: load partition=%d flash=%s\n", partition_index, flash_mode);
     /* The IDF loader gets the runtimes as OTA entries and starts at the chosen one: it checks the image (magic, chip, app description,
      * checksum, SHA-256) and, when that fails, tries the other runtime. With none it finds nothing and resets. */
-    const uint32_t end = bs.factory.offset + bs.factory.size;
     bs.factory = (esp_partition_pos_t){0};
     for (int i = 0; i < SLOTS; i++) {
         const uint32_t at = slot_ext[i].offset;
-        bs.ota[i] = slot_info[i].valid ? (esp_partition_pos_t){.offset = at, .size = end - at < XIP_RUNTIME_RESERVE ? end - at : XIP_RUNTIME_RESERVE}
+        bs.ota[i] = slot_info[i].valid ? (esp_partition_pos_t){.offset = at, .size = slot_ext[i].size}
                                        : (esp_partition_pos_t){0};
     }
     bs.app_count = SLOTS;
