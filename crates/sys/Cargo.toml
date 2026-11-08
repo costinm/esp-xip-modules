@@ -1,0 +1,10 @@
+[package]
+name = "sys"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The sys component (49): memory and task diagnostics, device control and native-component dispatch"
+publish = false
+
+[dependencies]
+xip-abi = { path = "../xip-abi" }

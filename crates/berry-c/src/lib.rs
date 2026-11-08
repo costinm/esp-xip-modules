@@ -1,5 +1,5 @@
 //! The C module of `modules/mod_berry`, compiled in by `build.rs`: how a C module reaches the host
-//! runtime after `modules/WASM.md`. Rust modules come to `xip-runtime-host` as wasm; Berry is C and
+//! runtime after `modules/mod_wasm3/WASM.md`. Rust modules come to `xip-runtime-host` as wasm; Berry is C and
 //! has no wasm build, so its code is linked into the process instead and registered as a natively
 //! linked handler (`Runtime::add_handler`). It is the same source a packed image ships, and the
 //! same ABI: `xip_handle(host, state, call)` is exactly the handler's signature, so the module sees

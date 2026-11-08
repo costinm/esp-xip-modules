@@ -1,0 +1,10 @@
+[package]
+name = "hw"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The hardware-policy component (45): battery, ADC probe and button"
+publish = false
+
+[dependencies]
+xip-abi = { path = "../xip-abi" }

@@ -1024,6 +1024,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hw"
+version = "0.1.0"
+dependencies = [
+ "xip-abi",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1995,6 +2002,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sys"
+version = "0.1.0"
+dependencies = [
+ "xip-abi",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2662,8 +2676,10 @@ name = "xip-runtime-host"
 version = "0.1.0"
 dependencies = [
  "berry-c",
+ "dmesh-cli",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "wasm3-c",
  "wat",
