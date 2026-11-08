@@ -137,16 +137,8 @@ pub const SOCKET_EVENT_CLOSED: u32 = 6;
 pub const SOCKET_EVENT_WRITE_DONE: u32 = 7;
 
 // DMOD: Module image header.
-/// First byte of every extent of the xip partition (the scan reads 8 bytes per 64 KiB page): a module image.
+/// First byte of a module image.
 pub const DMOD_KIND_MODULE: u8 = b'M';
-/// A data extent (the flash filesystem of `mod_flash`): the same 8-byte lead as a module, `image_size` is its length.
-pub const EXTENT_DATA: u8 = b'D';
-/// A runtime image is an ESP image: its first byte is the ESP magic.
-pub const EXTENT_RUNTIME: u8 = 0xe9;
-/// A page that was never written, or was erased again.
-pub const EXTENT_EMPTY: u8 = 0xff;
-/// A deleted extent: the first byte of each of its pages is programmed to zero (no erase), a later pass erases the pages.
-pub const EXTENT_DELETED: u8 = 0x00;
 pub const DMOD_HEADER_SIZE: u32 = 64;
 /// Linked at code_vma/data_vma (Xtensa); otherwise position independent (RISC-V).
 pub const DMOD_FLAG_FIXED_VMA: u32 = 1;
@@ -732,7 +724,9 @@ pub struct Host {
     ///
     /// Returns one tagged-CBOR map: `{1: device, 2: wifi, 3: heap, 4: modules, 5: components, 6: packets}`.
     /// Device is `{1: uptime_ms, 2: chip, 3: flash_size, 4: active_partition_label,
-    /// 5: active_partition_address, 6: active_partition_size}`. Chip is an ESP chip model number;
+    /// 5: active_partition_address, 6: active_partition_size, 7: mac,
+    /// 8: active_image_address, 9: active_image_size}`. Image fields are optional and describe
+    /// the executing runtime, with its span rounded to 64 KiB. Chip is an ESP chip model number;
     /// partition fields are omitted when the platform cannot identify its running partition.
     /// Wi-Fi, heap and modules reuse the Wi-Fi state, `heap_info` and `modules_info` records;
     /// unavailable Wi-Fi is an empty map and unavailable module enumeration is an empty array.
@@ -888,3 +882,18 @@ pub struct PacketPoolInfo {
     pub available: u32,
 }
 const _: () = assert!(core::mem::size_of::<PacketPoolInfo>() == 24);
+
+/// Native `module-panic` component, version 1. Panic reporting uses no allocator.
+/// `report` records the calling module and bounded message in RTC RAM and restarts.
+/// `read` returns the pending CBOR diagnostic and caller address; zero means none.
+/// `logged` acknowledges a successful filesystem commit, retaining quarantine.
+#[repr(C)]
+pub struct ModulePanic {
+    pub version: u32,
+    pub size: u32,
+    pub report: unsafe extern "C" fn(user: *mut c_void, message: *const u8, len: usize),
+    pub read: unsafe extern "C" fn(user: *mut c_void, out: *mut u8, capacity: usize, address: *mut u32) -> core::ffi::c_int,
+    pub logged: unsafe extern "C" fn(user: *mut c_void),
+}
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::size_of::<ModulePanic>() == 20);

@@ -238,3 +238,33 @@ mod tests {
         assert_eq!(LIVE.load(core::sync::atomic::Ordering::SeqCst), 0);
     }
 }
+
+/// Report a module panic without allocating, then let the host restart it in quarantine.
+/// Older hosts still receive a reset request.
+pub fn module_panic(info: &core::panic::PanicInfo) -> ! {
+    struct Message { bytes: [u8; 192], len: usize }
+    impl core::fmt::Write for Message {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+            let n = text.len().min(self.bytes.len() - self.len);
+            self.bytes[self.len..self.len+n].copy_from_slice(&text.as_bytes()[..n]);
+            self.len += n;
+            Ok(())
+        }
+    }
+    unsafe {
+        if let Some(hw) = Hw::new(context::get() as *const Host) {
+            let mut message = Message { bytes: [0; 192], len: 0 };
+            use core::fmt::Write;
+            let _ = write!(message, "{}", info);
+            let name = core::ffi::CStr::from_bytes_with_nul_unchecked(b"module-panic\0");
+            let service = hw.get_component(name).cast::<crate::ModulePanic>();
+            if let Some(service) = service.as_ref() {
+                if service.version == 1 && service.size as usize >= core::mem::size_of::<crate::ModulePanic>() {
+                    (service.report)(hw.ctx(), message.bytes.as_ptr(), message.len);
+                }
+            }
+            let _ = hw.reset();
+        }
+    }
+    loop { core::hint::spin_loop(); }
+}

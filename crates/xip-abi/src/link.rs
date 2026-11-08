@@ -79,7 +79,7 @@ pub const LINK_PPP: &core::ffi::CStr = c"ppp";
 pub const LINK_SERIAL: &core::ffi::CStr = c"serial";
 
 /// A module's **port** (manifest key 9, an integer): a virtual, numbered place that frames are addressed to, and that is not tied to a link or an encoding.
-/// The runtime binds the module to its port when it starts; every link that can deliver frames to a port does (the serial line, later UDP and TCP), and
+/// The runtime subscribes the module to its port when it starts; several modules may share a port and receive their own packet references. Every link that can deliver frames to a port does (the serial line, later UDP and TCP), and
 /// the frame arrives like any link frame: `from` is the link, `id` the token of the far end, so the module answers with `send(from, .., id)` and
 /// does not know which link it was. 0: none.
 ///

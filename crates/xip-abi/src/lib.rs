@@ -419,6 +419,7 @@ impl Hw {
     /// Send a datagram from a runtime-owned UDP socket (the `call.from` handle of a
     /// datagram receive) to `dest`. ERR_BUSY: send again later. The helper copies
     /// like `socket_write`; a failed `send` owns nothing.
+    /// Handle 0 selects the native discovery socket for an unsolicited announcement.
     pub fn udp_send(&self, handle: u32, dest: ([u8; 16], u16, u32), data: &[u8]) -> i32 {
         call!(self, UDP_SEND, udp_send(handle, dest.0.as_ptr(), dest.1, dest.2, data.as_ptr(), data.len()))
     }
@@ -816,6 +817,8 @@ mod lora_vtable;
 pub use lora_vtable::Lora;
 
 mod system;
+pub mod files;
+pub use files::*;
 pub use system::{SystemHeapInfo, SystemHeapDump};
 mod system_vtable;
 pub use system_vtable::System;

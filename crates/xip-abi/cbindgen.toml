@@ -11,6 +11,7 @@ style = "type"
 usize_is_size_t = true
 
 trailer = """
+_Static_assert(sizeof(xip_module_panic) == 8 + 3 * sizeof(void *), "xip_module_panic layout");
 _Static_assert(sizeof(xip_relay_hop) == 64, "xip_relay_hop layout");
 _Static_assert(sizeof(xip_relay_route) == 280, "xip_relay_route layout");
 _Static_assert(sizeof(xip_relay_stats) == 16, "xip_relay_stats layout");
@@ -64,10 +65,11 @@ int xip_handle(const xip_host *host, void *state, const xip_call *call);
 """
 
 [export]
-include = ["System", "SystemHeapInfo", "SystemHeapDump", "Lora", "Nan", "NanTransport", "Serial", "Stream", "StreamPacket", "Quic", "RelayHop", "RelayRoute", "RelayStats", "PacketPoolInfo", "Identity", "Crypto", "Native", "SerialRxBuffer", "SerialPacketTx", "SerialPacketClient", "Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware", "Ble", "BleStart", "BleScan", "BleConnect", "BleListen", "BleMode", "BleStatus", "BleScanResults", "Nimble", "NimbleFilter", "NimbleStart", "NimbleScan", "NimbleConnect"]
+include = ["ModulePanic", "System", "SystemHeapInfo", "SystemHeapDump", "Lora", "Nan", "NanTransport", "Serial", "Stream", "StreamPacket", "Quic", "RelayHop", "RelayRoute", "RelayStats", "PacketPoolInfo", "Identity", "Crypto", "Native", "SerialRxBuffer", "SerialPacketTx", "SerialPacketClient", "Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware", "Ble", "BleStart", "BleScan", "BleConnect", "BleListen", "BleMode", "BleStatus", "BleScanResults", "Nimble", "NimbleFilter", "NimbleStart", "NimbleScan", "NimbleConnect"]
 prefix = "xip_"
 
 [export.rename]
+ModulePanic = "module_panic"
 System = "system"
 SystemHeapInfo = "system_heap_info"
 SystemHeapDump = "system_heap_dump"
