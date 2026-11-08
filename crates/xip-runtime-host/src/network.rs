@@ -331,7 +331,7 @@ impl crate::Instance {
             let port = if base == 0 {
                 0
             } else {
-                base.checked_add(n)
+                base.checked_add(if n as u32==PORT_MC {2} else {n})
                     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "port overflow"))?
             };
             Ok(SocketAddr::new(ip, port))
@@ -346,6 +346,12 @@ impl crate::Instance {
         } else {
             None
         };
+        if port as u32 == PORT_MC {
+            if let (Some(socket),Ok(scope))=(&udp,std::env::var("XIP_MULTICAST_IF_INDEX")) {
+                let scope=scope.parse::<u32>().map_err(|_|io::Error::other("invalid XIP_MULTICAST_IF_INDEX"))?;
+                socket.join_multicast_v6(&"ff02::5227".parse().unwrap(),scope)?;
+            }
+        }
         // Prepare everything before publishing either endpoint. A failed bind or
         // readiness registration must leave no half-installed listener behind.
         if let Some(socket) = &udp {
@@ -527,7 +533,7 @@ pub(crate) unsafe extern "C" fn udp_send(
     }
     let (sh, me) = context(user);
     let net = sh.network.borrow_mut();
-    let Some(pos) = net.udp.iter().position(|d| d.link == handle && d.owner == me.id) else {
+    let Some(pos) = net.udp.iter().position(|d| (handle == 0 || d.link == handle) && d.owner == me.id) else {
         return ERR_ARG;
     };
     let bytes = std::slice::from_raw_parts(data, len);
@@ -539,13 +545,20 @@ pub(crate) unsafe extern "C" fn udp_send(
         ])),
         port,
     );
+    let scope=if scope==0 && ip6[0]==255 {
+        std::env::var("XIP_MULTICAST_IF_INDEX").ok().and_then(|s|s.parse().ok()).unwrap_or(0)
+    }else{scope};
     if scope != 0 {
         if let SocketAddr::V6(ref mut a) = dest {
             a.set_scope_id(scope);
         }
     }
     sh.notify.notify_one();
-    match net.udp[pos].socket.try_send(bytes) {
+    // IPv4-bound test listeners accept mapped IPv4 destinations too.
+    if let (Ok(SocketAddr::V4(_)),SocketAddr::V6(a))=(net.udp[pos].socket.local_addr(),dest) {
+        if let Some(v4)=a.ip().to_ipv4_mapped(){dest=SocketAddr::new(IpAddr::V4(v4),port);}
+    }
+    match net.udp[pos].socket.try_send_to(bytes,dest) {
         Ok(n) => n as i32,
         Err(e) => err(e),
     }

@@ -155,7 +155,7 @@ fn additional_component_routes_without_console_and_preserves_wire_identity() {
     }
     let q=Requests::new();
     let m=q.rt.add_handler("nan",owner,0);m.set_component(46);
-    m.serve_envelope_component(1).unwrap();m.start(b"");q.rt.run(0);
+    m.serve_envelope_component(1, 1).unwrap();m.start(b"");q.rt.run(0);
     let request=enc(|w| {w.map(4).uint(1).uint(1).uint(2).uint(4).uint(3).uint(987).uint(5).map(1).uint(1).uint(0);});
     let frames=q.send(&request);assert_eq!(frames.len(),1);
     assert_eq!(cbor::get_int(&frames[0],1).unwrap(),Some(1));
@@ -163,12 +163,12 @@ fn additional_component_routes_without_console_and_preserves_wire_identity() {
     assert_eq!(cbor::get_int(&frames[0],3).unwrap(),Some(987));
     assert!(cbor::get(&frames[0],6).unwrap().is_some());
     let other=q.rt.add_handler("other",owner,0);other.set_component(47);
-    assert_eq!(other.serve_envelope_component(1),Err(ERR_BUSY));
-    assert_eq!(other.serve_envelope_component(47),Err(ERR_ARG));
-    assert_eq!(other.serve_envelope_component(0),Err(ERR_ARG));
+    assert_eq!(other.serve_envelope_component(1, 1),Err(ERR_BUSY));
+    assert_eq!(other.serve_envelope_component(47, 1),Err(ERR_ARG));
+    assert_eq!(other.serve_envelope_component(0, 1),Err(ERR_ARG));
     m.stop();q.rt.run(0);
     let missing=q.send(&request);assert_eq!(missing.len(),1);assert_eq!(cbor::get_int(&missing[0],7).unwrap(),Some(ERR_NOTFOUND as i64),"stopped owner is unavailable without a loader hook");
-    assert_eq!(other.serve_envelope_component(1),Ok(()));
+    assert_eq!(other.serve_envelope_component(1, 1),Ok(()));
 }
 
 #[test]

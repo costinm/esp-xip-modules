@@ -363,8 +363,27 @@ unsafe extern "C" fn h_nv(user: *mut c_void, key: *const u8, kn: usize, value: *
 
 unsafe extern "C" fn h_device_info(user: *mut c_void, out: *mut u8, cap: usize) -> i32 {
     let (sh, _me) = cx!(user, "device_info");
+    let running=sh.st.borrow().running_flash;
+    let mut partition=running;
+    let mut label="main".to_string();
+    if let (Some((at,_)),Some(flash))=(running,sh.flash.borrow_mut().as_mut()) {
+        let mut h=[0u8;32];
+        for i in 0..96 {
+            if flash.read(0x8000+i*32,&mut h).is_err() || h[..2]!=[0xaa,0x50] {break;}
+            let base=u32::from_le_bytes(h[4..8].try_into().unwrap());
+            let size=u32::from_le_bytes(h[8..12].try_into().unwrap());
+            if h[2]==0 && at>=base && at-base<size {
+                partition=Some((base,size));
+                let end=h[12..28].iter().position(|b|*b==0).unwrap_or(16);
+                label=String::from_utf8_lossy(&h[12..12+end]).into_owned();break;
+            }
+        }
+    }
     let mut v = cbor(|w| {
-        w.map(6).uint(1).map(1).uint(4).text("main").uint(2).map(0).uint(3).map(0).uint(4);
+        w.map(6).uint(1).map(if running.is_some(){5}else{1}).uint(4).text(&label);
+        if let Some((at,size))=partition {w.uint(5).uint(at as u64).uint(6).uint(size as u64);}
+        if let Some((at,size))=running {w.uint(8).uint(at as u64).uint(9).uint(size as u64);}
+        w.uint(2).map(0).uint(3).map(0).uint(4);
     });
     v.extend_from_slice(&module_info(sh));
     v.extend_from_slice(&cbor(|w| {
@@ -593,6 +612,7 @@ unsafe extern "C" fn h_get_component(user: *mut c_void, name: *const c_char) -> 
         return std::ptr::null();
     }
     let name = CStr::from_ptr(name).to_string_lossy().into_owned();
+    if name == "stream" { return crate::streams::component().cast(); }
     if name == "wifi" {
         return crate::wifi::component().cast();
     }
@@ -657,6 +677,7 @@ pub(crate) fn fill(t: &mut Host, user: *mut c_void) {
     t.abi_version = ABI_VERSION;
     t.size = std::mem::size_of::<Host>() as u32;
     t.user = user;
+    crate::flash::fill(t);
     t.log = Some(h_log);
     t.socket_read = Some(crate::network::read);
     t.socket_write = Some(crate::network::write);

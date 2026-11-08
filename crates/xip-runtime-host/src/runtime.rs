@@ -103,6 +103,7 @@ pub struct RtState {
     /// The id of the last `Instance::request`.
     pub next_request: u64,
     pub reset_called: bool,
+    pub running_flash: Option<(u32,u32)>,
     /// How many times a module asked the host to rescan the module partition.
     pub rescans: u32,
     pub started: String,
@@ -155,6 +156,9 @@ pub(crate) struct QItem {
     pub data: Vec<u8>,
 }
 
+/// Most additional wire components one module may claim (manifest key 13).
+pub(crate) const COMPONENT_IDS_MAX: usize = 8;
+
 pub(crate) struct InstState {
     pub queue: VecDeque<QItem>,
     pub alarms: Vec<Alarm>,
@@ -168,8 +172,8 @@ pub(crate) struct InstState {
     pub env: crate::envelope::Table,
     /// Components the module hosts (manifest key 11).
     pub hosted: Vec<crate::hosted::Hosted>,
-    /// Additional request component IDs declared by manifest key 12.
-    pub envelope_components: Vec<i32>,
+    /// Additional request component IDs declared by manifest key 13, each with its version: `(id, version)`.
+    pub envelope_components: Vec<(i32, u32)>,
     pub start_done: bool,
     pub ended: bool,
     pub result: i32,
@@ -222,6 +226,9 @@ impl Inst {
 }
 
 pub(crate) struct Shared {
+    pub streams: RefCell<crate::streams::Streams>,
+    pub flash: RefCell<Option<crate::flash::FlashFile>>,
+    pub flash_job: RefCell<Option<crate::flash::Job>>,
     pub cfg: Config,
     pub pool: Pool,
     pub st: RefCell<RtState>,
@@ -273,6 +280,7 @@ impl Runtime {
             main: Vec::new(),
             next_request: 0,
             reset_called: false,
+            running_flash: None,
             rescans: 0,
             started: String::new(),
             start_request: String::new(),
@@ -290,10 +298,20 @@ impl Runtime {
         crate::wifi::FIX.with(|f| *f.borrow_mut() = crate::wifi::Fixture::new());
         crate::wifi::TUNING.with(|t| *t.borrow_mut() = xip_abi::WifiTuning::default());
         crate::power::FIX.with(|f| f.borrow_mut().requests.clear());
-        let sh = Rc::new(Shared { pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None), thunk_tables: RefCell::new(Vec::new()), starter: RefCell::new(None), request_starter: RefCell::new(None), hashes: RefCell::new(HashMap::new()), wasm: RefCell::new(None), wasm_slots: RefCell::new(vec![None; SLOTS + 1]) });
+        let sh = Rc::new(Shared { streams: RefCell::new(Default::default()), flash: RefCell::new(None), flash_job: RefCell::new(None), pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None), thunk_tables: RefCell::new(Vec::new()), starter: RefCell::new(None), request_starter: RefCell::new(None), hashes: RefCell::new(HashMap::new()), wasm: RefCell::new(None), wasm_slots: RefCell::new(vec![None; SLOTS + 1]) });
         Runtime { sh }
     }
 
+    /// Attach persistent flash before starting modules. Existing bytes are never reset.
+    pub fn attach_flash(&self, file: crate::flash::FlashFile) -> Result<(), i32> {
+        if self.sh.flash_job.borrow().is_some() || self.sh.flash.borrow().is_some() {return Err(ERR_BUSY);}
+        *self.sh.flash.borrow_mut()=Some(file); Ok(())
+    }
+    /// Inject a deterministic loss of write access after N completed flash mutations.
+    pub fn flash_read_count(&self)->Option<u64>{self.sh.flash.borrow().as_ref().map(|f|f.reads)}
+    pub fn flash_cut_after(&self, count: Option<u64>) {
+        if let Some(f)=self.sh.flash.borrow_mut().as_mut() {f.cut_after(count);}
+    }
     /// Create an instance for a module loaded from a shared object. `state_bytes` is the size the image header would ask for;
     /// when the module ships its generated metadata, its `state_bytes` is the floor (a stale caller value must not truncate
     /// the module's state block).
@@ -313,13 +331,18 @@ impl Runtime {
         let name = xip_abi::cbor::get_text(&metadata.manifest, 1).ok().flatten().map(|s| String::from_utf8_lossy(s).into_owned()).unwrap_or_default();
         let instance = self.try_add_loaded(&name, loaded, state_bytes)?;
         instance.set_component(component);
-        if let Ok(Some(mut ids)) = xip_abi::cbor::get(&instance.me.manifest, 12) {
+        if let Ok(Some(mut ids)) = xip_abi::cbor::get(&instance.me.manifest, 13) {
+            // key 13: [[id, version], ...], at most COMPONENT_IDS_MAX, ids distinct (checked by serve_envelope_component)
             let parsed = (|| {
                 let Some(xip_abi::cbor::Item::Array(n)) = ids.next() else { return Err(ERR_ARG); };
-                if n > COMPONENTS_MAX { return Err(ERR_SIZE); }
+                if n > COMPONENT_IDS_MAX { return Err(ERR_SIZE); }
                 for _ in 0..n {
+                    let Some(xip_abi::cbor::Item::Array(2)) = ids.next() else { return Err(ERR_ARG); };
                     let Some(xip_abi::cbor::Item::Uint(id)) = ids.next() else { return Err(ERR_ARG); };
-                    instance.serve_envelope_component(i32::try_from(id).map_err(|_| ERR_ARG)?)?;
+                    let Some(xip_abi::cbor::Item::Uint(version)) = ids.next() else { return Err(ERR_ARG); };
+                    let id = i32::try_from(id).map_err(|_| ERR_ARG)?;
+                    let version = u32::try_from(version).map_err(|_| ERR_ARG)?;
+                    instance.serve_envelope_component(id, version)?;
                 }
                 Ok(())
             })();
@@ -523,6 +546,11 @@ impl Runtime {
     }
 
     /// The wanted Wi-Fi state modules last set through the `wifi` component, and its generation.
+    pub fn set_saved_wifi(&self, ssid:&str) -> Result<(), &'static str> {
+        if ssid.is_empty() || ssid.len()>32 {return Err("SSID must be 1..32 bytes");}
+        crate::wifi::FIX.with(|f| {let mut f=f.borrow_mut();f.intent.sta_ssid[..ssid.len()].copy_from_slice(ssid.as_bytes());f.intent.sta_ssid_len=ssid.len() as u8;});
+        Ok(())
+    }
     pub fn wifi_intent(&self) -> (xip_abi::WifiIntent, u32) {
         crate::wifi::FIX.with(|f| { let f = f.borrow(); (f.intent, f.generation) })
     }
@@ -753,6 +781,8 @@ fn finish_call(sh: &Shared, me: &Rc<Inst>, component: i32, method: i32, rc: i32)
 
 /// A module that ended gives back what it still holds.
 fn release_all(sh: &Shared, me: &Rc<Inst>) {
+    crate::flash::cancel(sh, me.id);
+    crate::streams::release(sh, me.id);
     sh.network.borrow_mut().release(sh, me.id);
     if let Some(component) = me.st.borrow().component {
         crate::link::release(sh, component);
@@ -905,6 +935,7 @@ fn drain_all(sh: &Shared) {
         for me in &insts {
             any |= drain(sh, me);
         }
+        any |= crate::flash::pump(sh);
         if !any {
             break;
         }
@@ -939,11 +970,16 @@ fn fire_alarm(sh: &Shared, me: &Rc<Inst>, i: usize) {
     st.alarms[i].fire = now + fire_delay(&sh.st.borrow(), left, a.window, a.flags) as u64;
 }
 
+/// The module for a wire component: a module that claims it (manifest key 13) first, else the module whose own tag it is.
 pub(crate) fn route(sh: &Shared, component: i32) -> Option<Rc<Inst>> {
-    sh.insts.borrow().iter().find(|i| {
+    let insts = sh.insts.borrow();
+    insts.iter().find(|i| {
         let st = i.st.borrow();
-        st.component == Some(component) && !st.ended
-    }).cloned()
+        !st.ended && st.envelope_components.iter().any(|&(c, _)| c == component)
+    }).or_else(|| insts.iter().find(|i| {
+        let st = i.st.borrow();
+        !st.ended && st.component == Some(component)
+    })).cloned()
 }
 
 /// Queue a pool packet for `t`. The caller keeps the slot reference when this fails. `src` is a datagram's source on a runtime-owned UDP socket.
@@ -982,20 +1018,20 @@ impl Instance {
         self.me.st.borrow_mut().component = Some(component);
     }
 
-    /// Assign an additional envelope ID before start, as manifest key 12 does on the device.
-    pub fn serve_envelope_component(&self, component: i32) -> Result<(), i32> {
+    /// Claim an additional wire component ID before start, as manifest key 13 does on the device (`version` is kept with it).
+    pub fn serve_envelope_component(&self, component: i32, version: u32) -> Result<(), i32> {
         if component <= 0 { return Err(ERR_ARG); }
         {
             let own = self.me.st.borrow();
-            if own.component == Some(component) || own.envelope_components.contains(&component) { return Err(ERR_ARG); }
-            if own.envelope_components.len() >= COMPONENTS_MAX { return Err(ERR_SIZE); }
+            if own.component == Some(component) || own.envelope_components.iter().any(|&(c, _)| c == component) { return Err(ERR_ARG); }
+            if own.envelope_components.len() >= COMPONENT_IDS_MAX { return Err(ERR_SIZE); }
         }
         if self.rt.sh.insts.borrow().iter().any(|other| {
             if Rc::ptr_eq(other, &self.me) { return false; }
             let st = other.st.borrow();
-            !st.ended && (st.component == Some(component) || st.envelope_components.contains(&component))
+            !st.ended && (st.component == Some(component) || st.envelope_components.iter().any(|&(c, _)| c == component))
         }) { return Err(ERR_BUSY); }
-        self.me.st.borrow_mut().envelope_components.push(component);
+        self.me.st.borrow_mut().envelope_components.push((component, version));
         Ok(())
     }
 

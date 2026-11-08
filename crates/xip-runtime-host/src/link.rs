@@ -291,12 +291,10 @@ pub(crate) fn link_tx(sh: &Shared, dst: u32, slot: i32, start: u16, len: u16, to
     rc
 }
 
-/// Additional manifest component ownership takes priority, then the component
-/// module with a datagram/stream port or hosted table, then the console fallback.
+/// Additional manifest component ownership (key 13) takes priority, then the module whose own tag is the component,
+/// then the console fallback. Both lookups are `route`, the one function every module-to-module request goes through.
 pub(crate) fn request_target(sh:&Shared,component:i32)->Result<Rc<Inst>,i32>{
-    let find=||sh.insts.borrow().iter().find(|i|{
-        let st=i.st.borrow();!st.ended && (st.envelope_components.contains(&component) || st.component==Some(component))
-    }).cloned();
+    let find=||route(sh,component);
     let mut owner=find();
     if owner.is_none(){
         let starter=sh.request_starter.borrow().clone();

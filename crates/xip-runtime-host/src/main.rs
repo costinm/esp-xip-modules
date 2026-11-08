@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut specs: Vec<_> = std::env::args().skip(1).collect();
     if specs.iter().any(|s| s == "--help" || s == "-h") {
-        println!("usage: xip-host [PATH.wasm[=START] ...]\nXIP_THREADS=1 selects the single-thread mode (as on the device)\nXIP_BASE_PORT=N offsets the manifest ports (default PORT_NET), XIP_BIND=IP the bind address (default 127.0.0.1)\nXIP_STATE_DIR=DIR keeps the device identity across runs\nXIP_QUIC_PORT=N the UDP port of QUIC packets (default 3340, 0 any, off none)\nDefault: mod_con (no port, requests arrive as QUIC packets on the UDP port) and an async echo on TCP/UDP 5228");
+        println!("usage: xip-host [PATH.wasm[=START] ...]\nXIP_THREADS=1 selects the single-thread mode (as on the device)\nXIP_BASE_PORT=N offsets the manifest ports (default PORT_NET), XIP_BIND=IP the bind address (default 127.0.0.1)\nXIP_FLASH_FILE=PATH attaches a persistent 4 MiB flash device\nXIP_FLASH_RUNNING=BASE:SIZE supplies the simulated executing image range\nXIP_STATE_DIR=DIR keeps the device identity across runs\nXIP_QUIC_PORT=N the UDP port of QUIC packets (default 3340, 0 any, off none)\nDefault: mod_con (no port, requests arrive as QUIC packets on the UDP port) and an async echo on TCP/UDP 5228");
         return Ok(());
     }
     if specs.is_empty() {
@@ -37,6 +37,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         xip_runtime_host::set_identity_dir(dir)?;
     }
     let rt = Runtime::default();
+    if let Some(path)=std::env::var_os("XIP_FLASH_FILE") {
+        rt.attach_flash(xip_runtime_host::flash::FlashFile::open(path, 4*1024*1024)?)
+            .map_err(|e|std::io::Error::other(format!("attach flash: {e}")))?;
+        if let Ok(range)=std::env::var("XIP_FLASH_RUNNING") {
+            let (base,size)=range.split_once(':').ok_or("XIP_FLASH_RUNNING needs BASE:SIZE")?;
+            let number=|v:&str|->Result<u32,Box<dyn std::error::Error>>{Ok(if let Some(hex)=v.strip_prefix("0x"){u32::from_str_radix(hex,16)?}else{v.parse()?})};
+            rt.state_mut().running_flash=Some((number(base)?,number(size)?));
+        }
+    }
+    // Fake saved station profile for standalone recovery-service tests.
+    if let Ok(ssid)=std::env::var("XIP_WIFI_SSID") {
+        rt.set_saved_wifi(&ssid)?;
+    }
     let mut modules = Vec::new();
     for spec in &specs {
         let (path, request) = spec.split_once('=').unwrap_or((spec, ""));
@@ -59,7 +72,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
+    let mut log_counts=vec![0usize;modules.len()];
     loop {
+        for (i,m) in modules.iter().enumerate() {
+            let logs=m.logs();
+            for line in logs.iter().skip(log_counts[i]) {eprint!("{line}");}
+            log_counts[i]=logs.len();
+        }
         if let Some(q) = quic.as_mut() { q.flush(&rt).await; }
         tokio::select! {
             r = async { match quic.as_mut() { Some(q) => q.recv(&rt).await, None => std::future::pending().await } } => { r?; },

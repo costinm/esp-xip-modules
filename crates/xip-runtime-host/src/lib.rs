@@ -13,6 +13,8 @@
 pub mod fixtures;
 pub mod pool;
 mod hostcalls;
+pub mod flash;
+mod streams;
 mod network;
 mod runtime;
 mod link;
