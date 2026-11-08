@@ -1,0 +1,2 @@
+#pragma once
+#define CONFIG_XIP_ESPNOW_DIAGNOSTICS 1
