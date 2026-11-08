@@ -1,4 +1,4 @@
-//! Memory and task diagnostics work without console or NAN, including low-memory conditions.
+//! Memory and task diagnostics work without NAN, including low-memory conditions.
 mod common;
 use common::*;
 use xip_abi::{*,cbor::{self,Writer}};
@@ -9,7 +9,7 @@ fn envelope(method:u64,fields:&[u8])->Vec<u8>{
     let n=w.finish().unwrap().len();out.truncate(n);out
 }
 #[test]
-fn system_serves_heap_and_tasks_without_console_or_nan(){
+fn system_serves_heap_and_tasks_without_nan(){
     let q=Requests::new();let m=q.rt.load_module(module("mod_system")).unwrap();m.start(b"");q.rt.run(0);
     let replies=q.send(&envelope(1,&[0xa0]));assert_eq!(replies.len(),1);
     let r=&replies[0];assert_eq!(cbor::get_int(r,1).unwrap(),Some(49));assert_eq!(cbor::get_int(r,3).unwrap(),Some(123));

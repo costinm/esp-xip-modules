@@ -30,14 +30,14 @@ struct T {
     declined: Rc<RefCell<Vec<Vec<u8>>>>,
 }
 impl T {
-    /// A runtime with the console on the serial link, a native link `ble`, the classifier's local callback (releases every packet) and the
+    /// A runtime with the sys module on the serial link, a native link `ble`, the classifier's local callback (releases every packet) and the
     /// old receive function, which takes what the classifier declines.
     fn new() -> T {
         let rt = Runtime::default();
         rt.add_native_link("serial", 256, NativeTx::Done);
         rt.add_native_link("ble", 1500, NativeTx::Done);
-        let c = rt.add_module(module("mod_con"), 32).unwrap();
-        c.set_component(20);
+        let c = rt.add_module(module("mod_system"), 0).unwrap();
+        c.set_component(49);
         assert!(c.bind_port(PORT_CONSOLE) > 0);
         c.start(b"");
         rt.run(0);
@@ -84,9 +84,9 @@ fn golden_headers_classify_like_quic_lite() {
     assert_eq!(quic::classify(&SHORT4[..], 3).1.dcid.len(), 3, "a fixed length overrides the class rule");
     for n in 0..INITIAL.len() { let _ = quic::classify(&INITIAL[..n], 0); }
     for n in 0..SHORT4.len() { let _ = quic::classify(&SHORT4[..n], 0); }
-    assert_eq!(quic::envelope(&enc(|w| { w.map(2).uint(1).uint(20).uint(2).uint(5); })), Some((20, 5, None, false)));
-    assert_eq!(quic::envelope(&enc(|w| { w.map(3).uint(1).uint(20).uint(2).uint(5).uint(3).uint(987); })), Some((20, 5, Some(987), false)));
-    assert_eq!(quic::envelope(&enc(|w| { w.map(1).uint(1).uint(20); })), None);
+    assert_eq!(quic::envelope(&enc(|w| { w.map(2).uint(1).uint(49).uint(2).uint(5); })), Some((49, 5, None, false)));
+    assert_eq!(quic::envelope(&enc(|w| { w.map(3).uint(1).uint(49).uint(2).uint(5).uint(3).uint(987); })), Some((49, 5, Some(987), false)));
+    assert_eq!(quic::envelope(&enc(|w| { w.map(1).uint(1).uint(49); })), None);
 }
 
 #[test]
@@ -155,11 +155,11 @@ fn an_unknown_dcid_is_dropped_and_counted_and_relay_entries_are_placeholders() {
 }
 
 #[test]
-fn a_cbor_datagram_is_routed_to_the_console_and_answered_as_a_cbor_datagram() {
+fn a_cbor_datagram_is_routed_to_the_sys_module_and_answered_as_a_cbor_datagram() {
     let t = T::new();
     let (d, s) = ([0xa0u8, 0, 0, 7], [0x2au8]);
-    // console.status (20/5), with an id
-    let env = enc(|w| { w.map(4).uint(1).uint(20).uint(2).uint(5).uint(3).uint(0x1_0000_0077).uint(5).map(0); });
+    // sys.status (49/5), with an id
+    let env = enc(|w| { w.map(4).uint(1).uint(49).uint(2).uint(5).uint(3).uint(0x1_0000_0077).uint(5).map(0); });
     t.rx("ble", &datagram(&d, &s, &env));
     t.pump();
     assert_eq!(t.rt.packets_in_use(), 0);
@@ -170,12 +170,12 @@ fn a_cbor_datagram_is_routed_to_the_console_and_answered_as_a_cbor_datagram() {
     let (class, h) = quic::classify(&sent[0].1, 0);
     assert_eq!((class, h.version, h.dcid.as_slice(), h.scid.as_slice()), (quic::QuicClass::Long, VERSION_CBOR, &s[..], &d[..]), "the CIDs are swapped");
     let answer = &sent[0].1[h.body..];
-    assert_eq!(cbor::get_int(answer, 1).unwrap(), Some(20));
+    assert_eq!(cbor::get_int(answer, 1).unwrap(), Some(49));
     assert_eq!(cbor::get_int(answer, 2).unwrap(), Some(5));
     assert_eq!(cbor::get_int(answer, 3).unwrap(), Some(0x1_0000_0077));
     assert!(cbor::get(answer, 6).unwrap().is_some() && cbor::get(answer, 7).unwrap().is_none());
     // an unsupported method answers with the numeric error (field 7)
-    let env = enc(|w| { w.map(4).uint(1).uint(20).uint(2).uint(900).uint(3).uint(78).uint(5).map(0); });
+    let env = enc(|w| { w.map(4).uint(1).uint(49).uint(2).uint(900).uint(3).uint(78).uint(5).map(0); });
     t.rx("ble", &datagram(&d, &s, &env));
     t.pump();
     let sent = t.rt.take_link_tx("ble");
@@ -183,7 +183,7 @@ fn a_cbor_datagram_is_routed_to_the_console_and_answered_as_a_cbor_datagram() {
     let h = quic::classify(&sent[0].1, 0).1;
     let answer = &sent[0].1[h.body..];
     assert_eq!((cbor::get_int(answer, 3).unwrap(), cbor::get_int(answer, 7).unwrap()), (Some(78), Some(ERR_UNSUPPORTED as i64)));
-    // a component nobody serves goes to the console too, which answers the error
+    // a component nobody serves goes to the sys module too, which answers the error
     let env = enc(|w| { w.map(4).uint(1).uint(9999).uint(2).uint(1).uint(3).uint(79).uint(5).map(0); });
     t.rx("ble", &datagram(&d, &s, &env));
     t.pump();
@@ -224,7 +224,7 @@ fn bad_envelopes_and_other_long_versions() {
 #[test]
 fn malformed_and_truncated_packets_are_dropped_without_a_leak() {
     let t = T::new();
-    let env = enc(|w| { w.map(3).uint(1).uint(20).uint(2).uint(5).uint(3).uint(1); });
+    let env = enc(|w| { w.map(3).uint(1).uint(49).uint(2).uint(5).uint(3).uint(1); });
     let cases = [datagram(&[0xa0, 0, 0, 7], &[0x2a], &env), INITIAL.to_vec(), SHORT4.to_vec()];
     for pkt in &cases {
         for n in 1..pkt.len() {
@@ -280,9 +280,9 @@ fn the_classifier_is_off_until_enabled_so_an_old_receive_function_keeps_its_fram
 fn an_answer_is_never_dispatched_as_a_request() {
     let t = T::new();
     let (d, s) = ([0xa0u8, 0, 0, 7], [0x2au8]);
-    // what the console answered earlier, arriving on the other device: component, method and id of a request plus a result (6) or an error (7)
-    let answer = enc(|w| { w.map(4).uint(1).uint(20).uint(2).uint(5).uint(3).uint(77).uint(6).map(0); });
-    let failure = enc(|w| { w.map(4).uint(1).uint(20).uint(2).uint(5).uint(3).uint(77).uint(7).int(-2); });
+    // what the sys module answered earlier, arriving on the other device: component, method and id of a request plus a result (6) or an error (7)
+    let answer = enc(|w| { w.map(4).uint(1).uint(49).uint(2).uint(5).uint(3).uint(77).uint(6).map(0); });
+    let failure = enc(|w| { w.map(4).uint(1).uint(49).uint(2).uint(5).uint(3).uint(77).uint(7).int(-2); });
     t.rx("ble", &datagram(&d, &s, &answer));
     t.rx("ble", &datagram(&d, &s, &failure));
     t.pump();
@@ -321,7 +321,7 @@ fn an_answer_is_sent_only_with_the_request_id_and_to_the_requesting_peer() {
     let (d, s) = ([0xa0u8, 0, 0, 7], [0x2au8]);
     // two requests from two peers at once, both with id 77: each answer goes back to its own peer
     for peer in [5u64, 6] {
-        let env = enc(|w| { w.map(4).uint(1).uint(20).uint(2).uint(5).uint(3).uint(77).uint(5).map(0); });
+        let env = enc(|w| { w.map(4).uint(1).uint(49).uint(2).uint(5).uint(3).uint(77).uint(5).map(0); });
         assert_eq!(t.rt.inject_frame("ble", peer, 0, &datagram(&d, &s, &env)), 0);
     }
     t.pump();

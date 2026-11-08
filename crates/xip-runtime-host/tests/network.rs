@@ -355,13 +355,13 @@ async fn cli_defaults_bind_declared_ports_and_serve_async_echo() {
                 .await
                 .unwrap()
                 .expect("CLI exited during startup");
-            if line.contains("mod_con.wasm") {
-                assert!(line.contains("TCP None") && line.contains("UDP None"), "{line}"); // the console has no port
+            if line.contains("mod_system.wasm") {
+                assert!(line.contains("TCP None") && line.contains("UDP None"), "{line}"); // the sys module has no port
             } else {
                 assert!(line.contains("mod_rtest.wasm") && line.contains("TCP Some"), "{line}");
             }
         }
-        // A module's UDP port gets the full raw datagram (mod_con answers envelopes of PPP ports and 0x444d0002 datagrams, not raw UDP).
+        // A module's UDP port gets the full raw datagram (mod_system's sys component answers envelopes of PPP ports and 0x444d0002 datagrams, not raw UDP).
         let mut echo = TcpStream::connect("127.0.0.1:5228").await.unwrap();
         echo.write_all(b"CLI async").await.unwrap();
         let mut reply = [0; 9];
@@ -375,15 +375,15 @@ async fn cli_defaults_bind_declared_ports_and_serve_async_echo() {
 }
 
 #[test]
-fn binary_console_reports_registered_modules_and_controls_real_instance() {
+fn binary_sys_reports_registered_modules_and_controls_real_instance() {
     use xip_abi::{cbor::{self, Item, Reader, Writer}, ERR_UNSUPPORTED};
     let rt = Runtime::default();
-    let console = rt.load_module(module("mod_con")).unwrap();
+    let sys_module = rt.load_module(module("mod_system")).unwrap();
     let test = rt.load_module(module("mod_rtest")).unwrap();
-    console.start(b"");
+    sys_module.start(b"");
     test.start(b"async");
     rt.run(0);
-    let status = console.request(20, 5, &[0xa0]).unwrap();
+    let status = sys_module.request(49, 5, &[0xa0]).unwrap();
     let mut slots = cbor::get(&status, 4).unwrap().expect("module list");
     let Some(Item::Array(count)) = slots.next() else { panic!("module list must be an array") };
     let mut names = Vec::new();
@@ -395,7 +395,7 @@ fn binary_console_reports_registered_modules_and_controls_real_instance() {
         }
         assert!(slots.skip());
     }
-    assert!(names.iter().any(|n| n == b"console"));
+    assert!(names.iter().any(|n| n == b"sys"));
     assert!(names.iter().any(|n| n == b"test"));
 
     // Assert the exact structured result rather than a rendered line.
@@ -410,7 +410,7 @@ fn binary_console_reports_registered_modules_and_controls_real_instance() {
     }
 
     let name = b"\xa1\x01\x64test";
-    assert_eq!(console.request(20, 7, name).unwrap(), [0xa0]);
+    assert_eq!(sys_module.request(49, 7, name).unwrap(), [0xa0]);
     rt.run(0);
     assert!(test.ended());
     assert_eq!(test.mem_leaked(), 0);
@@ -418,11 +418,11 @@ fn binary_console_reports_registered_modules_and_controls_real_instance() {
     let mut buf = [0; 64];
     let mut w = Writer::new(&mut buf);
     w.map(2).uint(1).text("test").uint(2).bytes(b"async");
-    let restart = console.request(20, 6, w.finish().unwrap()).unwrap();
+    let restart = sys_module.request(49, 6, w.finish().unwrap()).unwrap();
     assert_eq!(Reader::new(&restart).next().and_then(|item| item.as_int()), Some(ERR_UNSUPPORTED as i64));
-    console.stop();
+    sys_module.stop();
     rt.run(0);
-    assert_eq!(console.mem_leaked(), 0);
+    assert_eq!(sys_module.mem_leaked(), 0);
 }
 
 #[test]
@@ -488,15 +488,15 @@ async fn cli_answers_a_quic_lite_envelope_on_the_udp_link() {
                 break a.to_string();
             }
         };
-        // long header (version 0x444d0002, DCID 01, SCID 02) and the envelope {1: 20 console, 2: 5 status, 3: 1}
+        // long header (version 0x444d0002, DCID 01, SCID 02) and the envelope {1: 49 sys, 2: 5 status, 3: 1}
         let mut request = vec![0xc0, 0x44, 0x4d, 0x00, 0x02, 1, 0x01, 1, 0x02];
-        request.extend([0xa3, 0x01, 0x14, 0x02, 0x05, 0x03, 0x01]);
+        request.extend([0xa3, 0x01, 0x18, 0x31, 0x02, 0x05, 0x03, 0x01]);
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         socket.send_to(&request, &addr).await.unwrap();
         let mut reply = [0u8; 1500];
         let n = socket.recv(&mut reply).await.unwrap();
         assert_eq!(&reply[..9], &[0xc0, 0x44, 0x4d, 0x00, 0x02, 1, 0x02, 1, 0x01], "CIDs swapped");
-        assert_eq!(xip_runtime_host::xip_abi::cbor::get_int(&reply[9..n], 1).unwrap(), Some(20));
+        assert_eq!(xip_runtime_host::xip_abi::cbor::get_int(&reply[9..n], 1).unwrap(), Some(49));
     })
     .await;
     child.kill().await.unwrap();

@@ -17,6 +17,7 @@ pub mod flash;
 mod streams;
 mod network;
 mod runtime;
+mod state;
 mod link;
 mod envelope;
 mod hosted;
@@ -43,7 +44,7 @@ pub type HandlerFn = unsafe extern "C" fn(*const xip_abi::Host, *mut u8, *const 
 
 /// A module loaded from a WebAssembly file built for this host (see `scripts/build-host-modules.sh`), or a handler linked into this process.
 ///
-/// A wasm module is linked at the address of its slot (`modules/WASM.md`), so the runtime needs one file per slot: for
+/// A wasm module is linked at the address of its slot (`modules/mod_wasm3/WASM.md`), so the runtime needs one file per slot: for
 /// `mod_rtest.wasm` it reads `mod_rtest.s1.wasm` for the first wasm module of the runtime, `mod_rtest.s2.wasm` for the second, and so on.
 #[derive(Clone, serde::Deserialize)]
 pub struct ModuleMetadata { pub state_bytes: usize, pub manifest: Vec<u8> }
@@ -85,6 +86,19 @@ impl Loaded {
     /// A handler linked into this process.
     pub fn linked(handler: HandlerFn) -> Loaded {
         Loaded { kind: Kind::Native(handler), metadata: None }
+    }
+    /// A handler linked into this process whose manifest says version `version` (key 8, as an image's): the version rules of
+    /// retained state (`Host::state_resize`) are checked with it. No state block.
+    pub fn linked_with_version(handler: HandlerFn, version: u32) -> Loaded {
+        // a one-entry CBOR map {8: version}
+        let mut manifest = vec![0xa1, 0x08];
+        match version {
+            0..=23 => manifest.push(version as u8),
+            24..=0xff => manifest.extend([0x18, version as u8]),
+            0x100..=0xffff => manifest.extend([0x19, (version >> 8) as u8, version as u8]),
+            _ => manifest.extend([0x1a, (version >> 24) as u8, (version >> 16) as u8, (version >> 8) as u8, version as u8]),
+        }
+        Loaded { kind: Kind::Native(handler), metadata: Some(ModuleMetadata { state_bytes: 0, manifest }) }
     }
 }
 

@@ -180,6 +180,8 @@ pub(crate) struct InstState {
     pub calls: u32,
     pub leaked: u32,
     pub mem_leaked: u32,
+    /// The state objects (`state.rs`): the root, instance objects.
+    pub state_objs: Vec<crate::state::Obj>,
 }
 
 pub(crate) struct Ctx {
@@ -203,7 +205,10 @@ pub(crate) struct Inst {
     pub handler: Handler,
     pub manifest: Vec<u8>,
     pub registered: Cell<bool>,
-    pub state_ptr: *mut u8,
+    /// The root object (key 0): the `state` argument of `xip_handle`; NULL without one. Follows the root's resizes.
+    pub state_ptr: Cell<*mut u8>,
+    /// The manifest version (key 8, 0 without one): retained state is kept for it.
+    pub version: u32,
     _state: Box<[u128]>,
     _loaded: Option<Loaded>,
     pub st: RefCell<InstState>,
@@ -213,8 +218,8 @@ impl Inst {
     /// Call `xip_handle` once.
     pub(crate) fn run(&self, call: &Call) -> i32 {
         match &self.handler {
-            Handler::Native(f) => unsafe { f(&*self.table, self.state_ptr, call) },
-            Handler::Wasm { space, slot } => match space.invoke(*slot, &*self.table, self.state_ptr, call) {
+            Handler::Native(f) => unsafe { f(&*self.table, self.state_ptr.get(), call) },
+            Handler::Wasm { space, slot } => match space.invoke(*slot, &*self.table, self.state_ptr.get(), call) {
                 Ok(rc) => rc,
                 Err(e) => {
                     eprintln!("wasm module {}: {e}", self.name);
@@ -244,6 +249,8 @@ pub(crate) struct Shared {
     /// Multipart hashes in progress (`crypto.hash_start`): handle, owner instance, state; dropped with the instance.
     pub hashes: RefCell<HashMap<u32, (usize, xip_psa::Hasher)>>,
     pub request_starter: RefCell<Option<Rc<dyn Fn(i32) -> Result<Instance,i32>>>>,
+    /// Retained state objects of the modules, by name and version (`state.rs`).
+    pub retained: RefCell<crate::state::Retained>,
     /// The shared memory of the wasm modules, created with the first one; how many are loaded.
     pub wasm: RefCell<Option<Rc<WasmSpace>>>,
     /// State block and heap of each slot, taken the first time the slot is used and reused when a module is loaded there again.
@@ -298,7 +305,7 @@ impl Runtime {
         crate::wifi::FIX.with(|f| *f.borrow_mut() = crate::wifi::Fixture::new());
         crate::wifi::TUNING.with(|t| *t.borrow_mut() = xip_abi::WifiTuning::default());
         crate::power::FIX.with(|f| f.borrow_mut().requests.clear());
-        let sh = Rc::new(Shared { streams: RefCell::new(Default::default()), flash: RefCell::new(None), flash_job: RefCell::new(None), pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None), thunk_tables: RefCell::new(Vec::new()), starter: RefCell::new(None), request_starter: RefCell::new(None), hashes: RefCell::new(HashMap::new()), wasm: RefCell::new(None), wasm_slots: RefCell::new(vec![None; SLOTS + 1]) });
+        let sh = Rc::new(Shared { streams: RefCell::new(Default::default()), flash: RefCell::new(None), flash_job: RefCell::new(None), pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None), thunk_tables: RefCell::new(Vec::new()), starter: RefCell::new(None), request_starter: RefCell::new(None), hashes: RefCell::new(HashMap::new()), wasm: RefCell::new(None), wasm_slots: RefCell::new(vec![None; SLOTS + 1]), retained: RefCell::new(Default::default()) });
         Runtime { sh }
     }
 
@@ -396,7 +403,7 @@ impl Runtime {
         let sh = &self.sh;
         let id = sh.insts.borrow().len();
         let mut state: Box<[u128]> = vec![0u128; state_bytes.max(1).div_ceil(16)].into_boxed_slice();
-        let mut state_ptr = state.as_mut_ptr().cast::<u8>();
+        let mut state_ptr = if state_bytes > 0 { state.as_mut_ptr().cast::<u8>() } else { std::ptr::null_mut() };
         let mut mem = Mem::new(sh.cfg.mem_quota);
         let handler = match &loaded.kind {
             Kind::Native(f) => Handler::Native(*f),
@@ -416,16 +423,24 @@ impl Runtime {
                 space.load(slot, &bytes)?;
                 let mut regions = sh.wasm_slots.borrow_mut();
                 if regions[slot].is_none() {
-                    regions[slot] = Some((space.region(WASM_STATE_MAX)?, space.region(sh.cfg.mem_quota as usize)?));
+                    // the heap is the quota plus WASM_STATE_MAX: the module's own state root is allocated there outside the quota
+                    regions[slot] = Some((space.region(WASM_STATE_MAX)?, space.region(sh.cfg.mem_quota as usize + WASM_STATE_MAX)?));
                 }
                 let (st, heap) = regions[slot].unwrap();
                 // SAFETY: regions of the space; a new module starts with zeroed state and an empty heap
                 unsafe { std::ptr::write_bytes(st.ptr, 0, st.len) };
-                state_ptr = st.ptr;
+                state_ptr = if state_bytes > 0 { st.ptr } else { std::ptr::null_mut() };
                 mem = Mem::with_arena(sh.cfg.mem_quota, heap.ptr, heap.len);
                 Handler::Wasm { space, slot }
             }
         };
+        let version = loaded.metadata.as_ref().and_then(|m| xip_abi::cbor::get_int(&m.manifest, 8).ok().flatten()).map_or(0, |v| v as u32);
+        // a start with another version drops what the module of this name retained for the old one
+        sh.retained.borrow_mut().forget_other_versions(name, version);
+        let mut state_objs = Vec::new();
+        if state_bytes > 0 {
+            state_objs.push(crate::state::Obj { key: 0, ptr: state_ptr, size: state_bytes, charged: false, fixed: true });
+        }
         let ctx = Box::new(Ctx { sh: Rc::as_ptr(sh), id });
         let mut table: Box<Host> = Box::new(unsafe { std::mem::zeroed() });
         hostcalls::fill(&mut table, &*ctx as *const Ctx as *mut c_void);
@@ -438,7 +453,8 @@ impl Runtime {
             handler,
             manifest: loaded.metadata.as_ref().map(|m| m.manifest.clone()).unwrap_or_default(),
             registered: Cell::new(false),
-            state_ptr,
+            state_ptr: Cell::new(state_ptr),
+            version,
             _state: state,
             _loaded: Some(loaded),
             st: RefCell::new(InstState {
@@ -459,6 +475,7 @@ impl Runtime {
                 calls: 0,
                 leaked: 0,
                 mem_leaked: 0,
+                state_objs,
             }),
         });
         sh.insts.borrow_mut().push(inst.clone());
@@ -789,6 +806,8 @@ fn release_all(sh: &Shared, me: &Rc<Inst>) {
     }
     let mut st = me.st.borrow_mut();
     for alarm in &mut st.alarms { alarm.used = false; alarm.waiting_net = false; alarm.seq = alarm.seq.wrapping_add(1); }
+    crate::state::release(&mut st);      // instance objects leave the quota before the balance is read
+    me.state_ptr.set(std::ptr::null_mut());
     st.mem_leaked = st.mem.used;
     for q in st.queue.iter_mut().filter(|q| q.request == 3) {
         sh.pool.release(q.pslot);
@@ -808,7 +827,7 @@ fn run_call(sh: &Shared, me: &Rc<Inst>, c: QItem) {
         let mut envelope = false;
         let mut request = (0u64, 0u32);
         if c.lflags & CALL_ENVELOPE != 0 {
-            // a 0x444d0002 datagram that the classifier routed to this module (its own component, or the console for the native ones): the runtime parses
+            // a 0x444d0002 datagram that the classifier routed to this module (its own component, or the native fallback for the native ones): the runtime parses
             // the envelope and the module gets an ordinary request. Module ports and everything else deliver raw frames.
             c.lflags &= !CALL_ENVELOPE;
             let (kind, env) = crate::envelope::parse(raw);
@@ -1023,7 +1042,7 @@ impl Instance {
         if component <= 0 { return Err(ERR_ARG); }
         {
             let own = self.me.st.borrow();
-            if own.component == Some(component) || own.envelope_components.iter().any(|&(c, _)| c == component) { return Err(ERR_ARG); }
+            if own.envelope_components.iter().any(|&(c, _)| c == component) { return Err(ERR_ARG); }
             if own.envelope_components.len() >= COMPONENT_IDS_MAX { return Err(ERR_SIZE); }
         }
         if self.rt.sh.insts.borrow().iter().any(|other| {

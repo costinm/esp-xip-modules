@@ -4,7 +4,7 @@ mod common;
 use common::*;
 use std::ffi::c_void;
 use xip_abi::*;
-use xip_runtime_host::{Runtime, Instance};
+use xip_runtime_host::{Runtime, Instance, Loaded};
 
 fn selftest(name: &str) {
     let (rt, m) = started(name, "selftest");
@@ -316,4 +316,162 @@ fn now_bench_rejects_truncated_or_corrupt_payloads_and_generates_full_response()
     let bad = rt.add_module(module("mod_rtest"), 512).unwrap();
     bad.start(format!("now size={}", PKT_MAX + 1).as_bytes()); rt.run(0);
     assert!(bad.ended() && bad.result() == ERR_SIZE, "normal ABI cap is independent of radio capability");
+}
+
+// ---- state objects (`Host::state_resize` / `state_get`): a handler that runs a script of state calls at its start ----
+
+thread_local! {
+    static STATE_RESULTS: std::cell::RefCell<Vec<(i32, i64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Script ops, 13 bytes each: code (u8), key, a, b (u32 LE). The handler appends one `(rc, value)` per op:
+/// 0 resize(key, class a, size b); 1 get(key) -> size; 2 fill(key, byte a); 3 prefix(key, byte a, n b) -> 1 if bytes [0, n) are a;
+/// 5 zero(key, from a) -> 1 if bytes [a, size) are zero.
+unsafe extern "C" fn state_handle(h: *const Host, _state: *mut u8, c: *const Call) -> i32 {
+    let c = &*c;
+    if c.component != HOST_COMPONENT as i32 || c.method != HOST_START as i32 || c.len == 0 {
+        return RET_DONE as i32;
+    }
+    let hw = Hw::new(h).expect("the host table");
+    let script = std::slice::from_raw_parts(c.data, c.len);
+    STATE_RESULTS.with(|r| r.borrow_mut().clear());
+    for op in script.chunks_exact(13) {
+        let u = |i: usize| u32::from_le_bytes(op[i..i + 4].try_into().unwrap());
+        let (code, key, a, b) = (op[0], u(1), u(5), u(9));
+        let res = match code {
+            0 => match hw.state_resize(key, a, b as usize) {
+                Ok(_) => (0, 0),
+                Err(e) => (e, 0),
+            },
+            1 => match hw.state_get(key) {
+                Ok((_, n)) => (0, n as i64),
+                Err(e) => (e, 0),
+            },
+            2 => match hw.state_get(key) {
+                Ok((p, n)) => {
+                    if n > 0 {
+                        std::ptr::write_bytes(p, a as u8, n);
+                    }
+                    (0, 0)
+                }
+                Err(e) => (e, 0),
+            },
+            3 => match hw.state_get(key) {
+                Ok((p, n)) => {
+                    let ok = b as usize <= n && (0..b as usize).all(|i| *p.add(i) == a as u8);
+                    (0, ok as i64)
+                }
+                Err(e) => (e, 0),
+            },
+            5 => match hw.state_get(key) {
+                Ok((p, n)) => (0, ((a as usize)..n).all(|i| *p.add(i) == 0) as i64),
+                Err(e) => (e, 0),
+            },
+            _ => (ERR_ARG, 0),
+        };
+        STATE_RESULTS.with(|r| r.borrow_mut().push(res));
+    }
+    RET_DONE as i32
+}
+
+fn script(list: &[(u8, u32, u32, u32)]) -> Vec<u8> {
+    list.iter()
+        .flat_map(|&(code, key, a, b)| {
+            let mut v = vec![code];
+            v.extend(key.to_le_bytes());
+            v.extend(a.to_le_bytes());
+            v.extend(b.to_le_bytes());
+            v
+        })
+        .collect()
+}
+
+/// Start an instance of `name` at `version` that runs `ops`; it ends when the script is done. Returns the instance and the results.
+fn run_state(rt: &Runtime, name: &str, version: u32, ops: &[(u8, u32, u32, u32)]) -> (Instance, Vec<(i32, i64)>) {
+    let m = rt.add_loaded(name, Loaded::linked_with_version(state_handle, version), 0);
+    m.start(&script(ops));
+    rt.run(0);
+    assert!(m.ended(), "the script ends the instance");
+    (m, STATE_RESULTS.with(|r| r.borrow().clone()))
+}
+
+const INST: u32 = STATE_INSTANCE;
+const RET: u32 = STATE_RETAINED;
+
+#[test]
+fn instance_state_grows_shrinks_and_frees_keeping_contents() {
+    let rt = Runtime::default();
+    let (m, res) = run_state(&rt, "grow", 1, &[
+        (0, 1, INST, 16), (2, 1, 0x7e, 0), (0, 1, INST, 40), (3, 1, 0x7e, 16), (5, 1, 16, 0),
+        (0, 1, INST, 8), (1, 1, 0, 0), (0, 1, INST, 0), (1, 1, 0, 0),
+    ]);
+    assert_eq!(res, vec![(0, 0), (0, 0), (0, 0), (0, 1), (0, 1), (0, 0), (0, 8), (0, 0), (ERR_NOTFOUND, 0)]);
+    assert_eq!(m.mem_leaked(), 0, "instance objects are freed when the instance ends");
+}
+
+#[test]
+fn state_classes_must_match_and_reserved_classes_are_unsupported() {
+    let rt = Runtime::default();
+    let (_, res) = run_state(&rt, "classes", 1, &[
+        (0, 1, INST, 8), (0, 1, RET, 8), (0, 2, RET, 8), (0, 2, INST, 8),
+        (0, 3, STATE_PSRAM, 8), (0, 4, STATE_RTC, 8), (0, 5, 9, 8), (0, 0, RET, 8), (1, 0, 0, 0),
+    ]);
+    assert_eq!(res, vec![
+        (0, 0), (ERR_ARG, 0), (0, 0), (ERR_ARG, 0), (ERR_UNSUPPORTED, 0), (ERR_UNSUPPORTED, 0), (ERR_ARG, 0), (ERR_ARG, 0), (ERR_NOTFOUND, 0),
+    ], "a retained key is not an instance key, reserved classes are unsupported, a class beyond 3 is an argument error");
+}
+
+#[test]
+fn instance_state_is_held_to_the_managed_heap_quota() {
+    // the runtime's default quota is 8192 bytes
+    let rt = Runtime::default();
+    let (m, res) = run_state(&rt, "quota", 1, &[
+        (0, 1, INST, 4000), (0, 2, INST, 4000), (0, 3, INST, 1000), (0, 1, INST, 4100), (0, 1, INST, 5000), (1, 1, 0, 0),
+    ]);
+    assert_eq!(res, vec![(0, 0), (0, 0), (ERR_SIZE, 0), (0, 0), (ERR_SIZE, 0), (0, 4100)], "a grow counts the new size, not the old one");
+    assert_eq!(m.mem_leaked(), 0);
+}
+
+#[test]
+fn retained_state_survives_the_instance_and_its_restart_of_the_same_version() {
+    let rt = Runtime::default();
+    let (first, _) = run_state(&rt, "keeper", 1, &[(0, 7, RET, 64), (2, 7, 0x42, 0), (0, 8, INST, 100)]);
+    assert_eq!(first.mem_leaked(), 0, "retained memory is not a leak; the instance object is freed");
+    let (second, res) = run_state(&rt, "keeper", 1, &[(1, 7, 0, 0), (3, 7, 0x42, 64), (1, 8, 0, 0)]);
+    assert_eq!(res, vec![(0, 64), (0, 1), (ERR_NOTFOUND, 0)], "the retained object is there, the instance one is not");
+    assert_eq!(second.mem_leaked(), 0);
+}
+
+#[test]
+fn retained_state_is_dropped_when_the_module_starts_with_another_version() {
+    let rt = Runtime::default();
+    run_state(&rt, "upgraded", 1, &[(0, 7, RET, 32), (2, 7, 0x11, 0)]);
+    let (_, res) = run_state(&rt, "upgraded", 2, &[(1, 7, 0, 0), (0, 7, RET, 32), (3, 7, 0, 32)]);
+    assert_eq!(res, vec![(ERR_NOTFOUND, 0), (0, 0), (0, 1)], "version 2 starts with nothing of version 1; its own object is zeroed");
+    let (_, res) = run_state(&rt, "upgraded", 1, &[(1, 7, 0, 0)]);
+    assert_eq!(res, vec![(ERR_NOTFOUND, 0)], "version 1 does not get back what version 2 replaced");
+}
+
+#[test]
+fn retained_caps_are_per_name_objects_and_device_bytes() {
+    let rt = Runtime::default();
+    let mut ops: Vec<(u8, u32, u32, u32)> = (1..=8).map(|k| (0, k, RET, 8)).collect();
+    ops.push((0, 9, RET, 8));
+    ops.push((0, 10, INST, 8));
+    let (_, res) = run_state(&rt, "few", 1, &ops);
+    assert!(res[..8].iter().all(|&r| r == (0, 0)), "eight retained objects per name");
+    assert_eq!(res[8], (ERR_SIZE, 0), "the ninth of the name is over its cap");
+    assert_eq!(res[9], (0, 0), "an instance object is not a retained one: it has its own quota");
+    let rt = Runtime::default();   // a runtime of its own: the cap is device-wide
+    let (_, res) = run_state(&rt, "bulk", 1, &[(0, 11, RET, 8000), (0, 12, RET, 300), (0, 13, RET, 192)]);
+    assert_eq!(res, vec![(0, 0), (ERR_SIZE, 0), (0, 0)], "the device cap is 8192 bytes of retained objects in all");
+}
+
+#[test]
+fn the_state_root_is_resizable_and_not_charged_to_the_quota() {
+    // the module's own state (key 0) is not counted in its heap quota, as the image's state block never was
+    let rt = Runtime::default();
+    let (m, res) = run_state(&rt, "root", 1, &[(0, 0, INST, 4000), (0, 0, INST, 4100), (0, 1, INST, 8000), (1, 0, 0, 0)]);
+    assert_eq!(res, vec![(0, 0), (0, 0), (0, 0), (0, 4100)]);
+    assert_eq!(m.mem_leaked(), 0);
 }

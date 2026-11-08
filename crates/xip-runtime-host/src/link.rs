@@ -292,7 +292,7 @@ pub(crate) fn link_tx(sh: &Shared, dst: u32, slot: i32, start: u16, len: u16, to
 }
 
 /// Additional manifest component ownership (key 13) takes priority, then the module whose own tag is the component,
-/// then the console fallback. Both lookups are `route`, the one function every module-to-module request goes through.
+/// then the native fallback (the sys module, `NATIVE_FALLBACK_COMPONENT`). Both lookups are `route`, the one function every module-to-module request goes through.
 pub(crate) fn request_target(sh:&Shared,component:i32)->Result<Rc<Inst>,i32>{
     let find=||route(sh,component);
     let mut owner=find();
@@ -305,7 +305,7 @@ pub(crate) fn request_target(sh:&Shared,component:i32)->Result<Rc<Inst>,i32>{
             }
         }
     }
-    let owner=owner.or_else(||route(sh,QUIC_CONSOLE_COMPONENT)).ok_or(ERR_NOTFOUND)?;
+    let owner=owner.or_else(||route(sh,NATIVE_FALLBACK_COMPONENT)).ok_or(ERR_NOTFOUND)?;
     if !owner.st.borrow().start_done {
         if !owner.st.borrow().queue.iter().any(|c|c.component==HOST_COMPONENT as i32 && c.method==HOST_START as i32){crate::runtime::enqueue(&owner,HOST_COMPONENT as i32,HOST_START as i32,0);}
         crate::runtime::drain(sh,&owner);
@@ -489,8 +489,8 @@ unsafe extern "C" fn quic_detach(user: *mut c_void) -> c_int {
     0
 }
 
-/// The console module answers the envelopes that no other module serves (`QUIC_CONSOLE_COMPONENT`).
-const QUIC_CONSOLE_COMPONENT: i32 = 20;
+/// The sys module answers the envelopes that no other module serves (`NATIVE_FALLBACK_COMPONENT`).
+const NATIVE_FALLBACK_COMPONENT: i32 = 49;
 
 fn quic_active(links: &Links) -> bool {
     links.quic_rx.is_some() || links.quic.local.is_some() || links.quic.classifier || links.quic.module.is_some()

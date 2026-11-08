@@ -22,12 +22,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut specs: Vec<_> = std::env::args().skip(1).collect();
     if specs.iter().any(|s| s == "--help" || s == "-h") {
-        println!("usage: xip-host [PATH.wasm[=START] ...]\nXIP_THREADS=1 selects the single-thread mode (as on the device)\nXIP_BASE_PORT=N offsets the manifest ports (default PORT_NET), XIP_BIND=IP the bind address (default 127.0.0.1)\nXIP_FLASH_FILE=PATH attaches a persistent 4 MiB flash device\nXIP_FLASH_RUNNING=BASE:SIZE supplies the simulated executing image range\nXIP_STATE_DIR=DIR keeps the device identity across runs\nXIP_QUIC_PORT=N the UDP port of QUIC packets (default 3340, 0 any, off none)\nDefault: mod_con (no port, requests arrive as QUIC packets on the UDP port) and an async echo on TCP/UDP 5228");
+        println!("usage: xip-host [PATH.wasm[=START] ...]\nXIP_THREADS=1 selects the single-thread mode (as on the device)\nXIP_BASE_PORT=N offsets the manifest ports (default PORT_NET), XIP_BIND=IP the bind address (default 127.0.0.1)\nXIP_FLASH_FILE=PATH attaches a persistent 4 MiB flash device\nXIP_FLASH_RUNNING=BASE:SIZE supplies the simulated executing image range\nXIP_STATE_DIR=DIR keeps the device identity across runs\nXIP_QUIC_PORT=N the UDP port of QUIC packets (default 3340, 0 any, off none)\nDefault: mod_system (its console has no port, requests arrive as QUIC packets on the UDP port) and an async echo on TCP/UDP 5228");
         return Ok(());
     }
     if specs.is_empty() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/host-modules");
-        specs = vec![root.join("mod_con.wasm").display().to_string(), format!("{}=async", root.join("mod_rtest.wasm").display())];
+        specs = vec![root.join("mod_system.wasm").display().to_string(), format!("{}=async", root.join("mod_rtest.wasm").display())];
     }
     // Manifest ports are offsets from the base, so several instances can share a machine.
     let base: u16 = std::env::var("XIP_BASE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(xip_runtime_host::xip_abi::PORT_NET as u16);

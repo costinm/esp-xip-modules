@@ -181,6 +181,8 @@ pub struct Mem {
     blocks: HashMap<usize, Layout>,
     /// A wasm module's heap: blocks are carved from this memory (first fit) instead of malloc, so that the module can address them.
     arena: Option<Arena>,
+    /// Blocks outside the quota (the module's own state root, `alloc_uncharged`): not counted in `used`.
+    uncharged: std::collections::HashSet<usize>,
 }
 
 struct Arena {
@@ -192,15 +194,22 @@ struct Arena {
 
 impl Mem {
     pub fn new(quota: u32) -> Box<Mem> {
-        Box::new(Mem { used: 0, quota, blocks: HashMap::new(), arena: None })
+        Box::new(Mem { used: 0, quota, blocks: HashMap::new(), arena: None, uncharged: Default::default() })
     }
     /// Blocks live in `len` bytes at `ptr` (inside the shared memory of the wasm modules).
     pub fn with_arena(quota: u32, ptr: *mut u8, len: usize) -> Box<Mem> {
-        Box::new(Mem { used: 0, quota, blocks: HashMap::new(), arena: Some(Arena { ptr, len, blocks: Default::default() }) })
+        Box::new(Mem { used: 0, quota, blocks: HashMap::new(), arena: Some(Arena { ptr, len, blocks: Default::default() }), uncharged: Default::default() })
     }
     /// Null: over the quota, zero size or no memory. Aligned to 16 for any type.
     pub fn alloc(&mut self, size: usize) -> *mut c_void {
-        if size == 0 || size > self.quota as usize || self.used as usize > self.quota as usize - size {
+        self.alloc_with(size, true)
+    }
+    /// A block outside the quota (not counted in `used`), for the module's own state root. Freed with `free` like any other.
+    pub fn alloc_uncharged(&mut self, size: usize) -> *mut c_void {
+        self.alloc_with(size, false)
+    }
+    fn alloc_with(&mut self, size: usize, charge: bool) -> *mut c_void {
+        if size == 0 || (charge && (size > self.quota as usize || self.used as usize > self.quota as usize - size)) {
             return std::ptr::null_mut();
         }
         if let Some(a) = self.arena.as_mut() {
@@ -216,7 +225,11 @@ impl Mem {
                 return std::ptr::null_mut();
             }
             a.blocks.insert(at, size);
-            self.used += size as u32;
+            if charge {
+                self.used += size as u32;
+            } else {
+                self.uncharged.insert(unsafe { a.ptr.add(at) } as usize);
+            }
             return unsafe { a.ptr.add(at) }.cast();
         }
         let layout = Layout::from_size_align(size, 16).unwrap();
@@ -225,16 +238,24 @@ impl Mem {
             return p.cast();
         }
         self.blocks.insert(p as usize, layout);
-        self.used += size as u32;
+        if charge {
+            self.used += size as u32;
+        } else {
+            self.uncharged.insert(p as usize);
+        }
         p.cast()
     }
     /// `false` for a pointer that is not a live block of this module.
     pub fn free(&mut self, ptr: *mut c_void) -> bool {
+        let charged = !self.uncharged.contains(&(ptr as usize));
         if let Some(a) = self.arena.as_mut() {
             let off = (ptr as usize).wrapping_sub(a.ptr as usize);
             return match a.blocks.remove(&off) {
                 Some(s) => {
-                    self.used -= s as u32;
+                    if charged {
+                        self.used -= s as u32;
+                    }
+                    self.uncharged.remove(&(ptr as usize));
                     true
                 }
                 None => false,
@@ -242,7 +263,10 @@ impl Mem {
         }
         match self.blocks.remove(&(ptr as usize)) {
             Some(layout) => {
-                self.used -= layout.size() as u32;
+                if charged {
+                    self.used -= layout.size() as u32;
+                }
+                self.uncharged.remove(&(ptr as usize));
                 unsafe { dealloc(ptr.cast(), layout) };
                 true
             }

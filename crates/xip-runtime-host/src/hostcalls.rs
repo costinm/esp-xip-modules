@@ -541,7 +541,7 @@ unsafe extern "C" fn h_send(user: *mut c_void, pkt: u32, len: usize, dst: u32, c
         return 0;
     } else if dst == ADDR_ENVELOPE {
         // a module hands the runtime an envelope to dispatch, as the 0x444d0002 path does: parsed here, delivered to the module of its component (or the
-        // console for a native one) as a request from this module with `id` as the token; the answer returns as a message
+        // native fallback (the sys module) for a native one) as a request from this module with `id` as the token; the answer returns as a message
         let data = sl(sh.pool.slot(slot).add(e.start as usize), len);
         let (kind, env) = crate::envelope::parse(data);
         if kind != crate::envelope::Kind::Request {
@@ -600,6 +600,47 @@ unsafe extern "C" fn h_mem_alloc(user: *mut c_void, size: usize) -> *mut c_void 
     let mut st = me.st.borrow_mut();
     st.mem.alloc(size).cast()
 }
+/// `state_resize`: the object `key` of this module (`state.rs`); `*out` is the pointer, NULL after a free.
+unsafe extern "C" fn h_state_resize(user: *mut c_void, key: u32, class: u32, size: usize, out: *mut *mut u8) -> i32 {
+    let (sh, me) = cx!(user, "state_resize");
+    if out.is_null() {
+        return ERR_ARG;
+    }
+    *out = std::ptr::null_mut();
+    // a wasm module keeps no retained object: its memory is its slot's, which the next module of the slot gets zeroed
+    let can_retain = !matches!(me.handler, Handler::Wasm { .. });
+    let mut st = me.st.borrow_mut();
+    let mut ret = sh.retained.borrow_mut();
+    match crate::state::resize(&mut st, &mut ret, &me.name, me.version, can_retain, key, class, size) {
+        Ok(p) => {
+            if key == 0 {
+                me.state_ptr.set(p);
+            }
+            *out = p;
+            OK
+        }
+        Err(rc) => rc,
+    }
+}
+
+/// `state_get`: the object `key` of this module, an instance object first, then a retained one.
+unsafe extern "C" fn h_state_get(user: *mut c_void, key: u32, out: *mut *mut u8, size: *mut usize) -> i32 {
+    let (sh, me) = cx!(user, "state_get");
+    if out.is_null() || size.is_null() {
+        return ERR_ARG;
+    }
+    let st = me.st.borrow();
+    let ret = sh.retained.borrow();
+    match crate::state::get(&st, &ret, &me.name, me.version, key) {
+        Some((p, n)) => {
+            *out = p;
+            *size = n;
+            OK
+        }
+        None => ERR_NOTFOUND,
+    }
+}
+
 unsafe extern "C" fn h_mem_free(user: *mut c_void, ptr: *mut c_void) -> i32 {
     let (_sh, me) = cx!(user, "mem_free");
     let mut st = me.st.borrow_mut();
@@ -711,6 +752,8 @@ pub(crate) fn fill(t: &mut Host, user: *mut c_void) {
     t.mem_free = Some(h_mem_free);
     t.heap_info = Some(h_heap_info);
     t.heap_dump = Some(h_heap_dump);
+    t.state_resize = Some(h_state_resize);
+    t.state_get = Some(h_state_get);
     t.nv = Some(h_nv);
     t.device_info = Some(h_device_info);
     t.get_component = Some(h_get_component);

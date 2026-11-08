@@ -1,6 +1,6 @@
 //! The runtime parses the CBOR envelope `{1: component, 2: method, 3: id, 5: fields}` of a 0x444d0002 datagram (the only place an envelope is parsed) and
 //! wraps the module's answer; a module sees an ordinary request (`CALL_ENVELOPE`) and answers with `reply` or a bare negative integer. Module ports
-//! deliver raw frames. The native components with no hosting module go to the module of component 20.
+//! deliver raw frames. The native components with no hosting module go to the module of component 49.
 mod common;
 use common::notify;
 use xip_abi::cbor::{self, Writer};
@@ -82,7 +82,7 @@ unsafe extern "C" fn module(host: *const Host, state: *mut u8, call: *const Call
     0
 }
 
-/// The module of component 20 (the console's place): it receives the envelopes of components nobody hosts, as requests for that component.
+/// The module of component 49 (the sys module, the native fallback): it receives the envelopes of components nobody hosts, as requests for that component.
 unsafe extern "C" fn fallback(host: *const Host, _: *mut u8, call: *const Call) -> i32 {
     let (h, call) = (&*host, &*call);
     if call.flags & CALL_ENVELOPE != 0 {
@@ -144,7 +144,7 @@ fn an_envelope_becomes_an_ordinary_request_and_the_answer_is_wrapped() {
 }
 
 #[test]
-fn additional_component_routes_without_console_and_preserves_wire_identity() {
+fn additional_component_routes_without_fallback_and_preserves_wire_identity() {
     unsafe extern "C" fn owner(host: *const Host, _: *mut u8, call: *const Call) -> i32 {
         if (*call).flags & CALL_ENVELOPE != 0 {
             assert_eq!(((*call).component, (*call).method), (1, 4));
@@ -164,7 +164,7 @@ fn additional_component_routes_without_console_and_preserves_wire_identity() {
     assert!(cbor::get(&frames[0],6).unwrap().is_some());
     let other=q.rt.add_handler("other",owner,0);other.set_component(47);
     assert_eq!(other.serve_envelope_component(1, 1),Err(ERR_BUSY));
-    assert_eq!(other.serve_envelope_component(47, 1),Err(ERR_ARG));
+    assert_eq!(other.serve_envelope_component(47, 1),Ok(()));assert_eq!(other.serve_envelope_component(47, 1),Err(ERR_ARG));
     assert_eq!(other.serve_envelope_component(0, 1),Err(ERR_ARG));
     m.stop();q.rt.run(0);
     let missing=q.send(&request);assert_eq!(missing.len(),1);assert_eq!(cbor::get_int(&missing[0],7).unwrap(),Some(ERR_NOTFOUND as i64),"stopped owner is unavailable without a loader hook");
@@ -183,21 +183,21 @@ fn a_bare_error_becomes_the_one_error_shape() {
 }
 
 #[test]
-fn a_component_nobody_hosts_goes_to_the_module_of_component_20() {
+fn a_component_nobody_hosts_goes_to_the_module_of_component_49() {
     let b = Bench::new();
-    // No owner/loader/console: a correlated NOTFOUND, never a wrong-module dispatch.
+    // No owner/loader/fallback: a correlated NOTFOUND, never a wrong-module dispatch.
     let missing=b.send(&enc(|w| { w.map(3).uint(1).uint(61).uint(2).uint(1).uint(3).uint(5); }));
     assert_eq!(missing.len(),1);assert_eq!(cbor::get_int(&missing[0],7).unwrap(),Some(ERR_NOTFOUND as i64));
     assert!(b.seen().is_empty());
-    let console = b.q.rt.add_handler("con", fallback, 16);
-    console.set_component(20);
-    console.start(b"");
+    let native = b.q.rt.add_handler("native", fallback, 16);
+    native.set_component(49);
+    native.start(b"");
     b.q.rt.run(0);
     let frames = b.send(&enc(|w| { w.map(3).uint(1).uint(61).uint(2).uint(3).uint(3).uint(9); }));
     assert_eq!(frames.len(), 1);
     assert_eq!((cbor::get_int(&frames[0], 1).unwrap(), cbor::get_int(&frames[0], 2).unwrap(), cbor::get_int(&frames[0], 3).unwrap(), cbor::get_int(&frames[0], 7).unwrap()), (Some(61), Some(3), Some(9), Some(-2)));
-    let seen: Vec<_> = console.events().into_iter().filter(|e| e.id == SEEN).collect();
-    assert_eq!((i32::from_le_bytes(seen[0].data[0..4].try_into().unwrap()), i32::from_le_bytes(seen[0].data[4..8].try_into().unwrap())), (61, 3), "the console gets the request for that component");
+    let seen: Vec<_> = native.events().into_iter().filter(|e| e.id == SEEN).collect();
+    assert_eq!((i32::from_le_bytes(seen[0].data[0..4].try_into().unwrap()), i32::from_le_bytes(seen[0].data[4..8].try_into().unwrap())), (61, 3), "the fallback module gets the request for that component");
     assert!(b.seen().is_empty(), "the hosting module of component 60 never saw it");
 }
 
@@ -307,14 +307,14 @@ unsafe extern "C" fn forwarder(host: *const Host, _: *mut u8, call: *const Call)
 #[test]
 fn a_module_hands_an_envelope_to_the_runtime_dispatch_and_gets_the_wrapped_answer() {
     let rt = Runtime::default();
-    let console = rt.add_handler("con", fallback, 16);
-    console.set_component(20);
+    let native = rt.add_handler("native", fallback, 16);
+    native.set_component(49);
     let hosting = rt.add_handler("t", module, 64);
     hosting.set_component(C);
     hosting.host_component("t");
     let nan = rt.add_handler("nan", forwarder, 16);
     nan.set_component(46);
-    for m in [&console, &hosting, &nan] { m.start(b""); }
+    for m in [&native, &hosting, &nan] { m.start(b""); }
     rt.run(0);
     let send = |envelope: &[u8], token: u64| {
         assert_eq!(nan.send(46, 1, token, envelope), 0);
@@ -322,12 +322,12 @@ fn a_module_hands_an_envelope_to_the_runtime_dispatch_and_gets_the_wrapped_answe
         let rc = i32::from_le_bytes(nan.events().into_iter().filter(|e| e.id == 4).last().unwrap().data[..4].try_into().unwrap());
         rc
     };
-    // a native component nobody hosts: the console serves it, and the answer is wrapped with the request's id and comes back to the sender with the token
+    // a native component nobody hosts: the sys module serves it, and the answer is wrapped with the request's id and comes back to the sender with the token
     assert_eq!(send(&enc(|w| { w.map(3).uint(1).uint(10).uint(2).uint(3).uint(3).uint(0x99); }), 7), 0);
     let back: Vec<_> = nan.events().into_iter().filter(|e| e.id == 3).collect();
     assert_eq!(back.len(), 1);
     let d = &back[0].data;
-    assert_eq!((i32::from_le_bytes(d[0..4].try_into().unwrap()), i32::from_le_bytes(d[4..8].try_into().unwrap()), u64::from_le_bytes(d[8..16].try_into().unwrap()), u32::from_le_bytes(d[16..20].try_into().unwrap())), (10, 3, 7, 20));
+    assert_eq!((i32::from_le_bytes(d[0..4].try_into().unwrap()), i32::from_le_bytes(d[4..8].try_into().unwrap()), u64::from_le_bytes(d[8..16].try_into().unwrap()), u32::from_le_bytes(d[16..20].try_into().unwrap())), (10, 3, 7, 49));
     let answer = &d[20..];
     assert_eq!((cbor::get_int(answer, 1).unwrap(), cbor::get_int(answer, 2).unwrap(), cbor::get_int(answer, 3).unwrap(), cbor::get_int(answer, 7).unwrap()), (Some(10), Some(3), Some(0x99), Some(-2)));
     // a hosting module's own component
