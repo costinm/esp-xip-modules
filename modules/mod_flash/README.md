@@ -2,7 +2,7 @@
 
 Read and write files, telemetry batches, modules and runtime images over TCP 5227 or QUIC
 streams. Authentication and authorization are supplied by the calling framework.
-The module starts automatically and joins saved Wi-Fi. It announces its recovery
+The module is autostarted at boot (its onBoot event) and joins saved Wi-Fi. It announces its recovery
 service over UDP while normal discovery is unavailable; explicit recovery probes
 still work when mod_disc is running.
 Other modules use the direct `files` service (component 15) for small files and

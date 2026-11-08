@@ -391,10 +391,14 @@ impl Transfer {
                         return Err(ERR_ARG);
                     }
                     t.cache = flag(c.data, 4)?;
-                    t.version = t
-                        .old
-                        .map_or(Some(1), |f| f.version.checked_add(1))
-                        .ok_or(ERR_SIZE)?;
+                    let supplied = integer(c.data, 9, 0)?;
+                    t.version = if supplied != 0 {
+                        if t.old.is_some_and(|f| supplied <= f.version) { return Err(VERSION); }
+                        supplied
+                    } else {
+                        if cbor::get(c.data, 9).map_err(|_|ERR_ARG)?.is_some() { return Err(ERR_ARG); }
+                        t.old.map_or(Some(1), |f| f.version.checked_add(1)).ok_or(ERR_SIZE)?
+                    };
                     let (record, fresh) = l.record_space(hw, t.size + 12)?;
                     t.record = record;
                     t.at = record + 16;

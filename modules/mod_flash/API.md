@@ -6,7 +6,7 @@ body as a QUIC stream. On TCP, the declared `size` delimits a write body;
 methods without a body finish at the envelope. Read the response until EOF. Each TCP connection carries one operation. The service autostarts,
 requests its saved station network and announces on UDP `ff02::5227:5227`.
 Recovery discovery and Wi-Fi control also work over PPP port 250 without a
-console module. Main + mod_flash is the complete recovery composition.
+sys module. Main + mod_flash is the complete recovery composition.
 The optional `legacy-upload` build feature enables method 1 and TCP 5227
 compatibility. In that build, TCP 5227 keeps its existing WLU1 byte
 protocol. A QUIC stream starts with the request below, followed by exactly the
@@ -70,8 +70,11 @@ holds the single operation slot until its stream closes.
 | 3 | `kind` | `u32` | 1 data, 2 program, 3 key-value; default 1. |
 | 4 | `cache` | `bool` | Default false; allows dropping at collection. |
 | 5 | `expect` | `u32` | Optional version check; zero requires absence. |
+| 9 | `version` | `u32` | Optional positive file version/epoch, greater than the current version. |
 
-Exactly size bytes and FIN follow. The module assigns the next version. Response
+Exactly size bytes and FIN follow. Without version, the module increments the
+current file version (or starts at 1). A supplied version must be greater than
+the current version; zero, equal and older versions are refused before allocation. Response
 is the same metadata as stat. An unconditional retry may create a new version.
 Index publication precedes record commit; superseded copies are cleared oldest
 first after the replacement commits. No whole-file staging allocation is made.
@@ -340,11 +343,17 @@ uses the separate telemetry log API.
 
 Read-only stream request. One image per response keeps metadata within a packet.
 
+### Request
+
 | Tag | Field | Type | Description |
 |---:|---|---|---|
 | 6 | `offset` | `u32` | Aligned xip-relative cursor, initially zero. |
 
-Response `{1: images, 2: next_offset, 3: public_key, 4: xip_base, 5: xip_size}`.
+### Response
+
+Response `{1: images, 2: next_offset, 3: public_key, 4: xip_base, 5: xip_size,
+6: macs}`. macs lists known distinct STA/AP MAC byte strings, or an empty array
+when Wi-Fi state is unavailable. Reading it does not enable the radio.
 Images is an array of zero or one entry: `{1: kind, 2: name, 3: version,
 4: size_bytes, 5: allocated_bytes, 6: offset, 7: running}`. Kind is `runtime`
 or `module`; runtime name is empty. Size excludes tail records and runtime boot

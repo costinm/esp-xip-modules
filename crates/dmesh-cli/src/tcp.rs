@@ -135,21 +135,23 @@ pub(crate) fn discover(target: &str) -> Result<(), String> {
     Err("no flash discovery reply within 5 seconds".into())
 }
 
-pub(crate) fn run(args: &[String]) -> Result<(), String> {
+pub(crate) fn run(args: &[String]) -> Result<(), String> { run_mode(args,true) }
+pub(crate) fn run_quiet(args: &[String]) -> Result<(), String> { run_mode(args,false) }
+fn run_mode(args: &[String], report: bool) -> Result<(), String> {
     if args
         .get(1)
         .is_some_and(|m| matches!(m.as_str(), "flash.module.write" | "flash.runtime.write"))
     {
-        run_image(args, Duration::ZERO)
+        run_image(args, Duration::ZERO, report)
     } else {
-        run_wait(args, Duration::ZERO)
+        run_wait(args, Duration::ZERO, report)
     }
 }
-fn run_image(args: &[String], wait: Duration) -> Result<(), String> {
+fn run_image(args: &[String], wait: Duration, report: bool) -> Result<(), String> {
     // Image identity/version and operation id make a complete retransmission safe,
     // including when the commit succeeded but the response was lost.
     for attempt in 1..=3 {
-        match run_wait(args, wait) {
+        match run_wait(args, wait, report) {
             Ok(()) => return Ok(()),
             Err(error) => {
                 let transport = error.starts_with("TCP ")
@@ -169,7 +171,7 @@ fn run_image(args: &[String], wait: Duration) -> Result<(), String> {
     }
     unreachable!()
 }
-fn run_wait(args: &[String], wait: Duration) -> Result<(), String> {
+fn run_wait(args: &[String], wait: Duration, report: bool) -> Result<(), String> {
     let [target, operation, rest @ ..] = args else {
         return Err("usage: dmesh-cli tcp://HOST:5227 flash.METHOD [--name=NAME] [--input=PATH] [--output=PATH] [--size=N] [--operation_id=N] [--version=N]".into());
     };
@@ -378,10 +380,12 @@ fn run_wait(args: &[String], wait: Duration) -> Result<(), String> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
+    if report {
     println!(
         "{}",
         serde_json::json!({"method":operation,"metadata":meta,"metadata_hex":hex,"sent":sent,"received":received})
     );
+    }
     Ok(())
 }
 
@@ -629,7 +633,7 @@ pub(crate) fn wifi(args: &[String]) -> Result<(), String> {
         }
     });
     // IP readiness can precede the runtime reopening its declarative TCP listener.
-    let result = run_image(&upload, Duration::from_secs(30));
+    let result = run_image(&upload, Duration::from_secs(30), true);
     done.store(true, Ordering::Relaxed);
     let _ = logs.join();
     result

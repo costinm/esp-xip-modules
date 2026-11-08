@@ -7,11 +7,10 @@ use std::time::{Duration, Instant};
 fn schema() -> Result<TaggedSchema, String> {
     let mut tools = Vec::new();
     for text in [
-        include_str!("../../../api/generated/schemas/xip-con/tools.json"),
+        include_str!("../../../api/generated/schemas/xip-sys/tools.json"),
         include_str!("../../../api/generated/schemas/xip-files/tools.json"),
         include_str!("../../../api/generated/schemas/xip-berry/tools.json"),
         include_str!("../../../api/generated/schemas/xip-wasm3/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-system/tools.json"),
         include_str!("../../../api/generated/schemas/xip-wifi/tools.json"),
         include_str!("../../../api/generated/schemas/xip-transport/tools.json"),
         include_str!("../../../api/generated/schemas/xip-ble/tools.json"),
@@ -74,13 +73,13 @@ fn filename_args(method: &str, args: &[String]) -> Vec<String> {
 }
 
 fn request(words: &[String], id: u64) -> Result<Request, String> {
-    let method = words.first().map_or("console.status", String::as_str);
+    let method = words.first().map_or("sys.status", String::as_str);
     let alias=method.strip_prefix("rtest.").map(|name|format!("test.{name}"));
     let method=alias.as_deref().unwrap_or(method);
     let method = if method.contains('.') {
         method.to_owned()
     } else {
-        format!("console.{method}")
+        format!("sys.{method}")
     };
     if method.starts_with("disc.relay_") {
         let bytes=crate::relay_cli::encode(&method,words.get(1..).unwrap_or_default(),id)?;
@@ -239,7 +238,7 @@ fn response(
 
 /// Native C Main operations use the same target/method form as other CLI calls.
 pub(crate) fn is_native(method: &str) -> bool {
-    matches!(method,"wake"|"sleep"|"nv"|"watch"|"transport.set") || ["files.","berry.","wasm3.","system.","nan.","wifi.","ble.","disc.","quic.","lora.","hw.","rtest.","test.","console."].iter().any(|p|method.starts_with(p))
+    matches!(method,"wake"|"sleep"|"nv"|"watch"|"transport.set") || ["files.","berry.","wasm3.","sys.","nan.","wifi.","ble.","disc.","quic.","lora.","hw.","rtest.","test."].iter().any(|p|method.starts_with(p))
 }
 fn native_words(words: &[String]) -> Result<Vec<String>,String> {
     match words.first().map(String::as_str) {
@@ -253,7 +252,7 @@ fn native_words(words: &[String]) -> Result<Vec<String>,String> {
             if words.len()!=2 {return Err("usage: dmesh-cli DEVICE nv KEY[=VALUE]".into());}
             let (key,value)=words[1].split_once('=').map_or((words[1].as_str(),None),|(k,v)|(k,Some(v)));
             if key.is_empty() {return Err("NV key is empty".into());}
-            let mut out=vec!["console.nv".into(),format!("--key={key}")];
+            let mut out=vec!["sys.nv".into(),format!("--key={key}")];
             if let Some(value)=value {out.push(format!("--value=hex:{}",value.as_bytes().iter().map(|b|format!("{b:02x}")).collect::<String>()));}
             Ok(out)
         },
@@ -313,6 +312,7 @@ pub(crate) fn run_native(arguments: &[String]) -> Result<(),String> {
         let bytes=via.unwrap().exchange(baud,&wrap_request(&req.bytes))?;
         let framed=encode_record(PORT_QUIC,&bytes);
         let result=response(&mut Reader::default(),&framed,PORT_QUIC,&req)?.ok_or("uncorrelated circuit response")?;
+        crate::inventory::Inventory::from_env()?.observe_native(&result,"")?;
         println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?);return Ok(());
     }
     let target=arguments.first().ok_or("missing device")?;
@@ -336,11 +336,11 @@ pub(crate) fn run_native(arguments: &[String]) -> Result<(),String> {
     let words=native_words(&words)?;
     // Encode/validate before touching the physical port.
     let req=if waking || watching {None} else {Some(request(&words,crate::client::fresh_request_id())?)};
-    let mut owner=XipPort::open_baud(path,baud).map_err(|e|e.to_string())?;
+    let mut owner=XipPort::open_baud(&path,baud).map_err(|e|e.to_string())?;
     if watching {return watch(&mut owner,None);}
     owner.wake()?;
     let Some(req)=req else {println!("{}",json!({"awake":true}));return Ok(());};
-    run_request(&mut owner,PORT_QUIC,&req,Duration::from_secs(6))
+    run_request(&mut owner,PORT_QUIC,&req,Duration::from_secs(6),&path)
 }
 fn run_udp(target:&str,request:&Request)->Result<(),String>{
     let peer=crate::client::parse_udp_peer(target)?;
@@ -351,26 +351,26 @@ fn run_udp(target:&str,request:&Request)->Result<(),String>{
     for _ in 0..3 {
         socket.send(&packet).map_err(|e|e.to_string())?;
         loop {match socket.recv(&mut buf){
-            Ok(n)=>if let Some(answer)=response(&mut reader,&encode_record(PORT_QUIC,&buf[..n]),PORT_QUIC,request)? {println!("{answer}");return Ok(())},
+            Ok(n)=>if let Some(answer)=response(&mut reader,&encode_record(PORT_QUIC,&buf[..n]),PORT_QUIC,request)? {crate::inventory::Inventory::from_env()?.observe_native(&answer,&peer.to_string())?;println!("{answer}");return Ok(())},
             Err(e) if matches!(e.kind(),std::io::ErrorKind::WouldBlock|std::io::ErrorKind::TimedOut)=>break,
             Err(e)=>return Err(e.to_string()),
         }}
     }
     Err(format!("native method {}.{} did not reply",request.component,request.method))
 }
-fn run_request(owner: &mut XipPort, port: u32, request: &Request, timeout: Duration) -> Result<(),String> {
+fn run_request(owner: &mut XipPort, port: u32, request: &Request, timeout: Duration, endpoint:&str) -> Result<(),String> {
     owner.write_all(&encode_record(port,&wrap_request(&request.bytes))).map_err(|e|e.to_string())?;
     let mut reader=Reader::default();let end=Instant::now()+timeout;
     while Instant::now()<end {
         let chunk=owner.read().map_err(|e|e.to_string())?;
-        if let Some(answer)=response(&mut reader,&chunk,port,request)? {println!("{answer}");return Ok(());}
+        if let Some(answer)=response(&mut reader,&chunk,port,request)? {crate::inventory::Inventory::from_env()?.observe_native(&answer,endpoint)?;println!("{answer}");return Ok(());}
         if chunk.is_empty() {std::thread::sleep(Duration::from_millis(5));}
     }
     Err(format!("native method {}.{} did not reply",request.component,request.method))
 }
 
 pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
-    let path=arguments.get(1).ok_or("usage: dmesh-cli console SERIAL [console.status|METHOD] [--field=value ...] [--port PPP_PORT (default 247, the QUIC port)] [--seconds N]")?;
+    let path=arguments.get(1).ok_or("usage: dmesh-cli console SERIAL [sys.status|METHOD] [--field=value ...] [--port PPP_PORT (default 247, the QUIC port)] [--seconds N]")?;
     let (mut words, mut port, mut seconds) = (Vec::new(), PORT_QUIC, 6.0f64);
     let mut i = 2;
     while i < arguments.len() {
@@ -409,7 +409,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     if path.starts_with("udp://") {return run_udp(path,&request);}
     let mut owner = XipPort::open(path).map_err(|e| e.to_string())?;
     owner.wake()?;
-    run_request(&mut owner,port,&request,Duration::from_secs_f64(seconds))
+    run_request(&mut owner,port,&request,Duration::from_secs_f64(seconds),path)
 }
 
 #[cfg(test)]
@@ -487,11 +487,12 @@ mod tests {
     }
     #[test]
     fn system_diagnostics_have_one_owner_and_retired_names_are_absent() {
-        for (name,method) in [("system.heap",1),("system.heap_dump",2),("system.dump_tasks",3)] {
+        for (name,method) in [("sys.heap",1),("sys.heap_dump",2),("sys.dump_tasks",3)] {
             let req=request(&[name.into()],1).unwrap();assert_eq!((req.component,req.method),(49,method));
         }
         assert!(request(&["nan.dump_tasks".into()],1).is_err());
         assert!(request(&["console.heap".into()],1).is_err());
+        assert!(request(&["console.status".into()],1).is_err());
     }
     #[test]
     fn periodic_reports_decode_to_user_facing_fields() {
@@ -513,7 +514,7 @@ mod tests {
     fn native_commands_encode_bytes_and_numeric_envelopes() {
         let req = request(
             &[
-                "console.start".into(),
+                "sys.start".into(),
                 "--name=flash".into(),
                 "--request=hex:756e7369676e6564".into(),
             ],
@@ -523,7 +524,7 @@ mod tests {
         let v = decode(&req.bytes).unwrap();
         assert_eq!(
             (v["1"].as_u64(), v["2"].as_u64(), v["3"].as_u64()),
-            (Some(20), Some(6), Some(0x1_0000_0042))
+            (Some(49), Some(6), Some(0x1_0000_0042))
         );
         assert_eq!(v["5"]["1"], "flash");
         assert_eq!(v["5"]["2"], "hex:756e7369676e6564");
@@ -595,10 +596,10 @@ mod tests {
         let req = request(&[], 0x1_0000_0042).unwrap();
         let mut r = Reader::default();
         for (port, c, m, id) in [
-            (2, 20, 5, req.id),
-            (1, 20, 6, req.id),
+            (2, 49, 5, req.id),
+            (1, 49, 6, req.id),
             (1, 10, 5, req.id),
-            (1, 20, 5, 0x42),
+            (1, 49, 5, 0x42),
         ] {
             assert!(
                 response(
@@ -612,7 +613,7 @@ mod tests {
             );
         }
         assert!(response(&mut r, b"status\n", 1, &req).unwrap().is_none());
-        let wire = encode_record(1, &answer(reply(20, 5, req.id, false)));
+        let wire = encode_record(1, &answer(reply(49, 5, req.id, false)));
         let middle = wire.len() / 2;
         assert!(
             response(&mut r, &wire[..middle], 1, &req)
@@ -627,7 +628,7 @@ mod tests {
         assert!(
             response(
                 &mut r,
-                &encode_record(1, &answer(reply(20, 5, req.id, true))),
+                &encode_record(1, &answer(reply(49, 5, req.id, true))),
                 1,
                 &req
             )

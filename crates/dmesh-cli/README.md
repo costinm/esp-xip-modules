@@ -46,7 +46,7 @@ dmesh-cli http://127.0.0.1:18480 transport.set --mode=6
 
 ~~~sh
 . ./env.sh
-export DMESH_NODES_DIR=/path/to/nodes   # node records, one TOML per node (':'-separated; first is written)
+export DMESH_NODES_DIR=/path/to/nodes   # optional legacy node records, read for compatibility
 dmesh-cli DEVICE status
 dmesh-cli udp://[fe80::1234%wlan0]:3339 status
 dmesh-cli SERIAL status
@@ -55,35 +55,100 @@ dmesh-cli SERIAL status
 An IPv6 link-local address needs its interface scope, such as %wlan0. A
 node name with a scoped Wi-Fi address tries it first and checks the signed
 identity. If that fails, the CLI uses discovery and NAN activation. A node
-VIP6 selects an identity; it is not a directly routable UDP address. A device record
-(`dmesh_server::device_record::DeviceRecord`, one TOML file per device, the same files lmesh and
-Android write) holds the long-lived facts about a device and, when there is one, its secret.
-The CLI reads `DMESH_NODES_DIR` / `DMESH_PAIRED_DEVICES_DIR`, or else `~/.config/dmesh/nodes`;
-`dmesh-cli devices sync` records the devices that answer
-discovery. Secrets and the control-plane root live only in the private first directory (0700,
-files 0600). Hardware tests must restore and release acquired peers so later runs can
-select them reproducibly.
+VIP6 selects an identity; it is not a directly routable UDP address.
+
+## Device configuration and status
+
+`dmesh-cli devices paths` shows the three stores:
+
+- Intended configuration: `~/.config/dmesh/devices/<id>/device.toml` and `files/` (keep in Git).
+- Observed status: `~/.local/state/dmesh/devices/<id>/status.json` and pulled `files/` (recreated by refresh).
+- Discovery: `$XDG_RUNTIME_DIR/dmesh/discovery/`, or `/tmp/dmesh-$UID/discovery/`.
+
+XDG config/state overrides are supported. Discovery commands save public
+observations automatically. Signed devices are keyed by their public key;
+unsigned recovery advertisements remain provisional MAC observations.
+Existing `DMESH_NODES_DIR` / `DMESH_PAIRED_DEVICES_DIR` records remain readable.
+New discovery does not write credentials or change intended configuration.
+
+```sh
+dmesh-cli discover
+dmesh-cli flash-discover INTERFACE
+dmesh-cli devices list
+dmesh-cli devices adopt NAME_OR_VIP --endpoint=tcp://HOST:5227
+dmesh-cli devices refresh NAME --endpoint=tcp://HOST:5227
+dmesh-cli devices plan NAME --endpoint=tcp://HOST:5227
+dmesh-cli devices reconcile NAME --endpoint=tcp://HOST:5227 --apply
+dmesh-cli devices show NAME
+```
+
+Adopt snapshots installed module versions when given an endpoint, and creates
+an intended file without overwriting one that exists. Edit its
+modules and run `devices bump NAME` when changing intent. An empty module table
+leaves installed modules alone; `prune = true` removes extras and requires
+`flash` in the desired table. Stop running modules before removing them.
+Artifact paths are absolute or relative to `device.toml`:
+
+```toml
+[modules.flash]
+version = 123
+artifact = "/path/to/mod_flash.dmod"
+
+[endpoints]
+flash = "tcp://192.0.2.10:5227"
+uart = "/dev/serial/by-id/DEVICE"
+```
+
+Put managed files in the device's `files/` directory (`devices show NAME` reports
+both intended and status paths). Filenames are 1–8 UTF-8 bytes, content is at
+most 65,504 bytes, and `cfg_ep` is reserved. Existing flat intended TOMLs remain
+readable. For an explicit per-file version:
+
+```toml
+[files.hello]
+version = 42
+```
+
+Refresh/plan/reconciliation first list device files and pull new versions to
+status `files/`. Cached versions are reused while their local copies are intact.
+Only higher intended file versions are pushed; equal/newer device copies are
+retained. `devices bump NAME` advances changed master files above their last
+observed versions while unchanged master files keep their versions. Files without
+an explicit entry initially use the config generation. Ordinary device writes
+increment versions; server writes may specify a higher `--version`.
+
+Status includes image/file versions and sizes. `observed_generation` comes from
+`cfg_ep`, which commits after readback and image verification. A matching config
+generation does not suppress per-file checks. Reboot/application health remain
+separate. See [device configuration and files](../../notes/docs/devices.md).
+
+`dmesh-cli devices key-init` creates `~/.ssh/dmesh.key`, a private P-256 PKCS#8
+PEM key. Keep it backed up and excluded from Git. Device credentials are derived
+from this key and the public device identity; inventory metadata contains none.
+Status snapshots contain actual device file contents. `dmesh-cli devices provision NAME --serial=/dev/serial/by-id/DEVICE`
+checks the device's signed identity and provisions the derived credential over
+USB, replacing previous credentials. It needs runtime provisioning support.
 
 ## Native module console
 
-For generic C/Rust Main, use `dmesh-cli console SERIAL console.status`.
+For generic C/Rust Main, use `dmesh-cli console SERIAL sys.status`.
 This sends a correlated CBOR envelope over native module PPP, using embedded
 component catalogs. It is separate from FW's QUIC-backed `dmesh-cli SERIAL
-console.status`. Names and argument parsing stay on the host:
+sys.status`. Names and argument parsing stay on the host:
 
 ~~~sh
-dmesh-cli console SERIAL console.status
-dmesh-cli console SERIAL console.start --name=nan
-dmesh-cli console SERIAL console.stop --name=nan
-dmesh-cli console SERIAL console.nv --key=flash.auth
+dmesh-cli console SERIAL sys.status
+dmesh-cli console SERIAL sys.start --name=nan
+dmesh-cli console SERIAL sys.stop --name=nan
+dmesh-cli console SERIAL sys.nv --key=flash.auth
 dmesh-cli console SERIAL wifi.state
 dmesh-cli console SERIAL wifi.scan
 ~~~
 
-`console` defaults to `console.status` when no method is given. `--port N`
+`console` defaults to `sys.status` when no method is given. `--port N`
 selects the PPP port (default 247, 0xf7, the QUIC port: every request is an envelope in a 0x444d0002 long packet, `xip_wire::wrap_request`, and the answer comes back as one, `xip_wire::unwrap_answer`), and `--seconds N` bounds the response wait
 (default 6). Results are JSON with numeric CBOR keys preserved and bytes rendered
-as `hex:`; console's module list is `.result["4"]`. A scan returning -5 is still
+as `hex:`; the sys status module list is `.result["4"]`. A scan returning -5 is still
 busy: poll again about a second later. Use `--watch` for boot/platform logs.
 The old text console command path is removed.
 
@@ -233,7 +298,7 @@ dmesh-cli DEVICE radio.control --channel=6                      # Change raw rad
 dmesh-cli DEVICE radio.reset_counters                          # Clear radio counters.
 dmesh-cli DEVICE runtime.reset                                 # Reset runtime state.
 dmesh-cli DEVICE boot.recovery                                 # Request Recovery handoff.
-dmesh-cli DEVICE module.stop                                   # Stop a loaded module.
+dmesh-cli DEVICE module.stop                                   # Release a loaded module's instance.
 ~~~
 
 transport.set replaces a complete volatile profile. radio.tx --frame=hex:...
@@ -294,7 +359,7 @@ For a direct bootstrap diagnostic while owning a local serial port:
 Normal API calls use tagged service streams over QUIC, including relay paths.
 The direct tagged control record is reserved for bootstrap diagnostics.
 
-Heap and task diagnostics are available through the [console API](../../modules/mod_con/API.md).
+Heap and task diagnostics are available through the [sys API](../../crates/sys/API.md).
 
 ## Native C Main control
 
