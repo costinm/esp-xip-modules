@@ -17,7 +17,7 @@ impl power_gen::Api for State {
         let power = table(hw)?;
         result(unsafe { power.sleep.ok_or(ERR_UNSUPPORTED)?(hw.ctx(), request) })
     }
-    /// CLI and monitoring clients read runtime sleep counters without console dispatch.
+    /// CLI and monitoring clients read runtime sleep counters without sys dispatch.
     fn powerinfo(&mut self, hw: &Hw, response: &mut PowerInfo) -> Result<(), i32> {
         let power = table(hw)?;
         result(unsafe { power.info.ok_or(ERR_UNSUPPORTED)?(hw.ctx(), response) })

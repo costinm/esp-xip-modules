@@ -9,8 +9,8 @@ table ([local API](API.local.md)). Suspend cancels work, masks/releases IRQs,
 closes SPI and turns off an optional board power rail before returning. SX127x
 enters sleep; SX126x enters RC standby before SPI closes. The latter avoids its
 sleep command holding BUSY high across the native transfer's completion check.
-The module stays mapped while suspended; configure restarts initialization
-without a queued module-stop/start race. Explicit radio off also unloads it.
+The module stays mapped while suspended; configure reinitializes
+without a queued release/create race. Explicit radio off also releases its instance.
 
 It is an [esp-xip-modules](https://github.com/costinm/esp-xip-modules) module: one entry function that talks to the board only
 through the esp-xip-modules host table (GPIO, interrupts, SPI, time, events). The same code runs
@@ -35,7 +35,7 @@ through the esp-xip-modules host table (GPIO, interrupts, SPI, time, events). Th
 
 ## Requests
 
-A request starts the module (`start`) or is sent to the running one (`post`). Two forms, same content:
+A `start` request activates the module; `post` is sent to the running one. Two forms, same content:
 
 ```text
 rx                                   # text: operation, then name=value settings, data=HEX or text=WORD

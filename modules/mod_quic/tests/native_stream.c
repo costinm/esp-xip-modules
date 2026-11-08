@@ -11,14 +11,18 @@
 #define XIP_PKT_HEADROOM 144
 #define XIP_PKT_MAX 1500
 #define XIP_MAX_INSTANCES 4
-#define QUIC_CONSOLE_COMPONENT 20
+#ifndef XIP_WIRE_MAX
+#define XIP_WIRE_MAX 8
+typedef struct { int32_t id; uint32_t version; } xip_wire_component_t;
+#endif
+#define NATIVE_FALLBACK_COMPONENT 49
 #define portENTER_CRITICAL(p) ((void)(p))
 #define portEXIT_CRITICAL(p) ((void)(p))
 struct xip_instance {uint32_t id;int component,stream,port;
-    int envelope_components[XIP_COMPONENTS_MAX];struct {char name[16];} comps[XIP_COMPONENTS_MAX];};
-static struct xip_instance provider={.id=1,.component=48},consumer={.id=2,.component=44,.stream=2,.envelope_components={1}};
-static struct xip_instance console={.id=4,.component=20};
-static struct xip_instance *registry[XIP_MAX_INSTANCES]={&provider,&consumer,&console};
+    xip_wire_component_t wire[XIP_WIRE_MAX];struct {char name[16];} comps[XIP_COMPONENTS_MAX];};
+static struct xip_instance provider={.id=1,.component=48},consumer={.id=2,.component=44,.stream=2,.wire={{1,1}}};
+static struct xip_instance native={.id=4,.component=49};
+static struct xip_instance *registry[XIP_MAX_INSTANCES]={&provider,&consumer,&native};
 static int registry_lock;
 static xip_pool *pool;
 static const uint8_t *expected;
@@ -33,7 +37,7 @@ static struct xip_instance *by_component(int c,const struct xip_instance *except
     return NULL;
 }
 #include "envelope_target.inc"
-static struct xip_instance *request_target(int c,uint32_t port,int *error){(void)port;struct xip_instance *t=envelope_target(c);if(!t)t=by_component(20,NULL);*error=t?0:XIP_ERR_NOTFOUND;return t;}
+static struct xip_instance *request_target(int c,uint32_t port,int *error){(void)port;struct xip_instance *t=envelope_target(c);if(!t)t=by_component(NATIVE_FALLBACK_COMPONENT,NULL);*error=t?0:XIP_ERR_NOTFOUND;return t;}
 static void drop_slot(int s){xip_pool_release(pool,s);}
 static int dispatch_x(struct xip_instance *in,const xip_call *call){
     assert(in==&consumer && (((call->component==44 || call->component==1) && call->method==1) || (call->component==8 && call->method==2)));

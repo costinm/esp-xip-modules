@@ -1,51 +1,57 @@
-//! Memory and task diagnostics, independent of console and NAN policy.
+//! The `sys` module: one image for the wire components `sys` (49, memory and task diagnostics, device control and the native dispatch) and
+//! `hw` (45, hardware policy). Each component is an independent crate under `crates/` (its API in its `API.md`); this crate composes them
+//! into the image: the components table of [`export!`] routes each wire component to its part, and `Module::handle` takes the host calls
+//! and the envelopes that no part serves.
 #![no_std]
-mod api_gen;
+#[cfg(test)]
+extern crate std;
+
 #[cfg(feature="sim")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
-use api_gen::Api;
-use xip_abi::{*, cbor};
-pub const STATE_BYTES: usize = 64;
+
+use xip_abi::{CallView, Hw, Module, CALL_LINK, HOST_STOP, HOST_TABLE, RET_CONTINUE};
+
+/// One field per component (public: the components table of [`export!`] names them). The state is a dynamic object of the runtime
+/// (`state = dynamic`): the image asks for no state block (`--state 0`), so the module costs nothing while it is idle.
+/// The state needs `Default` (zeroed) only.
 #[derive(Default)]
-pub struct State { hosted: api_gen::Hosted }
-fn result(rc: i32) -> Result<(), i32> { if rc < 0 {Err(rc)} else {Ok(())} }
-impl Api for State {
-    /// Monitoring clients query memory usage; no managed allocation is needed.
-    fn heap(&mut self, hw: &Hw, response: &mut SystemHeapInfo) -> Result<(), i32> {
-        let mut data=[0u8;64];
-        let n=hw.heap_info(&mut data);if n<0 {return Err(n);}
-        let data=data.get(..n as usize).ok_or(ERR_SIZE)?;
-        let field=|tag| -> Result<u32,i32> {
-            u32::try_from(cbor::get_int(data,tag).map_err(|_|ERR_ARG)?.ok_or(ERR_ARG)?).map_err(|_|ERR_SIZE)
-        };
-        *response=SystemHeapInfo {free:field(1)?,largest:field(2)?,min_free:field(3)?,total:field(4)?,internal_free:field(5)?,internal_largest:field(6)?};
-        Ok(())
-    }
-    /// Debug clients request native heap snapshots or control allocation tracing.
-    fn heap_dump(&mut self, hw: &Hw, request: &SystemHeapDump) -> Result<(), i32> {
-        if !matches!(request.kind,0|1|3|4|5|6) {return Err(ERR_ARG);}
-        result(hw.heap_dump(request.kind))
-    }
-    /// Debug clients inspect task priorities and stack usage alongside heap diagnostics.
-    fn dump_tasks(&mut self, hw: &Hw) -> Result<(), i32> { result(hw.heap_dump(2)) }
+pub struct State {
+    pub hw: hw::State,
+    pub sys: sys::State,
 }
+
 impl Module for State {
-    /// Runtime lifecycle publishes the native table; requests use the generated dispatcher.
+    /// Host calls (the lifecycle and the native table) and the envelopes that no part serves: a native envelope (for example `wifi` 10 or
+    /// `ip` 12) is answered by the sys component.
     fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
-        if call.is_host(HOST_TABLE) && call.data==b"system" {
-            return api_gen::provide::<State>(hw,call,core::ptr::addr_of_mut!(self.hosted),self as *mut State);
+        if call.is_host(HOST_STOP) {
+            return hw::handle(&mut self.hw, hw, call);
         }
-        if call.component==api_gen::COMPONENT && call.wants_response() && call.flags & CALL_LINK==0 {
-            let mut out=[0u8;96];
-            match api_gen::dispatch(self,hw,call.method,call.data,&mut out) {
-                Ok(n)=>{hw.reply(call,&out[..n]);},Err(rc)=>{hw.reply_error(call,rc);}
-            }
+        if call.is_host(HOST_TABLE) && call.data==b"sys" {
+            return sys::provide(&mut self.sys, hw, call);
+        }
+        if call.flags & CALL_LINK == 0 && call.is_envelope() {
+            sys::serve_envelope(&mut self.sys, hw, call);
         }
         RET_CONTINUE as i32
     }
 }
+
+/// Export `xip_handle` for the flash image; the components table is the manifest's key 13 (`--wire 45:1,49:1`).
 #[macro_export]
-macro_rules! export { () => { xip_abi::export_module!($crate::State,state=$crate::STATE_BYTES); }; }
+macro_rules! export { () => { xip_abi::export_module!($crate::State, state=dynamic,
+    components=[(45,1,hw,::hw::handle),(49,1,sys,::sys::handle)]); }; }
 #[cfg(feature="sim")]
 export!();
+
+#[cfg(test)]
+mod tests {
+    /// The image asks for no state block: the state is a runtime object (`state = dynamic`), created on the first call.
+    #[test]
+    fn the_cargo_toml_asks_for_no_state_block() {
+        let toml = include_str!("../Cargo.toml");
+        assert!(toml.contains("--state 0"), "Cargo.toml must say `--state 0`");
+        assert!(include_str!("lib.rs").contains("state=dynamic"), "the export must use the dynamic state");
+    }
+}

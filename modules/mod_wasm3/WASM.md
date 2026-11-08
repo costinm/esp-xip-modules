@@ -32,8 +32,8 @@ All modules of a runtime share one memory and each is linked at its slot base (s
 loaded twice needs a file per slot, so the host build makes eight of each:
 
 ```sh
-modules/build-wasm.sh mod_rtest 1      # one slot -> modules/mod_rtest/target/wasm-slot1/wasm32-unknown-unknown/release/esp_mod_rtest.wasm
-scripts/build-host-modules.sh          # rtest, con, ble, system, slots 1..8 -> target/host-modules/mod_<name>.s<N>.wasm (+ .json metadata)
+scripts/build-wasm.sh mod_rtest 1      # one slot -> modules/mod_rtest/target/wasm-slot1/wasm32-unknown-unknown/release/esp_mod_rtest.wasm
+scripts/build-host-modules.sh          # rtest, ble, system (mod_system: sys, hw), slots 1..8 -> target/host-modules/mod_<name>.s<N>.wasm (+ .json metadata)
 ```
 
 ## Run it
@@ -68,7 +68,7 @@ Differences from the C and host runtimes are tracked in [WASM-PORTING.md](WASM-P
 ## Status
 
 `xip-runtime-host` loads its modules as wasm (`libloading` and `.so` are gone, the crate links as a static musl binary) and **all 110 of
-its tests pass** with the modules loaded from wasm: every `mod_rtest` mode, `mod_system`, the console envelopes, the component tables
+its tests pass** with the modules loaded from wasm: every `mod_rtest` mode, `mod_system`, the sys component's envelopes, the component tables
 (`wifi`, `wifi-tuning`, `link`, `power`, `nimble`) and the `ble` table that `mod_ble` hosts. `socket_readiness_native` and
 `lwip_poll_native` (C files missing from this tree) were replaced by `tests/socket_readiness.rs` (tokio sockets). `stream` and `quic`
 tables are not bridged yet (no host test uses them from a wasm module).

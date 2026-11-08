@@ -12,5 +12,8 @@ SECTIONS {
   .rodata MODULE_DATA_VMA : AT(LOADADDR(.text) + SIZEOF(.text)) ALIGN(4) {
     *(.rodata .rodata.* .srodata .srodata.*) . = ALIGN(4);
   }
+  /* The component table (export_module!(components = ...)), read-only data after .rodata in the same flash image; tools/mkmod.py checks it
+   * against manifest key 13. Its LMA follows .rodata's, so the image stays contiguous. */
+  .xip_comp : AT(LOADADDR(.rodata) + SIZEOF(.rodata)) ALIGN(4) { KEEP(*(.xip_comp)) }
   /DISCARD/ : { *(.comment*) *(.eh_frame*) *(.note*) }
 }

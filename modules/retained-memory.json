@@ -7,10 +7,6 @@
     "state_bytes": 128,
     "stack_bytes": 4096
   },
-  "mod_con": {
-    "state_bytes": 0,
-    "stack_bytes": 8192
-  },
   "mod_disc": {
     "state_bytes": 8,
     "stack_bytes": 8192
@@ -18,10 +14,6 @@
   "mod_flash": {
     "state_bytes": 128,
     "stack_bytes": 12288
-  },
-  "mod_hw": {
-    "state_bytes": 128,
-    "stack_bytes": 3072
   },
   "mod_lora": {
     "state_bytes": 768,
@@ -40,8 +32,8 @@
     "stack_bytes": 4096
   },
   "mod_system": {
-    "state_bytes": 64,
-    "stack_bytes": 4096
+    "state_bytes": 0,
+    "stack_bytes": 8192
   },
   "mod_wasm3": {
     "state_bytes": 1696,

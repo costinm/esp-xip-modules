@@ -34,13 +34,13 @@ future mmap-based loader (XIP modules mapped from flash/files) shares. Update it
    `xip-runtime-host/src/crypto.rs` over `crates/xip-psa` (pure Rust; the identity persists in `XIP_STATE_DIR/identity.p256` or `set_identity_dir`); both are in the
    generated schema, so wasm modules reach them like any table. The C runtime has `xip_crypto.c` (over `psa_*`) and packet-based `xip_identity.c`: **written
    but not built** (no ESP-IDF here); `include/xip_psa.h` and `xip_psa.c` are removed. Open: AEAD for QUIC protection (runtime-internal), `stream` bridge test,
-   `signature()` for the other hosted tables (`lora`, `nan`, `system`).
+   `signature()` for the other hosted tables (`lora`, `nan`, `sys`).
 2. Replace the pointer-taking methods by pointer-free calls (`modules/ABI-POINTERS.md`), after which the bridges need no pointer checks.
 3. `sim` features and builds for the other modules; the dynamic `(component, method)` call and `get_component` by name for hosted components.
 4. Port to the C runtime, optional (it trusts native modules; the check finds bugs, mostly on the host): the owner check on packets (only the last receiver writes or sends), `pool_max`/variable growth is not needed.
 5. Optional debug check that a module touches only its slot, heap and held packets.
 
-6. Host classifier and QUIC link (the UDP link `udp` on `XIP_QUIC_PORT` and the Rust classifier are in; `dmesh-cli console udp://...` works against `xip-host`; `mod_quic` runs as wasm: the host `quic` table has `attach`/`detach`, and `dmesh-cli ... quic.status` works; `mod_disc` runs too (`dmesh-cli ... disc.announce` returns its signed record); a QUIC handshake/stream test and the `stream` bridge are open): the host must run `mod_quic`, `mod_disc`, `mod_lora` (with `mod_con`, later a `mod_hwproxy` for SPI) as on the device, so it
+6. Host classifier and QUIC link (the UDP link `udp` on `XIP_QUIC_PORT` and the Rust classifier are in; `dmesh-cli console udp://...` works against `xip-host`; `mod_quic` runs as wasm: the host `quic` table has `attach`/`detach`, and `dmesh-cli ... quic.status` works; `mod_disc` runs too (`dmesh-cli ... disc.announce` returns its signed record); a QUIC handshake/stream test and the `stream` bridge are open): the host must run `mod_quic`, `mod_disc`, `mod_lora` (with the console in `mod_system`, later a `mod_hwproxy` for SPI) as on the device, so it
    needs the C runtime's classifier (UDP 3339 default port, real QUIC short/long packets vs the temporary `0x444d0002` envelope packets, relay
    and other untrusted exceptions). `dmesh-cli` reaches the host through it. Port 5227 and NAN/Aware are discovery/sleep specifics, not part of this.
 
@@ -113,12 +113,12 @@ arguments. Under this rule:
 method its name and its arguments (word, struct in/out, inline string/bytes, array out), plus a `note` that flags what does not fit
 the parcel model (decided case by case). The host side of the wasm bridge (`xip-wasm/src/vtable.rs`) calls a native table method from it
 with one generic path, no `match` per method, and a test (`xip-abi/tests/schema.rs`) keeps it in step with the table structs. The vtable stays an
-internal detail and the module-side stubs (`vt.rs`) are local. The same schema serves gateways, `mod_con` (CBOR to struct without per-method code) and
+internal detail and the module-side stubs (`vt.rs`) are local. The same schema serves gateways, the sys component in `mod_system` (CBOR to struct without per-method code) and
 the planned proxy of the hardware (SPI, I2C, interrupts) over a stream, which is why most methods should also have a CBOR form.
 
 The schema and the module-side stubs are generated (`mesh-api-gen --vtable-conf api/vtables.conf`, run by `scripts/gen.sh`) from the Rust table structs of
 `xip-abi`, the source of truth of the ABI. It covers `wifi`, `wifi-tuning`, `link`, `power`, `nimble`, `stream`, `quic`, `hw` and the tables modules host
-(`ble`, `lora`, `nan`, `system`); `hosted.rs` copies arguments from it. Flagged (`note`): `hw.i2c_transfer` has 10 arguments, more than a call
+(`ble`, `lora`, `nan`, `sys`); `hosted.rs` copies arguments from it. Flagged (`note`): `hw.i2c_transfer` has 10 arguments, more than a call
 carries (needs a struct parcel); `wifi.scan*` arrays out; packet-handle ownership moves in `link.rx/tx_done`, `stream.write_pkt/take`; bulk bytes in `hw.spi_transfer/i2c_transfer`.
 
 The generator is `mesh-api-gen` from ssh-mesh (`crates/mesh-api-gen/src/vtable.rs` there; put a checkout first with `XIP_DEV_BIN`). Rust is the

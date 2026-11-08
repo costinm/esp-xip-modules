@@ -4,9 +4,7 @@
 # Unique across modules. It is NOT the flash page: any free page of the module partition holds any image (docs/abi.md, "Versions and pages").
 # Changing a slot changes the image: every deployed copy of that module must be rebuilt and reinstalled.
 # This is due to Xtensa lacking PIC support.
-mod_con    0
 mod_flash  18 2
-mod_hw     2
 mod_lora   3
 mod_disc   4
 mod_nan    7 2

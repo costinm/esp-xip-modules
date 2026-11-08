@@ -3,7 +3,7 @@ name = "esp-mod-system"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Memory and task diagnostics"
+description = "The sys module: the sys (49) and hw (45) components composed into one image"
 publish = false
 
 # Standalone: built by tools/mkmod.py --cargo (scripts/build.sh), not as part of a cargo workspace.
@@ -11,10 +11,12 @@ publish = false
 
 [dependencies]
 xip-abi = { path = "../../crates/xip-abi" }
+sys = { path = "../../crates/sys" }
+hw = { path = "../../crates/hw" }
 
 [package.metadata]
 # Options for tools/mkmod.py (scripts/build.sh).
-mkmod = "--name system --tag 49 --stack 4096 --state 64 --autostart --components system"
+mkmod = "--name sys --tag 49 --stack 8192 --state 0 --components sys --wire 45:1,49:1"
 
 [features]
 # The runtime supplies allocator context for module calls, not the test harness.

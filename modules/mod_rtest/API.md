@@ -1,7 +1,7 @@
 # `test` API (2)
 
 The device test module (`mod_rtest`, the `test` slot). Ordinary requests activate
-the serving mode automatically; select diagnostic modes through `console.start`.
+the serving mode automatically; select diagnostic modes through `sys.start`.
 Call its binary handlers with `dmesh-cli`. See the
 [README](README.md) for the TCP/QUIC probe.
 
@@ -64,7 +64,7 @@ matching id and the result in field 6. The regular module method remains callabl
 
 Start request: `now [paced|fast] [listen] [rxonly] [ap|sta] size=N [dest=TOKEN]
 secs=N`. This is opaque module initialization data supplied through binary
-`console.start`, not a console command or a call to `parse()`.
+`sys.start`, not a text command or a call to `parse()`.
 
 `listen` disables periodic TX. `rxonly` validates received pings without sending
 responses, so receive measurement does not depend on successful echo TX. The

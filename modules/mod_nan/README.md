@@ -9,7 +9,7 @@ It follows the cluster clock on DW0/DW8 and sends NOW timing announcements on ea
 when following a peer.
 
 Build with `scripts/build.sh esp32c6`; the package is `mod_nan.dmod`
-(upload through the running mod_flash service). The installed module auto-starts;
+(upload through the running mod_flash service). The installed module is autostarted;
 query `nan.status` for synchronization. Use the five-second `discovery.nodes` stream for fresh discovery
 observations; the module keeps no peer inventory. The module
 caches an opaque supplied announcement, answers compatible discovery requests, and exchanges NAN
@@ -21,10 +21,10 @@ record to a peer. Start parameters
 and outbound discovery/wake commands are described in [API.md](API.md).
 
 With Wi-Fi connected, use the same channel for NAN and enable NOW before
-starting the module. Start/stop preserves the infrastructure configuration.
+the module handles its onBoot event. Releasing and recreating its instance (`sys.stop` / `sys.start`) preserves the infrastructure configuration.
 For network replacement, start `flash` with the desired authentication mode
 and use `dmesh-cli flash "$TARGET" IMAGE.dmod --unsigned --module nan --chip esp32c6`; the updater
-waits for the old module to stop before writing. Start `nan` after a successful
+waits for the old module's instance to be released before writing. Activate `nan` (`sys.start`) after a successful
 upload and check its status. See [mod_flash](../mod_flash/README.md).
 
 Use the `nan.sleepy` command to arm sleep between paired discovery windows.

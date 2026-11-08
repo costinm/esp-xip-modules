@@ -1,7 +1,7 @@
 # mod_disc
 
 Local discovery policy for devices operating without a companion, and
-for discovery/certificate experiments. It starts automatically when installed, generates a signed record,
+for discovery/certificate experiments. It is autostarted when installed, generates a signed record,
 caches it, and publishes through `nan.set_announce`. Native runtime services own
 crypto and the private signing key. NAN has no dependency on this module.
 
@@ -9,8 +9,8 @@ Build with `scripts/build.sh esp32c6` (or the actual chip). Install the module,
 then use this checkout's updated dmesh-cli:
 
 ```sh
-dmesh-cli console SERIAL console.start --name=nan
-dmesh-cli console SERIAL console.start --name=disc
+dmesh-cli console SERIAL sys.start --name=nan
+dmesh-cli console SERIAL sys.start --name=disc
 dmesh-cli console SERIAL disc.publish --port 250
 dmesh-cli console SERIAL nan.announce --port 246
 ```

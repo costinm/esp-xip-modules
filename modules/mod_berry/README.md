@@ -8,10 +8,10 @@ a smoke image boots on an esp32s3 board and prints what it evaluated (see Device
 
 ## Behavior
 
-- `HOST_START`: one `be_vm_new`, a log line, and the module stays resident (`XIP_RET_CONTINUE`),
-  so one VM serves every later request. A non-empty start request is echoed as event 1; a start
+- onBoot (`HOST_START`, delivered when the instance is created): one `be_vm_new`, a log line, and the instance keeps
+  running (`XIP_RET_CONTINUE`), so one VM serves every later request. A non-empty start request is echoed as event 1; a start
   request beginning `run:` is also executed as Berry source, its output logged.
-- `HOST_STOP`: `be_vm_delete`. Every block the interpreter held came from the host's `mem_alloc`,
+- Release (`HOST_STOP`): `be_vm_delete`. Every block the interpreter held came from the host's `mem_alloc`,
   so the runtime's leak balance closes at zero.
 - Request - component 50, method 1 (`eval`) - runs one piece of source:
 
@@ -71,7 +71,7 @@ call live at a time, as on a device; a packed image compiles it to an absolute a
 `crates/berry-c` compiles these very sources with the host cc (its `build.rs`) into the test
 binary; `c_berry.rs` registers the result with `Runtime::add_handler` - the same `xip_handle(host,
 state, call)` a device calls, with the state (1696) and component (50) `modules/C-MODULES`
-declares. Rust modules reach the host runtime as wasm (`modules/WASM.md`); a C module has no wasm
+declares. Rust modules reach the host runtime as wasm (`modules/mod_wasm3/WASM.md`); a C module has no wasm
 build and is not loaded as a `.so` either: it is linked in. The manifest (`{1: name, 2: tag}`) is
 written into the device image by `tools/build_c_mod.py`; the API text lives here and in the module
 header until the module gets an API.md of its own.

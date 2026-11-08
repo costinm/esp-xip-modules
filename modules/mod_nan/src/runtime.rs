@@ -527,7 +527,7 @@ impl Context {
         let mut rc = hw.message(ADDR_MAIN, C_SELF, APP_MESSAGE, token, data);
         if rc == ERR_NOTFOUND {
             // Generic Main: the runtime's envelope dispatch (the code of the 0x444d0002 path) delivers the request to the module of its
-            // component, or to the console for a native one, and the wrapped answer comes back here with `token` as its id.
+            // component, or to the native fallback (the sys module) for a native one, and the wrapped answer comes back here with `token` as its id.
             rc = hw.message(ADDR_ENVELOPE, 0, 0, token, record);
         }
         if rc < 0 {
@@ -2121,7 +2121,7 @@ mod packet_lifetime_tests {
         f.active_window=false;cx.boot_policy(&hw);assert!(cx.sleep.enabled);
     }
     #[test]
-    fn public_power_methods_dispatch_without_console_or_nan_capture_context() {
+    fn public_power_methods_dispatch_without_sys_or_nan_capture_context() {
         let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();
         let mut state=State::default();
         for (method,data) in [(14,&[0xa3,1,0x19,1,0xf4,2,2,3,10][..]),(13,&[0xa0][..]),(15,&[0xa0][..])] {

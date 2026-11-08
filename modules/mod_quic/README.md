@@ -12,7 +12,7 @@ do a handshake to set the secret for a connection - but not yet implemented.
 Start it on a device with an enabled network link:
 
 ```sh
-dmesh-cli console "$PORT" console.start --name=quic
+dmesh-cli console "$PORT" sys.start --name=quic
 dmesh-cli console "$PORT" quic.status
 ```
 
