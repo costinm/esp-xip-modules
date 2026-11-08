@@ -63,10 +63,10 @@ def read_layout(path):
 PAGE = 65536
 
 
-def place_modules(layout, runtime_bytes, modules, critical=()):
+def place_modules(layout, runtime_bytes, modules):
     """modules: [(name, slot, size)]. Returns [(name, address, slot)] in the input order. Manual-flash layout (no scan needed to find
-    anything): the runtime at the start of xip, the modules in the pages after its reserve, the critical ones (flashing and upgrade) first,
-    each on consecutive pages. The module scan finds a module wherever it is, so this is only where esptool puts them."""
+    anything): the runtime at the start of xip, the modules in the pages after its reserve, in
+    list order, each on consecutive pages. The module scan finds a module wherever it is, so this is only where esptool puts them."""
     base, size = layout['xip']
     end = base + size
     at = base + RUNTIME_RESERVE
@@ -76,7 +76,7 @@ def place_modules(layout, runtime_bytes, modules, critical=()):
         if nbytes <= 64:
             raise ValueError(f'{name} is not an image')
     out = {}
-    for name, _slot, nbytes in [m for m in modules if m[0] in critical] + [m for m in modules if m[0] not in critical]:
+    for name, _slot, nbytes in modules:
         out[name] = at
         at += (nbytes + PAGE - 1) // PAGE * PAGE
         if at > end:
@@ -108,7 +108,6 @@ def main():
     ap.add_argument('table', type=Path)
     ap.add_argument('--modules', type=Path, help='lines `name slot` of the built modules')
     ap.add_argument('--images', type=Path, help='the directory of the .dmod images')
-    ap.add_argument('--critical', type=Path, help='file listing the modules placed first after the runtime (flashing and upgrade)')
     ap.add_argument('--out', type=Path, help='write `name address slot` here (addresses are flash addresses)')
     ap.add_argument('--main-image', type=Path, help='the runtime image')
     args = ap.parse_args()
@@ -119,8 +118,7 @@ def main():
         if not args.images:
             ap.error('--modules requires --images')
         runtime = args.main_image.stat().st_size if args.main_image else 0
-        critical = set(args.critical.read_text().split()) if args.critical else set()
-        placed = place_modules(layout, runtime, read_list(args.modules, args.images), critical)
+        placed = place_modules(layout, runtime, read_list(args.modules, args.images))
         if args.out:
             args.out.write_text(''.join(f'{name} {address:#x} {slot}\n' for name, address, slot in placed))
     print(*layout['xip'])

@@ -26,7 +26,7 @@ export TMPDIR="${TMPDIR:-/tmp}"
 
 # Host tools (cmake, ninja, cbindgen, mesh-api-gen, ...): nix is used as a package manager here, not as a shell. scripts/esp-deps.sh builds
 # the flake outputs into out-links: `nix build .#esp-dev --out-link $ESP_DEV` (default $HOME/opt/esp-dev) and, for dmesh-cli, lmesh, ...,
-# `$ESP_DEV-dmesh`; their bin/ go on PATH. The Rust/wasm tools are the separate `wasm-dev` (modules/WASM.md). A project under active
+# `$ESP_DEV-dmesh`; their bin/ go on PATH. The Rust/wasm tools are the separate `wasm-dev` (modules/mod_wasm3/WASM.md). A project under active
 # development can be put in front with XIP_DEV_BIN (colon separated, for example /ws/dmesh/target/debug), so its own build output wins.
 # Older checkouts kept the out-links under target/nix/*: still used when present. A fresh clone with a shared ESP root can reuse the
 # profile that sits next to it (<root>/../nix/esp32-profile or <root>/../nix/profile).

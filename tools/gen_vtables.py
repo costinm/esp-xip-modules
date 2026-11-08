@@ -42,7 +42,7 @@ def parse_api(path, native_types=True):
     body, _, types_text = text.partition("\n# Types")
     methods = []
     for sec in re.split(r"^## (?=\d+\. `)", body, flags=re.M)[1:]:
-        h = re.match(r"(\d+)\. `(\w+)` — ([^\n]*)\n(.*)", sec, re.S)
+        h = re.match(r"(\d+)\. `([\w.]+)` — ([^\n]*)\n(.*)", sec, re.S)
         if not h:
             sys.exit(f"{path}: bad method heading: {sec[:40]!r}")
         number_m, mname, title, rest = int(h.group(1)), h.group(2), h.group(3).strip(), h.group(4)
@@ -353,10 +353,17 @@ def main():
     ap.add_argument("--dispatch-only", action="store_true", help="Generate wire adapter only; preserve the existing native table ABI")
     ap.add_argument("--module-out", required=True)
     ap.add_argument("--local-only", action="store_true", help="Generate only API.local.md methods; retain contextful remote handlers")
+    ap.add_argument("--table-methods", help="Comma-separated methods of API.md that are in the table and its wire adapter; the other methods of "
+                    "API.md are CBOR-only methods that the crate serves itself (for example a component's device control)")
     a = ap.parse_args()
     name, number, methods, types = parse_api(a.api, native_types=not (a.local_only or a.dispatch_only))
     if a.local_only:
         methods = []
+    if a.table_methods:
+        if a.dispatch_only: ap.error("--table-methods does not combine with --dispatch-only")
+        selected = a.table_methods.split(',')
+        methods = [m for m in methods if m['name'] in selected]
+        if {m['name'] for m in methods} != set(selected): ap.error("unknown table method")
     if a.methods:
         if not a.dispatch_only: ap.error("--methods requires --dispatch-only")
         selected = a.methods.split(',')

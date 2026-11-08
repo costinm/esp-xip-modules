@@ -59,3 +59,21 @@ def manifest_of(image: bytes) -> bytes:
     """The manifest bytes of an image (b"" if it has none)."""
     h = unpack(image)
     return image[h["manifest_offset"]:h["manifest_offset"] + h["manifest_size"]]
+
+
+def describe_manifest(image: bytes) -> dict:
+    """The manifest of an image as {key: value} (the keys mkmod writes: 1 name, 2 component, 6 autostart, 8 version, 9 port,
+    10 stream, 11 components, 13 wire components as [[id, version], ...])."""
+    from mkmod import _cbor_item   # lazy: mkmod imports this module
+    base = manifest_of(image)
+    if not base:
+        return {}
+    fields, _ = _cbor_item(base, 0)
+    return fields
+
+
+if __name__ == "__main__":
+    import sys
+    with open(sys.argv[1], "rb") as f:
+        for key, value in sorted(describe_manifest(f.read()).items()):
+            print(f"{key}: {value}")

@@ -6,10 +6,11 @@
 #
 # From the Rust declarations of crates/xip-abi (the source of truth of the C ABI):
 #   include/xip.h                         the C header (cbindgen)
-# From api/*.API.md and modules/*/API.md (mesh-api-gen) and the layout of the types (rustdoc's JSON of xip-abi):
+# From api/*.API.md, modules/*/API.md and crates/*/API.md (mesh-api-gen) and the layout of the types (rustdoc's JSON of xip-abi):
 #   api/generated/<name>.api.json         the full-fidelity form of each API (docs, enums, the C layout of types and functions)
-#   modules/<name>/API.manifest           the compact catalog a module image carries (tools/mkmod.py packs it)
-#   modules/mod_con/src/tables.rs         the console's native component layouts and functions
+#   modules/<name>/API.manifest           the module's name, component and API catalog (tools/mkmod.py packs only keys 1 and 2 into an image)
+#   crates/<name>/API.md                  a component crate (sys, hw): its API, no manifest (a module packs its own)
+#   crates/sys/src/tables.rs              the sys component's native component layouts and functions
 # From modules/*/API.md and the C types in xip-abi (tools/gen_vtables.py), before the header: the vtable of a hosted component and its glue
 #   crates/xip-abi/src/ble_vtable.rs      modules/mod_ble/src/api_gen.rs
 set -euo pipefail
@@ -34,8 +35,9 @@ python3 tools/gen_vtables.py --api modules/mod_nan/API.md --types crates/xip-abi
 python3 tools/gen_vtables.py --api modules/mod_lora/API.md --types crates/xip-abi/src/lib.rs --local-only \
     --abi-out crates/xip-abi/src/lora_vtable.rs --module-out modules/mod_lora/src/api_gen.rs
 
-python3 tools/gen_vtables.py --api modules/mod_system/API.md --types crates/xip-abi/src/system.rs \
-    --abi-out crates/xip-abi/src/system_vtable.rs --module-out modules/mod_system/src/api_gen.rs
+# (the device-control methods 5-8, 10-11 are CBOR-only: the table and its adapter have the diagnostics 1-3 alone)
+python3 tools/gen_vtables.py --api crates/sys/API.md --types crates/xip-abi/src/sys.rs --table-methods heap,heap_dump,dump_tasks \
+    --abi-out crates/xip-abi/src/sys_vtable.rs --module-out crates/sys/src/api_gen.rs
 
 # Power keeps its native runtime table; NAN owns its selected generated wire methods.
 python3 tools/gen_vtables.py --api modules/mod_nan/API.md --types crates/xip-abi/src/power.rs \
@@ -60,21 +62,31 @@ for src in api/*.API.md; do
     "$gen" --api "$src" --rustdoc "$layout" --pointer-width 4 --out-api-json "api/generated/$(basename "$src" .API.md).api.json"
 done
 
-# The binary console needs native component layouts, not a text/name catalog.
+# The sys component's native dispatch needs native component layouts, not a text/name catalog.
 "$gen" --api api/wifi.API.md --rustdoc "$layout" --pointer-width 4 --out-console-native "$tmp/native.h"
-python3 tools/catalog_rs.py "$tmp/native.h" > modules/mod_con/src/tables.rs
+python3 tools/catalog_rs.py "$tmp/native.h" > crates/sys/src/tables.rs
 
+# A module's own API.md is modules/<name>/API.md. The components a module composes are crates (crates/<name>/API.md, the title
+# `# \`name\` API (id)`): they get no manifest, the module packs its own.
 for api in modules/*/API.md; do
     "$gen" --api "$api" --out-manifest "${api%.md}.manifest"
+done
+for api in crates/*/API.md; do
+    [ -f "$api" ] || continue
+    head -1 "$api" | grep -qE '^# `[a-z0-9_-]+` API \([0-9]+\)$' || { echo "$api: the title must be # \`name\` API (id)" >&2; exit 1; }
 done
 
 # the service catalogs for mesh clients (mesh, dmesh-cli): one directory per component or module, as `mesh::catalog` resolves them
 # ($MESH_SCHEMA_DIR/<service>/ or <prefix>/etc/schemas); checked in, and installed by the flake's dmesh-cli package.
 #   api/generated/schemas/xip-<name>/{tools.json,schema.json}
+# The scan takes crates/*/API.md (any component crate with that title) as well. Discovering the API.md of dependency crates (a crate that
+# arrives from another repository as a Cargo git dependency) through `cargo metadata` is future work: until then such a crate is listed here.
 rm -rf api/generated/schemas
-for api in api/*.API.md modules/*/API.md; do
+for api in api/*.API.md modules/*/API.md crates/*/API.md; do
+    [ -f "$api" ] || continue
     case "$api" in
         api/*) name=$(basename "$api" .API.md) ;;
+        crates/*) name=$(basename "$(dirname "$api")") ;;
         *) name=$(basename "$(dirname "$api")"); name=${name#mod_} ;;
     esac
     mkdir -p "api/generated/schemas/xip-$name"

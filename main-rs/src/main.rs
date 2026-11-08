@@ -1,5 +1,5 @@
 //! The Rust main, twin of the C `main/main.c`: start the host and the loader over the module partition (it scans for modules) and, last, start the installed modules that ask
-//! to run at boot (a console module, if installed). Everything else is in the C components and in `xip-runtime-esp`.
+//! to run at boot (a debug module, if installed). Everything else is in the C components and in `xip-runtime-esp`.
 use xip_runtime_esp::{autostart, init, Features};
 
 fn main() {

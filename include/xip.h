@@ -142,7 +142,7 @@
 #define XIP_ADDR_LINK 1073741824
 
 // `send` to this address hands the runtime a CBOR envelope `{1: component, 2: method, 3: id, 5: fields}` to dispatch, the way it dispatches a 0x444d0002 datagram: parsed
-// by the runtime, delivered to the module of the component (or to the console module for a native component) as an ordinary request (`CALL_ENVELOPE`), with `from` the
+// by the runtime, delivered to the module of the component (or to the sys module, the native fallback, for a native component) as an ordinary request (`CALL_ENVELOPE`), with `from` the
 // sender and `id` the `id` argument of the `send`. The answer comes back to the sender as a message from the module, wrapped as `{1, 2, 3, 6: result}` or `{.., 7: error}`,
 // with the request's component and method and the same `id`. `ERR_ARG` if it is not a valid request envelope, `ERR_NOTFOUND` if no module serves it.
 #define XIP_ADDR_ENVELOPE 1073741808
@@ -174,26 +174,8 @@
 // A previously accepted packet has been fully submitted to the socket.
 #define XIP_SOCKET_EVENT_WRITE_DONE 7
 
-// First byte of every extent of the xip partition (the scan reads 8 bytes per 64 KiB page): a module image.
+// First byte of a module image.
 #define XIP_DMOD_KIND_MODULE 77
-
-// A data extent (the flash filesystem of `mod_flash`): bytes 4-7 are its length in bytes.
-#define XIP_EXTENT_DATA 68
-
-// An index extent (`mod_flash`): the same lead as a data extent.
-#define XIP_EXTENT_INDEX 88
-
-// A module being written: `M` with bit 1 set, the length already in bytes 4-7. The writer clears bit 1 last, so a cut write is skipped by its length and never run.
-#define XIP_EXTENT_MODULE_PENDING 79
-
-// A runtime image is an ESP image: its first byte is the ESP magic.
-#define XIP_EXTENT_RUNTIME 233
-
-// A page that was never written, or was erased again.
-#define XIP_EXTENT_EMPTY 255
-
-// A deleted `M`, `D` or `X` extent: byte 0 of its first page is programmed to zero and nothing else, so bytes 4-7 still give its length; `mod_flash` erases the pages later.
-#define XIP_EXTENT_DELETED 0
 
 #define XIP_DMOD_HEADER_SIZE 64
 
@@ -215,6 +197,18 @@
 #define XIP_DMOD_STATIC_ESP32C6_BASE 1082523648
 
 #define XIP_DMOD_STATIC_ESP32S3_BASE 1070399488
+
+// `state_resize` class: the object lives as long as the instance (freed when it is released, counted in its quota).
+#define XIP_STATE_INSTANCE 0
+
+// `state_resize` class: the object survives the release and restart of an instance of the same name and version.
+#define XIP_STATE_RETAINED 1
+
+// `state_resize` class, reserved for PSRAM (not implemented yet: `ERR_UNSUPPORTED`).
+#define XIP_STATE_PSRAM 2
+
+// `state_resize` class, reserved for RTC memory (not implemented yet: `ERR_UNSUPPORTED`).
+#define XIP_STATE_RTC 3
 
 // Version of the [`Wifi`] table.
 #define XIP_WIFI_VERSION 2
@@ -277,7 +271,7 @@
 #define XIP_LINK_EVENT_STATE 3
 
 // A module's **port** (manifest key 9, an integer): a virtual, numbered place that frames are addressed to, and that is not tied to a link or an encoding.
-// The runtime binds the module to its port when it starts; every link that can deliver frames to a port does (the serial line, later UDP and TCP), and
+// The runtime subscribes the module to its port when it starts; several modules may share a port and receive their own packet references. Every link that can deliver frames to a port does (the serial line, later UDP and TCP), and
 // the frame arrives like any link frame: `from` is the link, `id` the token of the far end, so the module answers with `send(from, .., id)` and
 // does not know which link it was. 0: none.
 //
@@ -440,6 +434,32 @@
 
 #define XIP_NATIVE_VERSION 1
 
+#define XIP_FILES_COMPONENT 15
+
+#define XIP_FILES_LOCAL_MAX 1024
+
+#define XIP_FILES_MAX_FILE 65504
+
+#define XIP_FILES_GET 17
+
+#define XIP_FILES_PUT 18
+
+#define XIP_FILES_LOG_PUT 19
+
+#define XIP_FILES_LOG_GET 20
+
+// Native `module-panic` component, version 1. Panic reporting uses no allocator.
+// `report` records the calling module and bounded message in RTC RAM and restarts.
+// `read` returns the pending CBOR diagnostic and caller address; zero means none.
+// `logged` acknowledges a successful filesystem commit, retaining quarantine.
+typedef struct {
+  uint32_t version;
+  uint32_t size;
+  void (*report)(void *user, const uint8_t *message, size_t len);
+  int (*read)(void *user, uint8_t *out, size_t capacity, uint32_t *address);
+  void (*logged)(void *user);
+} xip_module_panic;
+
 typedef struct {
   uint32_t free;
   uint32_t largest;
@@ -447,25 +467,25 @@ typedef struct {
   uint32_t total;
   uint32_t internal_free;
   uint32_t internal_largest;
-} xip_system_heap_info;
+} xip_sys_heap_info;
 
 typedef struct {
   int32_t kind;
-} xip_system_heap_dump;
+} xip_sys_heap_dump;
 
-// The `system` component table.
+// The `sys` component table.
 typedef struct {
   // Table version.
   uint32_t version;
   // `sizeof` this table: members past it do not exist.
   uint32_t size;
   // 1. Free, minimum-free and largest-block values, in bytes.
-  int (*heap)(void *ctx, xip_system_heap_info *response);
+  int (*heap)(void *ctx, xip_sys_heap_info *response);
   // 2. Kinds: 0 memory regions, 1 block snapshot, 3 trace start, 4 trace dump, 5 trace stop, 6 CBOR block records over native PPP.
-  int (*heap_dump)(void *ctx, const xip_system_heap_dump *request);
+  int (*heap_dump)(void *ctx, const xip_sys_heap_dump *request);
   // 3. Clients debugging scheduling or memory usage request task names, priorities and remaining stack bytes.
   int (*dump_tasks)(void *ctx);
-} xip_system;
+} xip_sys;
 
 // The `lora` component table.
 typedef struct {
@@ -884,7 +904,7 @@ typedef struct {
   int (*alarm_cancel)(void *user, int alarm);
   // Every module slot.
   //
-  // One CBOR array with a map per slot, keyed as the `slot` record of `modules/mod_con/API.md`: name, tag, installed, running,
+  // One CBOR array with a map per slot, keyed as the `slot` record of `crates/sys/API.md`: name, tag, installed, running,
   // version, last result, runs, duration of the last run, stack high-water mark, result of the last image check.
   //
   // # Returns
@@ -1036,12 +1056,10 @@ typedef struct {
   //
   // A module image carries a **manifest** at the offset its header gives (`manifest_offset`, `manifest_size`), read from flash
   // without starting the module, so it is available for an installed module that is not running and for one installed after the
-  // console was built. It is the module's `API.md` as a compact CBOR catalog, written by `tools/mkmod.py`: the module's name and
-  // component, its methods (id, name, and which request and response field list each uses), the field lists (tag, name, kind
-  // and, for a record, its type) and the record types. It is the equivalent of an MCP `tools.json` and carries what a text or
-  // JSON front end needs to turn `NAME.METHOD key=value` into the module's request without any ID compiled into it: the
-  // component of a module is found by name in `modules_info`, everything below it in the manifest. The module's own code never
-  // reads it. (Format: `tools/mkmod.py`, `manifest_of_api`.)
+  // console was built. Written by `tools/mkmod.py`: the module's name (key 1), its component number (key 2) and what only the build
+  // knows (start, ports, components, wire components, version). The API catalog of its `API.md` (methods, field lists, records) is
+  // not in the image: the clients read the schemas generated from that file. The module's own code never reads it.
+  // (Format: `tools/mkmod.py`, `catalog_free` and `manifest_with`.)
   //
   // Physical flash HAL calls do not interpret manifests; the control plane and upload module own image policy.
   //
@@ -1062,7 +1080,7 @@ typedef struct {
                          size_t capacity);
   // Free memory of the device.
   //
-  // RAM is the scarce resource on these chips, so the host reports it to any module that asks (the console's `heap`). One CBOR map of
+  // RAM is the scarce resource on these chips, so the host reports it to any module that asks (the sys component's `heap`). One CBOR map of
   // byte counts: `{1: free, 2: largest block, 3: lowest free since boot, 4: total, 5: free internal RAM, 6: largest internal block}`.
   // "Largest block" is the biggest single allocation that would succeed now; a heap can have plenty free and still refuse a
   // request (fragmentation). Free memory is **tracked**, not only reported: a build that logs it on a change or at boot has the
@@ -1086,7 +1104,7 @@ typedef struct {
   // `wifi.tx_dynamic`, `wifi.rx_ba` (the Wi-Fi driver's buffer counts, which are RAM) from the loader, `flash.auth`
   // (`strict` by default or `unsigned`, applied when the upload module starts), and whatever else the application
   // lists (DMesh: `quic.pool`, ...). The runtime handles shared settings and delegates application names. This is for a
-  // console or a tool; a module's own settings are `get_setting` / `set_setting`. With `value` NULL it reads; with a value it writes
+  // tool; a module's own settings are `get_setting` / `set_setting`. With `value` NULL it reads; with a value it writes
   // (an empty value restores the default). Most settings apply at the next start of the thing they configure, or after a reboot.
   //
   // # Returns
@@ -1283,7 +1301,9 @@ typedef struct {
   //
   // Returns one tagged-CBOR map: `{1: device, 2: wifi, 3: heap, 4: modules, 5: components, 6: packets}`.
   // Device is `{1: uptime_ms, 2: chip, 3: flash_size, 4: active_partition_label,
-  // 5: active_partition_address, 6: active_partition_size}`. Chip is an ESP chip model number;
+  // 5: active_partition_address, 6: active_partition_size, 7: mac,
+  // 8: active_image_address, 9: active_image_size}`. Image fields are optional and describe
+  // the executing runtime, with its span rounded to 64 KiB. Chip is an ESP chip model number;
   // partition fields are omitted when the platform cannot identify its running partition.
   // Wi-Fi, heap and modules reuse the Wi-Fi state, `heap_info` and `modules_info` records;
   // unavailable Wi-Fi is an empty map and unavailable module enumeration is an empty array.
@@ -1291,7 +1311,7 @@ typedef struct {
   // Packets is the global delivery queue/pool snapshot described by host.API.md; empty when unsupported.
   // Times are milliseconds since boot. Built-in records are read during the call; contributed
   // records are cached and may be stale. This call never invokes another module handler.
-  // No console module is needed. No partial record is returned on buffer overflow.
+  // No sys module is needed. No partial record is returned on buffer overflow.
   //
   // # Returns
   //
@@ -1393,6 +1413,43 @@ typedef struct {
                   uint32_t scope,
                   const uint8_t *data,
                   size_t len);
+  // Create, resize or free the state object `key` of `class` (`STATE_INSTANCE` or `STATE_RETAINED`). A new object is zeroed; a
+  // resize keeps the contents up to the smaller size and zeroes the new bytes; `size` 0 frees it. `*out` is the (possibly moved)
+  // pointer, NULL after a free. Key 0 is the root: the `state` argument of `xip_handle`, always an instance object.
+  // Pointers stay valid until the next resize or free of that key, or the end of the instance. Retained data must not hold
+  // pointers into the instance (its memory is released at the end, and a restart maps no pointer of the old one).
+  //
+  // Instance objects count against the module's memory quota (like `mem_alloc`) and are freed when the instance is released.
+  // Retained objects count against the device-wide retained cap and at most 8 per module name; they are kept for the next
+  // instance of the same name and manifest version, and dropped when an instance with another version starts. Retained
+  // memory is not reported as a leak. Classes `STATE_PSRAM` and `STATE_RTC` are reserved and return `ERR_UNSUPPORTED`.
+  // Appended: a host with a shorter `size` does not have it.
+  //
+  // # Returns
+  //
+  // `int` — `OK`, `ERR_ARG` (bad class or key, or the key exists with another class), `ERR_NOMEM`, `ERR_SIZE` (over the quota or
+  // the retained cap), or `ERR_UNSUPPORTED`.
+  //
+  // # Arguments
+  //
+  // * `key` (`uint32_t`): Object number; 0 is the root.
+  // * `class` (`uint32_t`): `STATE_INSTANCE`, `STATE_RETAINED`.
+  // * `size` (`size_t`): New size in bytes; 0 frees.
+  // * `out` (`void **`): Receives the pointer.
+  int (*state_resize)(void *user, uint32_t key, uint32_t class, size_t size, uint8_t **out);
+  // The state object `key` of this module: its pointer and size. Looks at instance objects, then retained ones of the module.
+  // Appended: a host with a shorter `size` does not have it.
+  //
+  // # Returns
+  //
+  // `int` — `OK`, or `ERR_NOTFOUND`.
+  //
+  // # Arguments
+  //
+  // * `key` (`uint32_t`): Object number.
+  // * `out` (`void **`): Receives the pointer.
+  // * `size` (`size_t *`): Receives the size.
+  int (*state_get)(void *user, uint32_t key, uint8_t **out, size_t *size);
 } xip_host;
 
 // what a handler is called with
@@ -2314,6 +2371,7 @@ typedef struct {
   int (*resume)(void *ctx);
 } xip_nimble;
 
+_Static_assert(sizeof(xip_module_panic) == 8 + 3 * sizeof(void *), "xip_module_panic layout");
 _Static_assert(sizeof(xip_relay_hop) == 64, "xip_relay_hop layout");
 _Static_assert(sizeof(xip_relay_route) == 280, "xip_relay_route layout");
 _Static_assert(sizeof(xip_relay_stats) == 16, "xip_relay_stats layout");
@@ -2330,8 +2388,8 @@ _Static_assert(sizeof(xip_power_info) == 76, "xip_power_info layout");
 _Static_assert(sizeof(xip_ble_start) == 8, "xip_ble_start layout");
 _Static_assert(sizeof(xip_ble_scan) == 8, "xip_ble_scan layout");
 _Static_assert(sizeof(xip_ble_connect) == 16, "xip_ble_connect layout");
-_Static_assert(sizeof(xip_system_heap_info) == 24, "xip_system_heap_info layout");
-_Static_assert(sizeof(xip_system_heap_dump) == 4, "xip_system_heap_dump layout");
+_Static_assert(sizeof(xip_sys_heap_info) == 24, "xip_sys_heap_info layout");
+_Static_assert(sizeof(xip_sys_heap_dump) == 4, "xip_sys_heap_dump layout");
 _Static_assert(sizeof(xip_ble_listen) == 8, "xip_ble_listen layout");
 _Static_assert(sizeof(xip_ble_mode) == 8, "xip_ble_mode layout");
 _Static_assert(sizeof(xip_ble_status) == 92, "xip_ble_status layout");
@@ -2341,7 +2399,7 @@ _Static_assert(sizeof(xip_nimble_start) == 96, "xip_nimble_start layout");
 _Static_assert(sizeof(xip_nimble_scan) == 68, "xip_nimble_scan layout");
 _Static_assert(sizeof(xip_nimble_connect) == 20, "xip_nimble_connect layout");
 #if UINTPTR_MAX == 0xffffffffu
-_Static_assert(sizeof(xip_system) == 20, "xip_system layout");
+_Static_assert(sizeof(xip_sys) == 20, "xip_sys layout");
 _Static_assert(sizeof(xip_stream) == 36, "xip_stream layout");
 _Static_assert(sizeof(xip_quic) == 44, "xip_quic layout");
 _Static_assert(sizeof(xip_stream_packet) == 12, "xip_stream_packet layout");
@@ -2350,7 +2408,7 @@ _Static_assert(sizeof(xip_identity) == 16, "xip_identity layout");
 _Static_assert(sizeof(xip_crypto) == 36, "xip_crypto layout");
 _Static_assert(sizeof(xip_native) == 132, "xip_native layout");
 _Static_assert(sizeof(xip_power) == 44, "xip_power layout");
-_Static_assert(sizeof(xip_host) == 172, "xip_host layout");
+_Static_assert(sizeof(xip_host) == 180, "xip_host layout");
 #endif
 
 /* Non-zero when the host's table includes this call (older hosts are shorter). */

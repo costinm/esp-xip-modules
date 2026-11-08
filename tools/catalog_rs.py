@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Convert generated C native-component tables into Rust constants for mod_con.
+"""Convert generated C native-component tables into Rust constants for the sys component (crates/sys).
 Only integers: a module image has no relocations.
 
-    catalog_rs.py native.h > src/tables.rs
+    catalog_rs.py native.h > crates/sys/src/tables.rs
 """
 import re
 import sys

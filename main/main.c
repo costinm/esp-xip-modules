@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* esp-xip-modules main: an example and test driver. It hosts modules and starts the installed ones that ask to
- * run at boot (their manifest says so: a debug console is one such module; a product installs its own and no console).
+ * run at boot (their manifest says so: a debug module is one such module; a product installs its own and no debug module).
  * Everything else is in the components. What a product built on this does differently: its slot table, its services and
  * what it does with module events. */
 #include <stdio.h>
@@ -49,7 +49,7 @@ void app_main(void)
         uint8_t v[4] = {0};
         xip_ble_configure_boot(!safe && xip_wifi_nv("ble.boot", 8, NULL, 0, v, sizeof v) > 0 && v[0] == '1');
     }
-    /* What runs at boot is what is installed and asks for it in its manifest (the console module, if it is installed). */
+    /* What runs at boot is what is installed and asks for it in its manifest (a debug module, if it is installed). */
     xip_heap_checkpoint("pre-network");
     xip_wifi_boot_network();
     xip_loader_autostart();

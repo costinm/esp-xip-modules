@@ -23,7 +23,7 @@ if [[ $what == generated || $what == abi || $what == all ]]; then
     # regenerate and compare: a stale generated file is reported (and left regenerated). gen.sh needs cbindgen and mesh-api-gen
     # (on PATH, both come from the flake); without them the check is skipped, the generated files are committed.
     if command -v cbindgen >/dev/null && command -v mesh-api-gen >/dev/null; then
-        sums() { find api/generated -type f | LC_ALL=C sort | xargs sha256sum; sha256sum include/xip.h modules/*/API.manifest modules/mod_con/src/tables.rs crates/xip-abi/src/schema_data.rs crates/xip-abi/src/vt_shims.rs crates/xip-abi/src/ble_vtable.rs modules/mod_ble/src/api_gen.rs crates/xip-abi/src/nan_vtable.rs modules/mod_nan/src/api_gen.rs modules/mod_nan/src/power_gen.rs crates/xip-abi/src/system_vtable.rs modules/mod_system/src/api_gen.rs crates/xip-abi/src/lora_vtable.rs modules/mod_lora/src/api_gen.rs; }
+        sums() { find api/generated -type f | LC_ALL=C sort | xargs sha256sum; sha256sum include/xip.h modules/*/API.manifest crates/sys/src/tables.rs crates/xip-abi/src/schema_data.rs crates/xip-abi/src/vt_shims.rs crates/xip-abi/src/ble_vtable.rs modules/mod_ble/src/api_gen.rs crates/xip-abi/src/nan_vtable.rs modules/mod_nan/src/api_gen.rs modules/mod_nan/src/power_gen.rs crates/xip-abi/src/sys_vtable.rs crates/sys/src/api_gen.rs crates/xip-abi/src/lora_vtable.rs modules/mod_lora/src/api_gen.rs; }
         before=$(sums); scripts/gen.sh
         [[ "$before" == "$(sums)" ]] || { echo "scripts/gen.sh changed generated files: commit them (a new runtime) or revert" >&2; exit 1; }
     elif [[ $what == generated ]]; then
@@ -36,6 +36,14 @@ fi
 if [[ $what == c || $what == all ]]; then
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_info_cache tests/host/test_info_cache.c -lpthread
     target/test_info_cache
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -o target/test_runtime_range tests/host/test_runtime_range.c
+    target/test_runtime_range
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_module_panic tests/host/test_module_panic.c
+    target/test_module_panic
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include -o target/test_module_alloc tests/host/test_module_alloc.c components/xip_runtime/src/xip_pool.c
+    target/test_module_alloc
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -o target/test_port_bind tests/host/test_port_bind.c
+    target/test_port_bind
     # the envelope parser, the answer head and the table of waiting requests of the runtime's envelope handling
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include \
         -o target/test_envelope tests/host/test_envelope.c components/xip_runtime/src/xip_envelope.c
@@ -86,7 +94,7 @@ if [[ $what == ci-runtime || $what == all ]]; then
 fi
 if [[ $what == rust || $what == runtime || $what == ci-runtime || $what == all ]]; then
     # the crates and the Rust modules: logic on a PC (the images are built by scripts/build.sh with the esp toolchain)
-    module_crates=(modules/mod_system modules/mod_lora modules/mod_hw modules/mod_nan modules/mod_disc modules/mod_quic)
+    module_crates=(modules/mod_system modules/mod_lora modules/mod_nan modules/mod_disc modules/mod_quic)
     module_crates+=(modules/mod_flash)
     RUSTC_BOOTSTRAP=1 cargo test --quiet --manifest-path modules/mod_rtest/Cargo.toml
     for crate in "${module_crates[@]}"; do

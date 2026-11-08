@@ -52,8 +52,8 @@ static void test_head(void)
     const uint8_t okhead[] = {0xa4, 0x01, 0x18, 104, 0x02, 0x18, 83, 0x03, 0x07, 0x06};
     size_t n = xip_envelope_head(out, sizeof out, 104, 83, 7, 0);
     assert(n == sizeof okhead && !memcmp(out, okhead, n));
-    const uint8_t errhead[] = {0xa4, 0x01, 0x14, 0x02, 0x05, 0x03, 0x19, 0x01, 0x00, 0x07, 0x27};     /* component 20, method 5, id 256, error -8 */
-    n = xip_envelope_head(out, sizeof out, 20, 5, 256, -8);
+    const uint8_t errhead[] = {0xa4, 0x01, 0x18, 0x31, 0x02, 0x05, 0x03, 0x19, 0x01, 0x00, 0x07, 0x27};     /* component 49, method 5, id 256, error -8 */
+    n = xip_envelope_head(out, sizeof out, 49, 5, 256, -8);
     assert(n == sizeof errhead && !memcmp(out, errhead, n));
     assert(xip_envelope_head(out, 5, 104, 83, 7, 0) == 0);
     n = xip_envelope_head(out, sizeof out, 1, 2, UINT64_MAX, -2147483647 - 1);

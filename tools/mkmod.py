@@ -10,6 +10,12 @@ The slot is independent of flash placement: an image needs enough consecutive fr
 The toolchain comes from the PATH (an ESP-IDF shell: `. ./env.sh`). Checks that a module must pass
 before it is worth signing: no relocations, no undefined symbols, no .data/.bss (the image is read-only
 flash), and it fits its page. docs/writing-modules.md explains why.
+
+Wire components: manifest key 13 comes from `--wire ID[:VER],...` (the Cargo.toml mkmod option), which stays the
+source of the manifest; `--host-metadata` has no ELF and so cannot check it. A module that exports a static
+component table (`export_module!(..., components = [(ID, VER, fn), ...])`) puts it in the `.xip_comp` section;
+after linking, that table must equal `--wire` (same IDs and versions, any order), or the build stops. A module
+without the section is not checked (it dispatches in its own handle).
 """
 import argparse
 import json
@@ -17,11 +23,13 @@ import os
 import shutil
 import re
 import subprocess
+import struct
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dmod  # noqa: E402
+import build_version  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
@@ -160,22 +168,61 @@ def with_version(base, version):
     return bytes([0xa0 + kept + 2]) + base[1:name_end] + cbor(8) + cbor(version) + rest
 
 
-def manifest_with(base, autostart=None, name=None, tag=None, port=0, stream=0, version=0, components=(), envelopes=()):
-    """The manifest of a module (include/xip.h, module_manifest): the catalog of its API.md in compact CBOR, which the
-    console needs instead of IDs compiled into it, as `mesh-api-gen --out-manifest` writes it (`scripts/gen.sh`), plus
-    what only this build knows:
+def _wire_entry_ok(entry):
+    if len(entry) != 2:
+        return False
+    c, v = entry
+    return all(isinstance(x, int) and not isinstance(x, bool) for x in (c, v)) and 0 < c <= 0x7fffffff and 0 <= v <= 0xffffffff
+
+
+def parse_wire(text):
+    """`--wire ID:VERSION[,ID:VERSION]` as [(id, version)]. The version defaults to 1 when ':VERSION' is omitted."""
+    entries = []
+    for item in filter(None, text.split(",")):
+        ident, sep, version = item.partition(":")
+        try:
+            entries.append((int(ident), int(version) if sep else 1))
+        except ValueError:
+            sys.exit(f"--wire: {item!r} is not ID or ID:VERSION")
+    return entries
+
+
+def catalog_free(base, name=None):
+    """`base`, the generated map of a module's API.md (`mesh-api-gen --out-manifest`), with only keys 1 (name) and 2 (component number).
+    `name` (`--name`) replaces the name of key 1. Keys 3..5 (methods, field lists, records) are the API catalog for tools: the schemas under
+    api/generated are the source the clients read, and no firmware reads the catalog from an image, so an image does not carry it."""
+    count = base[0] - 0xa0
+    if base[0] & 0xe0 != 0xa0 or count > 23:
+        raise ValueError("a manifest is a small definite-length map")
+    kept, rest, pos = [], b"", 1
+    for _ in range(count):
+        start = pos
+        key, pos = _cbor_item(base, pos)
+        _, pos = _cbor_item(base, pos)
+        if key in (1, 2):
+            kept.append(key)
+            rest += (cbor(1) + cbor(name)) if key == 1 and name is not None else base[start:pos]
+    if kept != [1, 2]:
+        raise ValueError("a generated manifest starts with its name (key 1) and component number (key 2)")
+    return bytes([0xa2]) + rest
+
+
+def manifest_with(base, autostart=None, name=None, tag=None, port=0, stream=0, version=0, components=(), wire=()):
+    """The manifest of a module (include/xip.h, module_manifest): its name and component number (keys 1 and 2 of `base`, see
+    `catalog_free`), plus what only this build knows:
 
       6: start request     (the module starts at boot: text, may be empty)
       9: port              (an integer: the datagram port whose packets the module receives and answers; the runtime binds it at start. 1: the console)
       10: stream port      (an integer: TCP port PORT_NET + n; connections arrive as socket events the module reads and writes)
       11: components       (an array of texts: the components the module hosts, at most 3 of at most 15 bytes. The runtime asks the module for the
                             table of each after it started and serves it to `get_component(name)` callers through thunks.)
-      12: envelopes        (up to 3 additional positive component IDs whose envelopes this module serves)
+      13: components       (an array of up to 8 [id, version] pairs, the wire components this module serves: id a distinct positive
+                            component ID (at most 0x7fffffff), version a uint32, 0 or more. Encoded as CBOR arrays of 2-element arrays.)
       8: version           (an integer: higher is newer, no other meaning; absent is 0 and not written. The loader runs the highest
                             version of a name. Written right behind the name.)
 
-    `base` is the generated map (keys 1..5: name, component number, methods, records, ...). A module without an API.md has none: its manifest is
-    then `{1: name, 2: component number}` from `name` and `tag`, because the loader finds a module by scanning and reads its name from here.
+    `base` is a map that starts with the name and the component number (`catalog_free` of the generated one). A module without an API.md has none:
+    its manifest is then `{1: name, 2: component number}` from `name` and `tag`, because the loader finds a module by scanning and reads its name here.
     """
     if not base:
         if name is None or tag is None:
@@ -199,22 +246,22 @@ def manifest_with(base, autostart=None, name=None, tag=None, port=0, stream=0, v
             sys.exit("--components: at most 3 names of 1 to 15 bytes")
         extra += cbor(11) + cbor(list(components))
         count += 1
-    if envelopes:
-        if len(envelopes) > 3 or len(set(envelopes)) != len(envelopes) or any(not isinstance(c, int) or isinstance(c, bool) or c <= 0 or c > 0x7fffffff for c in envelopes):
-            sys.exit("--envelopes: at most 3 distinct positive component IDs")
-        extra += cbor(12) + cbor(list(envelopes))
+    if wire:
+        if len(wire) > 8 or len({e[0] for e in wire if len(e) == 2}) != len(wire) or not all(_wire_entry_ok(e) for e in wire):
+            sys.exit("--wire: at most 8 entries of distinct component IDs (1 to 0x7fffffff), each with a version (uint32)")
+        extra += cbor(13) + cbor([[c, v] for c, v in wire])
         count += 1
     manifest = bytes([0xa0 + count]) + base[1:] + extra
     return with_version(manifest, version) if version else manifest
 
 
-def manifest_beside(api_path, autostart=None, port=0, stream=0, version=0, components=(), envelopes=()):
-    """The manifest of the module whose API.md is `api_path`: the checked-in file beside it, `API.manifest`."""
+def manifest_beside(api_path, autostart=None, port=0, stream=0, version=0, components=(), wire=(), name=None):
+    """The manifest of the module whose API.md is `api_path`: the checked-in file beside it, `API.manifest`, without its catalog."""
     path = os.path.splitext(api_path)[0] + ".manifest"
     if not os.path.exists(path):
         sys.exit(f"{path} is missing: run scripts/gen.sh (it needs mesh-api-gen from ssh-mesh)")
     with open(path, "rb") as f:
-        return manifest_with(f.read(), autostart, port=port, stream=stream, version=version, components=components, envelopes=envelopes)
+        return manifest_with(catalog_free(f.read(), name), autostart, port=port, stream=stream, version=version, components=components, wire=wire)
 
 
 def api_beside(sources, cargo):
@@ -237,6 +284,26 @@ def section_size(tool, elf, name):
         if parts and parts[0] == name:
             return int(parts[1])
     return 0
+
+
+def parse_component_table(data):
+    """The `.xip_comp` bytes of a module: LE (i32 component ID, u32 version) pairs, at most 8, as export_module! writes them."""
+    if len(data) % 8 or len(data) // 8 > 8:
+        sys.exit(f".xip_comp is {len(data)} bytes: want at most 8 (i32 ID, u32 version) pairs")
+    entries = [struct.unpack_from("<iI", data, pos) for pos in range(0, len(data), 8)]
+    if any(c <= 0 for c, _ in entries) or len({c for c, _ in entries}) != len(entries):
+        sys.exit(f".xip_comp {entries}: component IDs must be distinct and positive")
+    return entries
+
+
+def component_table(tool, elf, tmp):
+    """[(id, version)] of the ELF's `.xip_comp` section, or None when the module has no such section (no table: nothing to check)."""
+    if not re.search(r"\]\s+\.xip_comp\s", run([tool + "readelf", "-SW", elf])):
+        return None
+    raw = os.path.join(tmp, "xip_comp.bin")
+    run([tool + "objcopy", "-O", "binary", "-j", ".xip_comp", elf, raw])
+    with open(raw, "rb") as f:
+        return parse_component_table(f.read())
 
 
 def cargo_link(cfg, cargo, window, link_script, tmp, static_addr):
@@ -286,24 +353,24 @@ def cargo_link(cfg, cargo, window, link_script, tmp, static_addr):
 MAX_IMAGE = WINDOW_SLOT   # default capacity; modules/SLOTS may reserve a larger consecutive span.
 
 
-def module_manifest(cargo, name=None, tag=None, autostart=None, port=0, stream=0, version=0, components=(), envelopes=()):
+def module_manifest(cargo, name=None, tag=None, autostart=None, port=0, stream=0, version=0, components=(), wire=()):
     """The canonical image/native-artifact manifest and identity."""
     api = api_beside(None, cargo)
     if api:
-        manifest = manifest_beside(api, autostart, port, stream, version, components, envelopes)
         api_name, api_tag = manifest_identity(open(os.path.splitext(api)[0] + ".manifest", "rb").read())
         name, tag = name or api_name, tag or api_tag
         if tag != api_tag:
             sys.exit(f"--tag {tag} is not the component number {api_tag} of its API.md")
+        manifest = manifest_beside(api, autostart, port, stream, version, components, wire, name)
     else:
-        manifest = manifest_with(b"", autostart, name, tag, port, stream, version, components, envelopes)
+        manifest = manifest_with(b"", autostart, name, tag, port, stream, version, components, wire)
     if not tag or not name:
         sys.exit("a module needs a name and a component number (its API.md, or --name and --tag)")
     return manifest, name, tag
 
 
 def build(chip, out, name=None, tag=None, slot=0, stack=8192, state=0, keep_elf=None, cargo=None,
-          autostart=None, port=0, stream=0, version=0, components=(), envelopes=()):
+          autostart=None, port=0, stream=0, version=0, components=(), wire=()):
     """`slot` selects the module's RAM cell on every chip. Every chip also links code for code_base + slot * 64 KiB; the image can then be
     installed on any flash page, the loader maps that page at the module's window slot. (PIC linking stays
     available for a chip without fixed windows; nothing ships PIC today.)"""
@@ -344,6 +411,10 @@ def build(chip, out, name=None, tag=None, slot=0, stack=8192, state=0, keep_elf=
             p = line.split()
             if p and re.match(r"\.(s?data|s?bss|tdata|tbss|init_array|fini_array|ctors|dtors|got|dynamic)(\.|$)", p[0]) and int(p[1]):
                 sys.exit(f"module has {p[0]} ({p[1]} bytes): the image is read-only flash, no .data/.bss; keep state in the state block (--state)")
+        table = component_table(tool, elf, tmp)
+        if table is not None and sorted(table) != sorted(wire):
+            sys.exit(f"--wire {sorted(wire)} does not match the module's .xip_comp table {sorted(table)}: "
+                     "key 13 comes from --wire, the table from export_module!(components = ...); make them the same")
         if keep_elf:
             shutil.copy(elf, keep_elf)
         raw = os.path.join(tmp, "module.bin")
@@ -353,7 +424,7 @@ def build(chip, out, name=None, tag=None, slot=0, stack=8192, state=0, keep_elf=
             if "Entry point address" in line:
                 entry = int(line.split()[-1], 16)
         code = open(raw, "rb").read()
-        manifest, name, tag = module_manifest(cargo, name, tag, autostart, port, stream, version, components, envelopes)
+        manifest, name, tag = module_manifest(cargo, name, tag, autostart, port, stream, version, components, wire)
         image = dmod.pack(code, entry - window, tag, code_vma=window, data_vma=data_window, stack_bytes=stack,
                           fixed_vma=cfg["fixed"], state_bytes=state, manifest=manifest, static_addr=static_addr)
     if len(image) > capacity:
@@ -374,8 +445,8 @@ def main():
     ap.add_argument("--tag", type=int, help="the module's component number (default: from its API.md)")
     ap.add_argument("--slot", type=int, default=None,
                     help="the module's slot (modules/SLOTS by default, via its name): its RAM cell and, on Xtensa, its 64 KiB link window; not a flash page")
-    ap.add_argument("--version", type=int, default=0,
-                    help="the module's version (manifest key 8): higher is newer, no other meaning; 0 when absent")
+    ap.add_argument("--version", type=int,
+                    help="uint32 manifest version; default: UTC minutes since 2026-01-01, increased by the local target counter; 0: unversioned")
     ap.add_argument("--stack", type=int, default=8192, help="stack the deepest handler needs, bytes")
     ap.add_argument("--state", type=int, default=0, help="size of the zeroed state block passed to every call, bytes (<= 4096)")
     ap.add_argument("--autostart", nargs="?", const="", default=None, metavar="REQUEST",
@@ -384,8 +455,10 @@ def main():
     ap.add_argument("--stream", type=int, default=0, help="the stream port: TCP port PORT_NET + N, connections arrive as socket events (manifest key 10)")
     ap.add_argument("--components", default="", metavar="NAME[,NAME]",
                     help="the components the module hosts (manifest key 11): the runtime asks for their tables and serves them to get_component")
-    ap.add_argument("--envelopes", default="", metavar="ID[,ID]",
-                    help="additional envelope component IDs served by this module (manifest key 12)")
+    ap.add_argument("--wire", default="", metavar="ID:VERSION[,ID:VERSION]",
+                    help="the wire components this module serves, each with its version (manifest key 13; the version defaults to 1). "
+                         "The manifest source: an image builds only if its .xip_comp table, when it has one, is the same set; "
+                         "--host-metadata cannot check the table (no ELF)")
     ap.add_argument("--elf", help="also keep the linked ELF here (objdump -d)")
     ap.add_argument("--cargo", required=True, metavar="MANIFEST:BIN[:FEATURES]",
                     help="the Rust module to build: the bin BIN of the crate at MANIFEST (e.g. modules/mod_lora/Cargo.toml:mod_lora:flat-image)")
@@ -394,8 +467,11 @@ def main():
     if len(parts) < 2:
         ap.error("--cargo wants MANIFEST:BIN[:FEATURES]")
     cargo = (os.path.abspath(parts[0]), parts[1], parts[2] if len(parts) > 2 else "")
+    if a.version is not None and not 0 <= a.version <= 0xffffffff:
+        ap.error("--version is a 32-bit unsigned number")
     if a.host_metadata:
-        manifest, _, _ = module_manifest(cargo, a.name, a.tag, a.autostart, a.port, a.stream, a.version, [c for c in a.components.split(',') if c], [int(c) for c in a.envelopes.split(',') if c])
+        a.version = a.version if a.version is not None else 0
+        manifest, _, _ = module_manifest(cargo, a.name, a.tag, a.autostart, a.port, a.stream, a.version, [c for c in a.components.split(',') if c], parse_wire(a.wire))
         os.makedirs(os.path.dirname(os.path.abspath(a.host_metadata)), exist_ok=True)
         with open(a.host_metadata, "w") as f:
             json.dump({"state_bytes": a.state, "manifest": list(manifest)}, f)
@@ -403,16 +479,26 @@ def main():
         return
     if not a.chip or not a.out:
         ap.error("image builds require --chip and --out")
-    if a.version < 0 or a.version > 0xffffffff:
-        ap.error("--version is a 32-bit unsigned number")
     slot = a.slot
     if slot is None:
         slot = read_slots().get(os.path.basename(os.path.dirname(cargo[0])))
         if slot is None:
             ap.error("no slot: pass --slot or list the module in modules/SLOTS")
+    # Seed new counters from a previous local artifact, including pinned release versions.
+    previous_version = 0
+    try:
+        with open(a.out, 'rb') as old:
+            old_manifest, _ = _cbor_item(dmod.manifest_of(old.read()), 0)
+            previous_version = old_manifest.get(8, 0)
+    except (OSError, ValueError, IndexError, TypeError, AttributeError, struct.error):
+        pass  # No valid previous artifact at this output path.
+    try:
+        a.version = build_version.reserve(ROOT, cargo[1], a.chip, a.version, minimum=previous_version)
+    except ValueError as error:
+        ap.error(str(error))
     build(a.chip, a.out, a.name, a.tag, slot, a.stack, a.state, keep_elf=a.elf,
           cargo=cargo, autostart=a.autostart, port=a.port, stream=a.stream, version=a.version,
-          components=[c for c in a.components.split(',') if c], envelopes=[int(c) for c in a.envelopes.split(',') if c])
+          components=[c for c in a.components.split(',') if c], wire=parse_wire(a.wire))
 
 
 if __name__ == "__main__":

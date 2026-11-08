@@ -15,7 +15,7 @@ def main():
     parser.add_argument('directory', type=Path)
     parser.add_argument('--chip', default='esp32c6', choices=tuple(mkmod.CHIPS))
     parser.add_argument('--slot', type=int, help='the module slot (default: modules/SLOTS): its RAM cell; Xtensa also links code for its 64 KiB window. Not a flash page')
-    parser.add_argument('--version', type=int, default=0, help='the manifest version of the module (higher is newer; 0: none)')
+    parser.add_argument('--version', type=int, help='uint32 manifest version; default: UTC minutes since 2026-01-01 with a local increasing counter; 0: unversioned')
     parser.add_argument('--out', type=Path)
     parser.add_argument('--host-metadata', type=Path, help='write canonical native module metadata without compiling an image')
     args = parser.parse_args()
@@ -40,7 +40,7 @@ def main():
             env['XIP_RUST_ESP_BIN'] = str(rust_bin)
     env.setdefault('CARGO_TARGET_DIR', str(directory / 'target' / 'cargo'))
     features = 'flat-image' + (',' + args.chip if chip_feature else '')
-    command = ['python3', str(Path(mkmod.ROOT) / 'tools' / 'mkmod.py'), *options, *(['--version', str(args.version)] if args.version else []),
+    command = ['python3', str(Path(mkmod.ROOT) / 'tools' / 'mkmod.py'), *options, *(['--version', str(args.version)] if args.version is not None else []),
                '--cargo', f'{manifest}:{name}:{features}']
     if args.host_metadata:
         command += ['--host-metadata', str(args.host_metadata)]

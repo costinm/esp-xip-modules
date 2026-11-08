@@ -30,6 +30,7 @@ typedef int esp_err_t;
 #define pdMS_TO_TICKS(n) (n)
 #define XIP_EV_IO 9
 #define lwip_socket socket
+#define lwip_setsockopt setsockopt
 #define lwip_bind bind
 #define lwip_listen listen
 #define lwip_accept accept
@@ -152,6 +153,15 @@ int main(void) {
     assert(h_socket_read(&in,peer,bytes,sizeof(bytes))==XIP_ERR_AGAIN);
     shutdown(client,SHUT_WR);next_event(XIP_SOCKET_EVENT_READABLE);
     assert(h_socket_read(&in,peer,bytes,sizeof(bytes))==0);
+    /* lwIP may report EOF as HUP alone. A deferred flash response still needs
+     * the write half; HUP must not become a terminal module CLOSED event. */
+    sock_node *active=socket_find(in.id,peer);assert(active);
+    assert(socket_ready(active->fd,POLLHUP,peer)==0);
+    next_event(XIP_SOCKET_EVENT_READABLE);
+    assert(socket_ready(active->fd,POLLERR,peer)==0);
+    next_event(XIP_SOCKET_EVENT_READABLE);
+    assert(h_socket_write(&in,peer,(const uint8_t *)"durable",7)==7);
+    assert(recv(client,bytes,sizeof(bytes),0)==7 && !memcmp(bytes,"durable",7));
     assert(h_socket_close(&other,peer)==XIP_ERR_ARG);
     pkt=new_packet();
     assert(h_socket_write_pkt(&in,peer,pkt,64,6)==0);
@@ -164,6 +174,17 @@ int main(void) {
     int fd=sockets->fd;assert(socket_ready(fd,POLLIN,listener+100)==0 && watches[(uint32_t)(uintptr_t)sockets->watch].interest==POLLIN);
     socket_release(in.id);
     assert(!sockets);
+    /* A flash server closes first after its durable reply. Reconnect must be
+     * able to rebind the same service while that transfer is in TIME_WAIT. */
+    port=free_port();
+    assert(h_tcp_accept(&in,port,XIP_SOCKET_MODE_DIRECT,44,100,&listener)==0);
+    client=socket(AF_INET6,SOCK_STREAM,0);assert(client>=0);
+    address.sin6_port=htons(port);assert(connect(client,(struct sockaddr *)&address,sizeof(address))==0);
+    peer=(uint32_t)next_event(XIP_SOCKET_EVENT_OPEN).id;
+    assert(h_socket_close(&in,peer)==0);assert(recv(client,bytes,sizeof(bytes),0)==0);
+    close(client);socket_release(in.id);
+    assert(h_tcp_accept(&in,port,XIP_SOCKET_MODE_DIRECT,44,100,&listener)==0);
+    socket_release(in.id);
     /* Declarative listener defers until a physical interface is ready. */
     in.stream=3;in.component=44;in.name="test";hooks.wifi_reconcile=true;
     stream_accept(&in);assert(!sockets);

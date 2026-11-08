@@ -109,14 +109,19 @@ class Slots(unittest.TestCase):
         with self.assertRaises(SystemExit):
             mkmod.manifest_with(b"")        # nothing to name it by
 
-    def test_additional_envelope_components_are_manifest_key_12(self):
+    def test_wire_components_are_manifest_key_13(self):
         base = bytes.fromhex(Manifest.DEMO)
-        self.assertEqual(mkmod.manifest_with(base, envelopes=()), base)
-        m, _ = cbor_decode(mkmod.manifest_with(base, envelopes=[1, 77]))
-        self.assertEqual(m[12], [1, 77])
-        for bad in ([0], [-1], [1, 1], [1, 2, 3, 4], [0x80000000], [True]):
+        self.assertEqual(mkmod.manifest_with(base, wire=()), base)
+        m, _ = cbor_decode(mkmod.manifest_with(base, wire=[(1, 1), (77, 0)]))
+        self.assertEqual(m[13], [[1, 1], [77, 0]])
+        self.assertNotIn(12, m)
+        self.assertEqual(mkmod.parse_wire("15,8:3"), [(15, 1), (8, 3)])
+        for bad in ([(0, 1)], [(-1, 1)], [(1, 1), (1, 2)], [(1, -1)], [(1, 2**32)], [(0x80000000, 1)], [(True, 1)], [(1, 1)] * 9):
             with self.assertRaises(SystemExit):
-                mkmod.manifest_with(base, envelopes=bad)
+                mkmod.manifest_with(base, wire=bad)
+        for bad in ("1:x", "x"):
+            with self.assertRaises(SystemExit):
+                mkmod.parse_wire(bad)
 
     def test_the_identity_of_a_generated_manifest(self):
         name, tag = mkmod.manifest_identity(bytes.fromhex(Manifest.DEMO))
@@ -186,8 +191,9 @@ def cbor_decode(data, pos=0):
     n = info
     if info == 24:
         n, pos = data[pos], pos + 1
-    elif info == 25:
-        n, pos = int.from_bytes(data[pos:pos + 2], "big"), pos + 2
+    elif info in (25, 26, 27):
+        width = {25: 2, 26: 4, 27: 8}[info]
+        n, pos = int.from_bytes(data[pos:pos + width], "big"), pos + width
     if major == 0:
         return n, pos
     if major == 3:
@@ -221,6 +227,16 @@ class Manifest(unittest.TestCase):
         self.assertEqual(m[6], "serve")
         self.assertEqual(m[4][0][0], "Row")
 
+    def test_an_image_keeps_the_name_and_component_not_the_catalog(self):
+        base = bytes.fromhex(self.DEMO)
+        full, _ = cbor_decode(base)
+        m, _ = cbor_decode(mkmod.catalog_free(base))
+        self.assertEqual(m, {1: full[1], 2: full[2]})
+        self.assertEqual(mkmod.catalog_free(mkmod.catalog_free(base)), mkmod.catalog_free(base))
+        self.assertEqual(mkmod.manifest_with(base), base, "manifest_with keeps the catalog it is given")
+        renamed, _ = cbor_decode(mkmod.catalog_free(base, "other"))
+        self.assertEqual(renamed, {1: "other", 2: full[2]})
+
     def test_the_manifest_sits_after_the_code_inside_the_image(self):
         m = mkmod.manifest_with(bytes.fromhex(self.DEMO))
         image = dmod.pack(b"\x01\x02\x03\x04" * 5, 0x44, 7, manifest=m, static_addr=dmod.STATIC_BASES["esp32c6"])
@@ -244,16 +260,20 @@ class Manifest(unittest.TestCase):
             self.skipTest("no built image (scripts/build.sh)")
         m, _ = cbor_decode(dmod.manifest_of(Path(image_path).read_bytes()))
         self.assertEqual((m[1], m[2]), ("test", 2))
-        self.assertIn("echo", [x[2] for x in m[3]])
+        self.assertEqual(sorted(m), sorted(k for k in m if k in (1, 2, 8, 9, 10, 11, 13)), "an image carries no API catalog (keys 3..5)")
+        self.assertTrue({3, 4, 5}.isdisjoint(m))
 
     def test_native_metadata_matches_the_packed_manifest_and_state(self):
         image_path = os.path.join(ROOT, "target/out/esp32c6/modules/mod_rtest.dmod")
         if not os.path.exists(image_path):
             self.skipTest("no built module image")
+        image = Path(image_path).read_bytes()
+        manifest, _ = cbor_decode(dmod.manifest_of(image))
         with tempfile.TemporaryDirectory() as directory:
             metadata_path = os.path.join(directory, "module.json")
             subprocess.run([sys.executable, os.path.join(ROOT, "tools/build_mod.py"),
-                            os.path.join(ROOT, "modules/mod_rtest"), "--host-metadata", metadata_path], check=True)
+                            os.path.join(ROOT, "modules/mod_rtest"), "--host-metadata", metadata_path,
+                            "--version", str(manifest.get(8, 0))], check=True)
             with open(metadata_path) as source:
                 metadata = json.load(source)
         with open(image_path, "rb") as source:

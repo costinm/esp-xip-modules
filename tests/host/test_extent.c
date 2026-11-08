@@ -55,6 +55,7 @@ int main(void)
     CHECK(reads == PAGES);                                                              /* one 8-byte read per page */
 
     runtime_at(0, 0x40000, "5");                                                        /* 4 pages + header, extent 5 pages */
+    flash[xip_image_inspect(rd, NULL, sizeof(flash)).length] = 0;                       /* not a flasher's image: the scan goes on */
     extent_at(6, XIP_DMOD_KIND_MODULE, 0x10004);                                        /* two pages */
     extent_at(9, XIP_DMOD_KIND_MODULE, 0x2000);
     extent_at(11, XIP_EXTENT_DATA, 0x20000);                                            /* two pages of data */
@@ -144,6 +145,43 @@ int main(void)
     flash[19 * PAGE + 1] = 1;                                                           /* one segment: whole */
     n = xip_extent_scan(rd, NULL, 19 * PAGE, 2 * PAGE, XIP_WANT_ALL, e, 8);
     CHECK(n == 1 && e[0].offset == 19 * PAGE && e[0].size == PAGE);
+
+    /* a runtime at the start of the area followed by 0xF0..0xFF ends the scan; elsewhere the byte means nothing */
+    memset(flash, 0xff, sizeof(flash));
+    runtime_at(0, 0x1000, "3");
+    extent_at(4, XIP_EXTENT_DATA, 0x10000);
+    xip_image_info_t im = xip_image_inspect(rd, NULL, sizeof(flash));
+    memset(flash + im.length, 0, 16);
+    n = xip_extent_scan(rd, NULL, 0, sizeof(flash), XIP_WANT_ALL | XIP_WANT_STOP, e, 8);
+    CHECK(n == 2);                                                                      /* byte 0: scanning goes on */
+    flash[im.length] = 0xfe;
+    n = xip_extent_scan(rd, NULL, 0, sizeof(flash), XIP_WANT_ALL | XIP_WANT_STOP, e, 8);
+    CHECK(n == 1 && e[0].kind == XIP_EXTENT_RUNTIME && e[0].after == 0xfe);
+    flash[im.length] = 0xfc;
+    n = xip_extent_scan(rd, NULL, 0, sizeof(flash), XIP_WANT_ALL | XIP_WANT_STOP, e, 8);
+    CHECK(n == 1);
+    flash[im.length] = 0xf8;
+    n = xip_extent_scan(rd, NULL, 0, sizeof(flash), XIP_WANT_ALL | XIP_WANT_STOP, e, 8);
+    CHECK(n == 1);
+    flash[im.length] = 0x78;                                                            /* bit 7 cleared by mod_flash: scanning goes on */
+    n = xip_extent_scan(rd, NULL, 0, sizeof(flash), XIP_WANT_ALL | XIP_WANT_STOP, e, 8);
+    CHECK(n == 2);
+    flash[im.length] = 0xff;                                                            /* blank: scanning goes on */
+    n = xip_extent_scan(rd, NULL, 0, sizeof(flash), XIP_WANT_ALL | XIP_WANT_STOP, e, 8);
+    CHECK(n == 2);
+    flash[im.length] = 0xfc;
+    n = xip_extent_scan(rd, NULL, 0, sizeof(flash), XIP_WANT_ALL, e, 8);                /* without the flag (loader, mod_flash) the scan goes on */
+    CHECK(n == 2);
+    flash[im.length] = 0xef;
+    n = xip_extent_scan(rd, NULL, 0, sizeof(flash), XIP_WANT_ALL | XIP_WANT_STOP, e, 8);
+    CHECK(n == 2);
+    flash[im.length] = 0xfe;
+    n = xip_extent_scan(rd, NULL, 4 * PAGE, 4 * PAGE, XIP_WANT_ALL | XIP_WANT_STOP, e, 8);              /* a runtime not at the start is not a flasher's */
+    CHECK(n == 1 && e[0].kind == XIP_EXTENT_DATA);
+    runtime_at(8, 0x1000, "4");
+    extent_at(10, XIP_EXTENT_DATA, 0x10000);
+    n = xip_extent_scan(rd, NULL, 4 * PAGE, 8 * PAGE, XIP_WANT_ALL | XIP_WANT_STOP, e, 8);
+    CHECK(n == 3);
 
     puts(failures ? "FAILED" : "extent scan ok");
     return failures != 0;

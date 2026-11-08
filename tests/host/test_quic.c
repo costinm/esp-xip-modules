@@ -65,12 +65,12 @@ static void test_build_and_envelope(void)
     xip_quic_hdr h;
     uint8_t pkt[80];
     memcpy(pkt, want, n);
-    /* {1: 20, 2: 5, 3: 987, 5: {}} */
-    const uint8_t env[] = {0xa4, 0x01, 0x14, 0x02, 0x05, 0x03, 0x19, 0x03, 0xdb, 0x05, 0xa0};
+    /* {1: 49, 2: 5, 3: 987, 5: {}} */
+    const uint8_t env[] = {0xa4, 0x01, 0x18, 0x31, 0x02, 0x05, 0x03, 0x19, 0x03, 0xdb, 0x05, 0xa0};
     memcpy(pkt + n, env, sizeof env);
     assert(xip_quic_classify(pkt, n + sizeof env, 0, &h) == XIP_QUIC_LONG && h.version == XIP_QUIC_VERSION_CBOR && h.body == n);
     xip_quic_env e;
-    assert(xip_quic_envelope(pkt + h.body, sizeof env, &e) == 0 && e.component == 20 && e.method == 5 && e.has_id && e.id == 987);
+    assert(xip_quic_envelope(pkt + h.body, sizeof env, &e) == 0 && e.component == 49 && e.method == 5 && e.has_id && e.id == 987);
     const uint8_t noid[] = {0xa2, 0x01, 0x14, 0x02, 0x05};
     assert(xip_quic_envelope(noid, sizeof noid, &e) == 0 && !e.has_id && e.id == 0);
     const uint8_t answer[] = {0xa4, 0x01, 0x14, 0x02, 0x05, 0x03, 0x01, 0x06, 0xa0}, failure[] = {0xa4, 0x01, 0x14, 0x02, 0x05, 0x03, 0x01, 0x07, 0x21};

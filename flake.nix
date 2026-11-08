@@ -109,7 +109,7 @@
             postInstall = ''
               mkdir -p "$out/etc"
               cp -r dmesh-cli/schemas "$out/etc/schemas"
-              # the service catalogs of this repository's components and modules (scripts/gen.sh): xip-wifi, xip-power, xip-con, ...
+              # the service catalogs of this repository's components and modules (scripts/gen.sh): xip-wifi, xip-power, xip-sys, ...
               cp -r ${./api/generated/schemas}/. "$out/etc/schemas/"
               chmod -R u+w "$out/etc/schemas"
               wrapProgram "$out/bin/dmesh-cli" --set-default MESH_SCHEMA_DIR "$out/etc/schemas"
@@ -127,7 +127,7 @@
           # allocator_api and RUSTC_BOOTSTRAP) with the wasm32 targets and rust-src (rust-lld is part of it), plus binaryen
           # (wasm-opt), wabt, wasm-tools and wasmtime to optimize, inspect and run the result (and gcc for the C of a host build).
           # Separate from `esp-dev`: that one is ESP-IDF and C.
-          # modules/WASM.md:  nix build .#wasm-dev --out-link ${WASM_DEV:-$HOME/opt/wasm-dev}
+          # modules/mod_wasm3/WASM.md:  nix build .#wasm-dev --out-link ${WASM_DEV:-$HOME/opt/wasm-dev}
           wasm-dev =
             let
               rpkgs = import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; };

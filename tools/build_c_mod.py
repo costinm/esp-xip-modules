@@ -27,6 +27,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dmod  # noqa: E402
 import mkmod  # noqa: E402
+import build_version  # noqa: E402
 
 ROOT = mkmod.ROOT
 
@@ -221,7 +222,9 @@ def build_c(chip, out, directory, name, tag, state, slot, version=0, autostart=N
             if "Entry point address" in line:
                 entry = int(line.split()[-1], 16)
         code = open(raw, "rb").read()
-        manifest = mkmod.manifest_with(b"", autostart, name=name, tag=tag, version=version)
+        api_manifest = os.path.join(ROOT, "modules", directory, "API.manifest")
+        base_manifest = open(api_manifest, "rb").read() if os.path.exists(api_manifest) else b""
+        manifest = mkmod.manifest_with(mkmod.catalog_free(base_manifest) if base_manifest else b"", autostart, name=name, tag=tag, version=version)
         image = dmod.pack(code, entry - window, tag, code_vma=window, data_vma=data_window, stack_bytes=stack,
                           fixed_vma=cfg["fixed"], state_bytes=state, manifest=manifest, static_addr=static_addr)
     if len(image) > capacity:
@@ -238,7 +241,7 @@ def main():
     ap.add_argument("directory", help="the module directory (modules/mod_x)")
     ap.add_argument("--chip", required=True, choices=sorted(mkmod.CHIPS))
     ap.add_argument("--slot", type=int, help="the module slot (default: modules/SLOTS)")
-    ap.add_argument("--version", type=int, default=0)
+    ap.add_argument("--version", type=int, help="uint32 version; default: UTC minutes plus the local increasing counter")
     ap.add_argument("--autostart", nargs="?", const="", default=None, metavar="REQUEST",
                     help="start this module at boot with REQUEST as its start request (manifest key 6)")
     ap.add_argument("--elf", help="also keep the linked ELF here")
@@ -259,6 +262,10 @@ def main():
     if slot is None:
         ap.error(f"{directory} has no slot: add it to modules/SLOTS or pass --slot")
     out = a.out or os.path.join(ROOT, "target", "out", a.chip, "modules", f"{directory}.dmod")
+    try:
+        a.version = build_version.reserve(ROOT, directory, a.chip, a.version)
+    except ValueError as error:
+        ap.error(str(error))
     build_c(a.chip, out, directory, short, tag, state, slot, a.version, a.autostart, a.elf)
 
 

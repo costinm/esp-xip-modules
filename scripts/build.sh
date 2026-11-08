@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the runtime image (the C main: an example, and the host for the modules) and the Rust modules.   . ./env.sh && scripts/build.sh [esp32|esp32s3|esp32c6|all]
+# Build the runtime image (the C main: an example, and the host for the modules) and the Rust modules.   . ./env.sh && scripts/build.sh [esp32|esp32s3|esp32c6|all] [all|stage2|main|mod_NAME]
 # XIP_FLASH_MB=<4|8|16> selects the partition table (boot/partitions/<n>mb.csv) and the flash size setting
 # of Main and Stage2, for boards with that much flash. Default: the 4 MB table and the per-chip Stage2 size.
 # For the S3 16 MB build it also enables the 8 MB octal PSRAM (XIP_PSRAM=0 opts out).
@@ -11,7 +11,19 @@
 # Nothing is signed or keyed here.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+    echo "usage: scripts/build.sh CHIP [all|stage2|main|mod_NAME]"
+    exit 0
+fi
 cpus="${1:-all}"
+part="${2:-all}"
+[[ $# -le 2 ]] || { echo "usage: scripts/build.sh CHIP [all|stage2|main|mod_NAME]" >&2; exit 2; }
+case "$cpus" in esp32|esp32s3|esp32c6|all) ;; *) echo "unknown chip: $cpus" >&2; exit 2;; esac
+case "$part" in
+    all|stage2|main) ;;
+    mod_*) [[ -d modules/$part ]] || { echo "unknown module: $part" >&2; exit 2; };;
+    *) echo "unknown build target: $part (all, stage2, main or mod_NAME)" >&2; exit 2;;
+esac
 [[ $cpus == all ]] && cpus="esp32 esp32s3 esp32c6"
 table=4mb; flashsize=""
 case "${XIP_FLASH_MB:-}" in
@@ -32,60 +44,73 @@ fi
 for cpu in $cpus; do
     out=target/out/$cpu
     mkdir -p $out/modules
-    defaults="$PWD/sdkconfig.defaults"
-    [[ -f sdkconfig.$cpu.defaults ]] && defaults="$defaults;$PWD/sdkconfig.$cpu.defaults"
-    # The flash size of the board (XIP_FLASH_MB): the runtime caps the addressable flash at its configured size.
-    [[ -n $flashsize ]] && defaults="$defaults;$PWD/target/out/flashsize-$table.defaults"
-    # Octal PSRAM on the 16 MB S3 modules (XIP_PSRAM=0 opts out).
-    [[ $cpu == esp32s3 && $table == 16mb && ${XIP_PSRAM:-1} != 0 ]] && defaults="$defaults;$PWD/target/out/psram-$table.defaults"
-    main_profile=${XIP_BLE_PROFILE:-standard}
-    [[ $main_profile == */* ]] && profile=$main_profile || profile=$PWD/components/xip_ble/profiles/$main_profile.defaults
-    [[ -f $profile ]] || { echo "missing BLE profile: $profile" >&2; exit 1; }
-    # The version of the image: a number that rises with every build, seconds since 2025-01-01 unless XIP_RUNTIME_VERSION says otherwise. It is
-    # the app description's version string (nothing reads it yet; the extent scan will pick the highest).
-    version=${XIP_RUNTIME_VERSION:-$(( $(date +%s) - 1735689600 ))}
-    [[ $version =~ ^[0-9]+$ ]] || { echo "XIP_RUNTIME_VERSION must be a number (got $version)" >&2; exit 2; }
-    rm -f "$out/main.sdkconfig"
-    IDF_TARGET=$cpu idf.py -B "$out/main-build" -D SDKCONFIG="$PWD/$out/main.sdkconfig" -D PROJECT_VER="$version" \
-        -D SDKCONFIG_DEFAULTS="$defaults;$profile" build
-    grep -qxF 'CONFIG_ESPTOOLPY_FLASHMODE_DIO=y' "$out/main.sdkconfig" || { echo "$cpu main: flash driver must be DIO" >&2; exit 1; }
-    cp "$out/main-build/esp-xip-modules.bin" "$out/main.bin"
+    if [[ $part == all || $part == main ]]; then
+        defaults="$PWD/sdkconfig.defaults"
+        [[ -f sdkconfig.$cpu.defaults ]] && defaults="$defaults;$PWD/sdkconfig.$cpu.defaults"
+        # The flash size of the board (XIP_FLASH_MB): the runtime caps the addressable flash at its configured size.
+        [[ -n $flashsize ]] && defaults="$defaults;$PWD/target/out/flashsize-$table.defaults"
+        # Octal PSRAM on the 16 MB S3 modules (XIP_PSRAM=0 opts out).
+        [[ $cpu == esp32s3 && $table == 16mb && ${XIP_PSRAM:-1} != 0 ]] && defaults="$defaults;$PWD/target/out/psram-$table.defaults"
+        main_profile=${XIP_BLE_PROFILE:-standard}
+        [[ $main_profile == */* ]] && profile=$main_profile || profile=$PWD/components/xip_ble/profiles/$main_profile.defaults
+        [[ -f $profile ]] || { echo "missing BLE profile: $profile" >&2; exit 1; }
+        # The version of the image: a number that rises with every build, seconds since 2025-01-01 unless XIP_RUNTIME_VERSION says otherwise. It is
+        # the app description's version string; Stage2 selects the highest valid version.
+        version=${XIP_RUNTIME_VERSION:-$(( $(date +%s) - 1735689600 ))}
+        [[ $version =~ ^[0-9]+$ ]] || { echo "XIP_RUNTIME_VERSION must be a number (got $version)" >&2; exit 2; }
+        rm -f "$out/main.sdkconfig"
+        IDF_TARGET=$cpu idf.py -B "$out/main-build" -D SDKCONFIG="$PWD/$out/main.sdkconfig" -D PROJECT_VER="$version" \
+            -D SDKCONFIG_DEFAULTS="$defaults;$profile" app
+        grep -qxF 'CONFIG_ESPTOOLPY_FLASHMODE_DIO=y' "$out/main.sdkconfig" || { echo "$cpu main: flash driver must be DIO" >&2; exit 1; }
+        cp "$out/main-build/esp-xip-modules.bin" "$out/main.bin"
+        python3 tools/runtime_image.py "$out/main.bin" "$out/main-initial.bin" --marker initial
+        python3 tools/runtime_image.py "$out/main.bin" "$out/main-recovery.bin" --marker recovery
+    fi
     # Stage2 (boot/, see boot/README.md): defaults of the chip with the selected partition table;
     # XIP_FLASH_MB also raises the flash size setting (the chip exposes only its configured size).
-    cfg=$out/stage2-$table.sdkconfig
-    { if [[ $cpu == esp32 ]]; then cat boot/sdkconfig.defaults; else cat boot/sdkconfig.$cpu.defaults; fi
-      if [[ -n $flashsize ]]; then
-          echo "$flashsize"
-          echo "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/$table.csv\""
-      fi
-    } > $cfg
-    rm -f $out/stage2-$table.sdkconfig.gen
-    IDF_TARGET=$cpu idf.py -C boot -B $out/stage2-build -D SDKCONFIG=$PWD/$out/stage2-$table.sdkconfig.gen -D SDKCONFIG_DEFAULTS=$PWD/$cfg build
-    cp $out/stage2-build/bootloader/bootloader.bin $out/stage2-$table.bin
-    cp $out/stage2-build/partition_table/partition-table.bin $out/partition-table-$table.bin
+    if [[ $part == all || $part == stage2 ]]; then
+        cfg=$out/stage2-$table.sdkconfig
+        { if [[ $cpu == esp32 ]]; then cat boot/sdkconfig.defaults; else cat boot/sdkconfig.$cpu.defaults; fi
+          if [[ -n $flashsize ]]; then
+              echo "$flashsize"
+              echo "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/$table.csv\""
+          fi
+        } > $cfg
+        rm -f $out/stage2-$table.sdkconfig.gen
+        IDF_TARGET=$cpu idf.py -C boot -B $out/stage2-build -D SDKCONFIG=$PWD/$out/stage2-$table.sdkconfig.gen -D SDKCONFIG_DEFAULTS=$PWD/$cfg bootloader partition-table
+        cp $out/stage2-build/bootloader/bootloader.bin $out/stage2-$table.bin
+        cp $out/stage2-build/partition_table/partition-table.bin $out/partition-table-$table.bin
+    fi
     # the modules: the loader scans every 64 KB page of xip after the runtime reserve (1.5 MiB), so an image goes on any of them. A module has a
     # slot (modules/SLOTS: its RAM cell and, on the Xtensa chips, its link window), which is NOT its page.
-    # modules.txt: name, the flash address esptool writes it at (the pages after the reserve, modules/CRITICAL first), the slot.
-    # XIP_MODULE_VERSIONS="mod_x=3 mod_y=2" builds those modules with that manifest version (default 0, no key).
-    : > $out/modules.list
-    for dir in modules/mod_*/; do
-        mod=$(basename $dir)
-        version=0
-        for kv in ${XIP_MODULE_VERSIONS:-}; do [[ ${kv%%=*} == $mod ]] && version=${kv#*=}; done
-        if [ -f $dir/Cargo.toml ]; then
-            python3 tools/build_mod.py $dir --chip $cpu --out $out/modules --version $version
-        else
-            rc=0
-            python3 tools/build_c_mod.py $dir --chip $cpu --out $out/modules/$mod.dmod --version $version || rc=$?
-            # exit 3: the module declares other chips (modules/C-MODULES); it takes no page here.
-            if [ $rc == 3 ]; then continue; fi
-            [ $rc == 0 ] || exit $rc
-        fi
-        echo "$mod $(python3 -c "import sys; sys.path.insert(0, 'tools'); import mkmod; print(mkmod.read_slots()['$mod'])")" >> $out/modules.list
-    done
-    # Place the images on actual rounded extents, multi-page modules included, in the exact table built above; never emit a layout
-    # beyond the board's flash. Manual flash: runtime at 0x10000, modules at their addresses.
-    python3 tools/partition_layout.py "$out/partition-table-$table.bin" --main-image "$out/main.bin" --modules "$out/modules.list" \
-        --images "$out/modules" --critical modules/CRITICAL --out "$out/modules.txt" >/dev/null
+    # modules.txt: name, the flash address esptool writes it at (the pages after the reserve, in list order), the slot.
+    # XIP_MODULE_VERSIONS="mod_x=3 mod_y=2" overrides automatic module build versions.
+    if [[ $part == all || $part == mod_* ]]; then
+        [[ $part != all ]] || : > $out/modules.list
+        for dir in modules/mod_*/; do
+            mod=$(basename $dir)
+            [[ $part == all || $part == "$mod" ]] || continue
+            version_args=()
+            for kv in ${XIP_MODULE_VERSIONS:-}; do [[ ${kv%%=*} == $mod ]] && version_args=(--version "${kv#*=}"); done
+            if [ -f $dir/Cargo.toml ]; then
+                python3 tools/build_mod.py $dir --chip $cpu --out $out/modules "${version_args[@]}"
+            else
+                rc=0
+                python3 tools/build_c_mod.py $dir --chip $cpu --out $out/modules/$mod.dmod "${version_args[@]}" || rc=$?
+                # exit 3: the module declares other chips (modules/C-MODULES); it takes no page here.
+                if [ $rc == 3 ]; then continue; fi
+                [ $rc == 0 ] || exit $rc
+            fi
+            [[ $part != all ]] || echo "$mod $(python3 -c "import sys; sys.path.insert(0, 'tools'); import mkmod; print(mkmod.read_slots()['$mod'])")" >> $out/modules.list
+        done
+    fi
+    # The complete build also emits an optional placement report; partial builds
+    # need neither the other components nor modules.txt.
+    if [[ $part == all ]]; then
+        # Place the images on actual rounded extents, multi-page modules included, in the exact table built above; never emit a layout
+        # beyond the board's flash. Manual flash: runtime at 0x10000, modules at their addresses.
+        python3 tools/partition_layout.py "$out/partition-table-$table.bin" --main-image "$out/main.bin" --modules "$out/modules.list" \
+            --images "$out/modules" --out "$out/modules.txt" >/dev/null
+    fi
 done
-(cd target/out && find . -name '*.bin' -o -name '*.dmod' | sort | xargs sha256sum > SHA256SUMS)
+(cd target/out && find . -type f \( -name '*.bin' -o -name '*.dmod' \) | sort | xargs sha256sum > SHA256SUMS)
