@@ -123,7 +123,13 @@ void xip_wifi_boot_network(void)
 {
     xip_wifi_intent now = {.size = sizeof(now)};
     uint32_t generation;
-    if (!xip_wifi_get_intent(&now, &generation) && now.sta_ssid_len) return;
+    if (!xip_wifi_get_intent(&now, &generation) && now.sta_ssid_len) {
+        if (!now.radio) {
+            now.radio=1; now.sta=1; now.now=1;
+            (void)xip_wifi_set_intent(&now,&generation);
+        }
+        return;
+    }
     char ssid[33] = {0}, secret[64] = {0};
     nvs_handle_t nvs;
     if (nvs_open("wl", NVS_READONLY, &nvs) != ESP_OK) return;

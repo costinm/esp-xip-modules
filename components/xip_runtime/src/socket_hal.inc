@@ -61,8 +61,10 @@ static int socket_ready(int fd,int16_t events,uint32_t expected)
             if(s->tx_at==s->tx_len){drop_slot(s->tx_slot);s->tx_slot=-2; if(socket_event(s,XIP_SOCKET_EVENT_WRITE_DONE))s->tx_slot=-1;else rc=XIP_ERR_BUSY;}
             else if(n<0 && errno!=EAGAIN && errno!=EWOULDBLOCK){drop_slot(s->tx_slot);s->tx_slot=-1;if(!socket_event(s,XIP_SOCKET_EVENT_CLOSED))rc=XIP_ERR_BUSY;}
             else c_poll_update(s->watch,fd,POLLIN|POLLOUT);
-        } else if(!socket_event(s,(events&POLLIN)?XIP_SOCKET_EVENT_READABLE:
-                (events&(POLLERR|POLLHUP|POLLNVAL))?XIP_SOCKET_EVENT_CLOSED:
+        /* Read/error readiness is resolved by recv, which must drain buffered
+         * input before EOF/error. Neither HUP nor ERR cancels a pending reply. */
+        } else if(!socket_event(s,(events&POLLNVAL)?XIP_SOCKET_EVENT_CLOSED:
+                (events&(POLLIN|POLLHUP|POLLERR))?XIP_SOCKET_EVENT_READABLE:
                 XIP_SOCKET_EVENT_WRITABLE))rc=XIP_ERR_BUSY;
     }
     xSemaphoreGive(sockets_lock);return rc;
@@ -113,6 +115,10 @@ static int h_tcp_accept(void *u,uint16_t port,uint32_t mode,int32_t c,int32_t m,
      * has not passed through a Wi-Fi/socket adapter that initializes it. */
     lwip_socket_thread_init();
     int fd=lwip_socket(AF_INET6,SOCK_STREAM,0);if(fd<0)return XIP_ERR_IO;
+    /* Radio reconnect tears down listeners while completed image transfers may
+     * still be in TCP TIME_WAIT. Rebinding the service must not wait for them. */
+    int reuse=1;
+    if(lwip_setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse))<0){lwip_close(fd);return XIP_ERR_IO;}
     struct sockaddr_in6 addr={.sin6_len=sizeof(addr),.sin6_family=AF_INET6,.sin6_port=htons(port)};
     if(lwip_fcntl(fd,F_SETFL,O_NONBLOCK)<0 || lwip_bind(fd,(struct sockaddr *)&addr,sizeof(addr))<0 || lwip_listen(fd,2)<0){lwip_close(fd);return XIP_ERR_IO;}
     xSemaphoreTake(sockets_lock,portMAX_DELAY);

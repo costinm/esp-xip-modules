@@ -7,9 +7,13 @@
 #include "esp_cpu.h"
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
+#include "esp_app_desc.h"
+#include "spi_flash_mmap.h"
 #include "bootloader_common.h"
 #include "xip_cbor.h"
 #include "internal.h"
+
+#include "runtime_range.inc"
 
 static SemaphoreHandle_t info_mutex;
 #define INFO_LOCK() xSemaphoreTake(info_mutex, portMAX_DELAY)
@@ -39,6 +43,19 @@ void xip_info_release(uint32_t owner) { if (info_mutex && owner) info_release(ow
  * misreport the partition after a bootloader update or different boot path. */
 static const esp_partition_t *running_partition(void)
 {
+    /* A pool runtime may start inside its app partition. The SDK's OTA lookup
+     * need not recognize that offset as a partition start. */
+    size_t physical=spi_flash_cache2phys(esp_app_get_description());
+    if(physical!=SPI_FLASH_CACHE2PHYS_FAIL){
+        esp_partition_iterator_t it=esp_partition_find(ESP_PARTITION_TYPE_APP,ESP_PARTITION_SUBTYPE_ANY,NULL);
+        while(it){
+            const esp_partition_t *part=esp_partition_get(it);
+            if(physical>=part->address && physical-part->address<part->size){
+                esp_partition_iterator_release(it);return part;
+            }
+            it=esp_partition_next(it);
+        }
+    }
     const esp_partition_t *image = esp_ota_get_running_partition();
 #if CONFIG_BOOTLOADER_RESERVE_RTC_MEM
     /* ESP32 RTC FAST memory is accessible only on PRO_CPU. Other callers
@@ -70,10 +87,12 @@ int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
     uint32_t flash_size = 0;
     if (esp_flash_get_size(NULL, &flash_size) != ESP_OK) return XIP_ERR_IO;
     const esp_partition_t *part = running_partition();
+    uint32_t image_base=0,image_span=0;
+    bool have_image=part && running_image_range(part->address,part->size,&image_base,&image_span);
     xip_cbor_map(&w, 6);
     uint8_t mac[6];
     if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return XIP_ERR_IO;
-    xip_cbor_uint(&w, 1); xip_cbor_map(&w, part ? 7 : 4);
+    xip_cbor_uint(&w, 1); xip_cbor_map(&w, (part ? 7 : 4)+(have_image ? 2 : 0));
     xip_cbor_uint(&w, 1); xip_cbor_uint(&w, (uint64_t)(esp_timer_get_time() / 1000));
     xip_cbor_uint(&w, 2); xip_cbor_uint(&w, chip.model);
     xip_cbor_uint(&w, 3); xip_cbor_uint(&w, flash_size);
@@ -83,6 +102,10 @@ int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
         xip_cbor_uint(&w, 6); xip_cbor_uint(&w, part->size);
     }
     xip_cbor_uint(&w, 7); xip_cbor_bytes(&w, mac, sizeof(mac));
+    if(have_image){
+        xip_cbor_uint(&w,8);xip_cbor_uint(&w,image_base);
+        xip_cbor_uint(&w,9);xip_cbor_uint(&w,image_span);
+    }
     /* Let each existing encoder use the unused tail of the caller's buffer. */
     xip_cbor_uint(&w, 2);
     if (w.overflow) return XIP_ERR_SIZE;

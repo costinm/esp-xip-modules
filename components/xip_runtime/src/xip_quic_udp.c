@@ -347,14 +347,18 @@ int h_udp_send(void *u,uint32_t handle,const uint8_t *ip,uint16_t port,uint32_t 
      * handle is `ADDR_UDP + fd`; a closed socket never matches. Send and stop both run
      * on the worker, so the fd cannot be closed under this read. */
     if(!mc_state || !ip || (data==NULL && len!=0))return XIP_ERR_ARG;
-    if(handle<XIP_ADDR_UDP)return XIP_ERR_NOTFOUND;
-    int fd=(int)(handle-XIP_ADDR_UDP);
+    if(handle && handle<XIP_ADDR_UDP)return XIP_ERR_NOTFOUND;
+    int fd=handle?(int)(handle-XIP_ADDR_UDP):mc_state->fd;
     /* Both runtime sockets serve module replies: the engine socket (the reply's
      * source is then the QUIC endpoint) and the mc socket. */
     if(fd!=mc_state->fd && (!mutex || !state || fd!=state->fd))return XIP_ERR_NOTFOUND;
     if(len>XIP_PKT_MAX)return XIP_ERR_SIZE;
     struct sockaddr_in6 to={.sin6_family=AF_INET6,.sin6_port=htons(port),.sin6_scope_id=scope};
     memcpy(&to.sin6_addr,ip,16);
+    if (!scope && ip[0]==0xff && ip[1]==2) {
+        esp_netif_t *netif=esp_netif_get_default_netif();
+        if (netif) to.sin6_scope_id=esp_netif_get_netif_impl_index(netif);
+    }
     int n=sendto(fd,data,len,MSG_DONTWAIT,(struct sockaddr *)&to,sizeof(to));
     return n==(int)len?XIP_OK:n<0 && (errno==EAGAIN || errno==EWOULDBLOCK)?XIP_ERR_BUSY:XIP_ERR_IO;
 }

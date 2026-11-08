@@ -116,9 +116,24 @@ void xip_wifi_intent_install(xip_host_hooks_t *h)
                 if (rc == ESP_OK && m >= 9 && m <= sizeof(psk)) {
                     memcpy(desired.sta_ssid, name, n - 1); desired.sta_ssid_len = n - 1;
                     memcpy(desired.sta_psk, psk, m - 1); desired.sta_psk_len = m - 1;
-                    /* the saved credentials predate the `now` flag: keep the station + ESP-NOW the radio ran with */
-                    desired.radio = 1; desired.sta = 1; desired.now = 1;
+                    /* A saved profile supplies credentials; its caller chooses when and how to start the radio. */
                 }
+            }
+        }
+    }
+    /* The legacy provisioning profile is also a saved input, not a radio policy.
+     * Modules can activate it through wifi.get/set without reading a secret NV key. */
+    if (!desired.sta_ssid_len) {
+        nvs_handle_t saved;
+        if (nvs_open("wl", NVS_READONLY, &saved) == ESP_OK) {
+            char ssid[33] = {0}, psk[64] = {0};
+            size_t n=sizeof(ssid), m=sizeof(psk);
+            esp_err_t rc=nvs_get_str(saved,"ssid",ssid,&n);
+            if (nvs_get_str(saved,"psk",psk,&m)!=ESP_OK) m=1;
+            nvs_close(saved);
+            if (rc==ESP_OK && n>1 && n<=sizeof(ssid) && m<=sizeof(psk)) {
+                memcpy(desired.sta_ssid,ssid,n-1); desired.sta_ssid_len=n-1;
+                memcpy(desired.sta_psk,psk,m-1); desired.sta_psk_len=m-1;
             }
         }
     }

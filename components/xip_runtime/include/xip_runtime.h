@@ -207,7 +207,7 @@ void xip_quic_rx_set(const xip_quic_rx_ops *ops);
  *    entry hands the packet to the `local` callback (ownership passes: it must release it with xip_quic_pkt_release or pass it on with
  *    xip_quic_pkt_send). A RELAY entry forwards the same pool packet to its link and peer address with the DCID replaced (forward or drop and count: no queue, no retransmission). Unknown DCID: offered to the attached module endpoint, otherwise dropped and counted;
  *  - LONG header, version XIP_QUIC_VERSION_CBOR (0x444d0002): after the SCID comes the CBOR envelope {1: component, 2: method, 3: id, 5: fields}. It
- *    goes to the module claiming its component in manifest key 12, or to the module of that component if it has a datagram port or hosts a table; otherwise to the
+ *    goes to the module claiming its component in manifest key 13 (or hosting it as its own tag), or to the module of that component if it has a datagram port or hosts a table; otherwise to the
  *    console module (component 20), which serves console and native methods. This is the only place an envelope is parsed: the runtime parses it
  *    (xip_envelope.h) and the handler gets an ordinary request, XIP_CALL_ENVELOPE; module ports deliver raw frames. The module's answer to the link and token it came from is sent as a 0x444d0002 long packet (DCIDs
  *    swapped), within XIP_QUIC_REPLY_MS;
@@ -264,6 +264,15 @@ typedef struct {
  * last handler call returned (XIP_RET_DONE or an error), 0 after a STOP, or XIP_ERR_* for a host failure. */
 typedef void (*xip_done_fn)(void *ctx, int result, const xip_stats_t *stats);
 
+/* Most wire components one module may claim in manifest key 13 (the envelope owners). */
+#define XIP_WIRE_MAX 8
+
+/* One wire component claimed by a module (manifest key 13: an array of [id, version] pairs). `id` is a positive int32, `version` a uint32; id 0 = unused. */
+typedef struct {
+    int32_t id;
+    uint32_t version;
+} xip_wire_component_t;
+
 typedef struct {
     xip_handle_fn handler;
     uint32_t state_bytes;          /* zeroed state block passed to every call (<= 4096) */
@@ -275,7 +284,7 @@ typedef struct {
     char components[XIP_COMPONENTS_MAX][16];   /* manifest key 11: names of the components the module hosts (copied); "" = unused. get_component(name) falls
                                     * through to the running module that hosts it: the caller gets a table of runtime thunks that take the global module
                                     * lock, call the module's function with the module's context, and return XIP_ERR_NOTFOUND once the module is gone. */
-    int32_t envelope_components[XIP_COMPONENTS_MAX]; /* manifest key 12: additional envelope component IDs; zero = unused. */
+    xip_wire_component_t wire[XIP_WIRE_MAX];   /* manifest key 13: additional wire components (envelope owners) with their versions; id 0 = unused. */
 } xip_instance_config_t;
 
 /* `name` (copied, <= 15 bytes) is used in logs and as the settings namespace "em_<name>". The instance is idle until
@@ -406,6 +415,8 @@ void xip_serial_rearm(void);
 
 /* High-water mark of the worker task's stack, bytes. */
 uint32_t xip_host_stack_high_water(void);
+/* Rust panic quarantine, retained across software restarts until power-on. */
+bool xip_module_panicked(const char *name);
 void xip_instance_stats(const xip_instance_t *inst, xip_stats_t *out);
 
 #ifdef __cplusplus

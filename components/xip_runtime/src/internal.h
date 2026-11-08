@@ -14,7 +14,7 @@
 #define XIP_IRQ_SLOTS 8
 #define XIP_SPI_DEVICES 4
 #define XIP_ALARMS 8
-#define XIP_MAX_INSTANCES 8
+#define XIP_MAX_INSTANCES 16 /* Registry/timer metadata; instance heaps and inboxes stay lazy. */
 
 struct xip_instance;
 typedef struct {
@@ -87,7 +87,7 @@ struct xip_instance {
     char name[16];
     uint32_t id;
     int component;                /* call() address */
-    int32_t envelope_components[XIP_COMPONENTS_MAX]; /* additional envelope owners, manifest key 12 */
+    xip_wire_component_t wire[XIP_WIRE_MAX];       /* additional wire components (envelope owners), manifest key 13; id 0 = unused */
     uint32_t port;                /* the datagram port the manifest binds it to (XIP_PORT_*), 0: none */
     uint32_t stream;              /* its stream port (TCP XIP_PORT_NET + stream), 0: none */
     int slot;                     /* index in the registry */

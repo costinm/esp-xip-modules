@@ -272,7 +272,7 @@ static void adopt(uint32_t page, uint32_t static_addr, uint32_t version)
     st->st.version = version;
 }
 
-/* Look at every page of the partition: a page that starts with an image header holds an image, which spans the pages its size says.
+/* Look at every page of the partition (the extent scan, xip_extent.h): an extent spans the pages its length says; deleted, pending, data and index extents are skipped by it.
  * xip_select() picks the module of each name (the highest version); the others are listed as shadowed. The page an image sits on is
  * of no importance to the chip (docs/abi.md, "Versions and pages"). */
 static int scan(void)
@@ -603,6 +603,9 @@ static int manifest_envelopes(int slot, const xip_dmod_header *h, int32_t ids[XI
 int xip_loader_start(int slot, const uint8_t *request, size_t request_len)
 {
     if (!xip_loader_slot(slot)) return XIP_LOADER_ERR_SLOT;
+    if (xip_module_panicked(em.slots_found[slot].name)) {
+        return XIP_ERR_BUSY;
+    }
     if (request_len && !request) return XIP_ERR_ARG;
     xip_slot_state_t *st = XIP_SLOT_STATE(slot);
     if (st->st.running || st->starting) return XIP_LOADER_ERR_RUNNING;
@@ -917,7 +920,8 @@ int xip_loader_modules_info(uint8_t *out, size_t cap)
         xip_loader_status((int)i, &st);
         size_t shadowed = 0;
         for (size_t k = 0; k < em.shadow_found; k++) shadowed += em.shadows[k].shadowed_by == slot->offset;
-        xip_cbor_map(&w, 13);
+        xip_cbor_map(&w, 14);
+        xip_cbor_uint(&w, 14); xip_cbor_bool(&w, xip_module_panicked(slot->name));
         xip_cbor_uint(&w, 1); xip_cbor_text(&w, slot->name, strlen(slot->name));
         xip_cbor_uint(&w, 2); xip_cbor_uint(&w, slot->tag);
         xip_cbor_uint(&w, 3); xip_cbor_bool(&w, st.installed);

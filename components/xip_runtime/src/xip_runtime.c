@@ -450,25 +450,7 @@ int xip_serial_rx_begin(uint32_t port, xip_link_rx_buf *buf) { return xip_port_r
 void xip_serial_rx_commit(uint32_t port, const xip_link_rx_buf *buf, size_t len) { xip_port_rx_commit(serial_link, port, buf, len, port); }
 void xip_serial_rx_abort(const xip_link_rx_buf *buf) { xip_port_rx_abort(buf); }
 
-static int port_bind(struct xip_instance *in)
-{
-    if (!in->component) return XIP_ERR_ARG;
-    int rc = XIP_OK;
-    portENTER_CRITICAL(&registry_lock);
-    int free_at = -1;
-    bool already_bound = false;
-    for (int i = 0; i < XIP_PORTS_MAX; i++) {
-        if (ports[i].port == in->port && ports[i].component != in->component) rc = XIP_ERR_BUSY;
-        if (ports[i].port == in->port && ports[i].component == in->component) already_bound = true;
-        if (!ports[i].port && free_at < 0) free_at = i;
-    }
-    if (!rc && !already_bound && free_at < 0) rc = XIP_ERR_NOMEM;
-    if (!rc && !already_bound) { ports[free_at].port = in->port; ports[free_at].component = in->component; }
-    portEXIT_CRITICAL(&registry_lock);
-    if (rc) return rc;
-    /* the serial link was registered at xip_host_init: binding a port only routes records to it */
-    return XIP_OK;
-}
+#include "port_bind.inc"
 
 static struct xip_instance *by_component(int component, const struct xip_instance *except)
 {
@@ -480,8 +462,9 @@ static struct xip_instance *by_component(int component, const struct xip_instanc
     return found;
 }
 
-/* A manifest may assign additional wire components to one module. These do
- * not change its lifecycle/event address or require the debug console. */
+/* A manifest may assign additional wire components to one module (key 13). These do
+ * not change its lifecycle/event address or require the debug console. A module's own
+ * tag also routes here, so every module-to-module lookup goes through this one function. */
 static struct xip_instance *envelope_target(int component)
 {
     struct xip_instance *found = NULL;
@@ -489,8 +472,8 @@ static struct xip_instance *envelope_target(int component)
     for (int i = 0; i < XIP_MAX_INSTANCES && !found; i++) {
         struct xip_instance *in = registry[i];
         if (!in) continue;
-        for (int c = 0; c < XIP_COMPONENTS_MAX; c++)
-            if (in->envelope_components[c] == component) { found = in; break; }
+        for (int c = 0; c < XIP_WIRE_MAX; c++)
+            if (in->wire[c].id && in->wire[c].id == component) { found = in; break; }
         if (!found && in->component == component) found = in;
     }
     portEXIT_CRITICAL(&registry_lock);
@@ -622,8 +605,8 @@ static struct xip_instance *request_target(int component,uint32_t port,int *erro
         }
     }
     if(!in && rc==XIP_ERR_NOTFOUND && component>0 && component!=QUIC_CONSOLE_COMPONENT){
-        in=by_component(QUIC_CONSOLE_COMPONENT,NULL);
-        if(!in && hooks.request_start){rc=hooks.request_start(QUIC_CONSOLE_COMPONENT,0);if(!rc)in=by_component(QUIC_CONSOLE_COMPONENT,NULL);}
+        in=envelope_target(QUIC_CONSOLE_COMPONENT);
+        if(!in && hooks.request_start){rc=hooks.request_start(QUIC_CONSOLE_COMPONENT,0);if(!rc)in=envelope_target(QUIC_CONSOLE_COMPONENT);}
     }
     if(in){rc=instance_start_result(in);if(rc<0)in=NULL;}
     *error=in?0:rc<0?rc:XIP_ERR_NOTFOUND;
@@ -716,6 +699,8 @@ static void components_publish(struct xip_instance *in)
     }
 }
 
+#include "module_panic.inc"
+
 static const void *h_get_component(void *user, const char *name)
 {
     (void)user; /* Requester context; native component functions take no extra argument. */
@@ -723,6 +708,7 @@ static const void *h_get_component(void *user, const char *name)
     extern const xip_identity *xip_identity_component(void);
     extern const xip_native *xip_native_component(void);
     if (!name) return NULL;
+    if (!strcmp(name, "module-panic")) return &module_panic_service;
     if (!strcmp(name, "serial")) return xip_serial_component();
     if (strcmp(name, "crypto") == 0) return xip_crypto_component();
     if (strcmp(name, "identity") == 0) return xip_identity_component();
@@ -790,20 +776,8 @@ static int h_reset(void *user)
 }
 
 /* ---- the managed heap: a module frees what it took before it stops, and the host checks the balance ---- */
-static void *h_mem_alloc(void *user, size_t size)
-{
-    /* Leave 32 KiB for the host. This checks current heap availability; other
-     * firmware allocations can still consume that margin later. */
-    const size_t margin = 32768;
-    size_t available = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
-    if (available <= margin || size > available - margin) return NULL;
-    void *ptr = xip_mem_alloc(&I(user)->mem, size);
-    if (ptr && heap_caps_get_free_size(MALLOC_CAP_DEFAULT) < margin) {
-        xip_mem_free(&I(user)->mem, ptr);
-        return NULL;
-    }
-    return ptr;
-}
+#include "module_alloc.inc"
+
 static int h_mem_free(void *user, void *ptr) { return xip_mem_free(&I(user)->mem, ptr) == 0 ? XIP_OK : XIP_ERR_ARG; }
 
 /* ---- packets (include/xip.h, PKT): the C pool, and what each module holds ---- */
@@ -1160,7 +1134,7 @@ static int h_send(void *user, uint32_t pkt, size_t len, uint32_t dst, int compon
             }
         }
     } else {
-        struct xip_instance *t = by_component((int)dst, NULL);
+        struct xip_instance *t = envelope_target((int)dst);
         if(!t && component==(int)dst && method>0){int activation=0;t=request_target(component,0,&activation);if(!t){drop_slot(e.slot);return activation;}}
         /* the answer to an envelope request that came from a module (ADDR_ENVELOPE): wrapped as for a datagram, in front of the payload */
         xip_env_slot es;
@@ -2598,10 +2572,10 @@ void xip_host_wifi_changed(uint32_t generation)
 xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_t *cfg)
 {
     if (!inited || !name || !*name || !cfg || !cfg->handler || cfg->state_bytes > 4096) return NULL;
-    for (int a = 0; a < XIP_COMPONENTS_MAX; a++) {
-        const int component = cfg->envelope_components[a];
-        if (component < 0 || (component && component == cfg->component)) return NULL;
-        for (int b = 0; component && b < a; b++) if (cfg->envelope_components[b] == component) return NULL;
+    for (int a = 0; a < XIP_WIRE_MAX; a++) {
+        const int32_t id = cfg->wire[a].id;
+        if (id < 0 || (id && id == cfg->component)) return NULL;
+        for (int b = 0; id && b < a; b++) if (cfg->wire[b].id == id) return NULL;
     }
     struct xip_instance *in = calloc(1, sizeof(*in));
     if (!in) return NULL;
@@ -2611,7 +2585,7 @@ xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_
     in->component = cfg->component;
     in->port = cfg->port;
     in->stream = cfg->stream;
-    memcpy(in->envelope_components, cfg->envelope_components, sizeof(in->envelope_components));
+    memcpy(in->wire, cfg->wire, sizeof(in->wire));
     for (int c = 0; c < XIP_COMPONENTS_MAX; c++) strlcpy(in->comps[c].name, cfg->components[c], sizeof(in->comps[c].name));
     xip_mem_init(&in->mem, CONFIG_XIP_MEM_QUOTA ? CONFIG_XIP_MEM_QUOTA : UINT32_MAX);
     in->state = calloc(1, cfg->state_bytes ? cfg->state_bytes : 1);
@@ -2641,11 +2615,11 @@ xip_instance_t *xip_instance_create(const char *name, const xip_instance_config_
     for (int i = 0; i < XIP_MAX_INSTANCES && slot >= 0; i++) {
         struct xip_instance *other = registry[i];
         if (!other) continue;
-        for (int a = 0; a < XIP_COMPONENTS_MAX; a++) {
-            const int own = in->envelope_components[a], theirs = other->envelope_components[a];
+        for (int a = 0; a < XIP_WIRE_MAX; a++) {
+            const int32_t own = in->wire[a].id, theirs = other->wire[a].id;
             if ((own && own == other->component) || (theirs && theirs == in->component)) slot = -1;
-            for (int b = 0; own && b < XIP_COMPONENTS_MAX; b++)
-                if (own == other->envelope_components[b]) slot = -1;
+            for (int b = 0; own && b < XIP_WIRE_MAX; b++)
+                if (own == other->wire[b].id) slot = -1;
         }
     }
     if (slot >= 0) { in->slot = slot; in->id = next_id++; registry[slot] = in; }
