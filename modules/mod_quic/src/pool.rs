@@ -25,16 +25,7 @@ impl Native {
         Ok(Self { hw, table })
     }
     pub fn info(&self) -> Result<PacketPoolInfo, i32> {
-        let mut out = PacketPoolInfo {
-            size: core::mem::size_of::<PacketPoolInfo>() as u32,
-            ..Default::default()
-        };
-        let rc = unsafe { (*self.hw.as_ptr()).pkt_pool_info.ok_or(ERR_UNSUPPORTED)?(self.hw.ctx(), &mut out) };
-        if rc < 0 {
-            Err(rc)
-        } else {
-            Ok(out)
-        }
+        self.hw.pkt_pool_info()
     }
 }
 struct Lease {
@@ -118,17 +109,11 @@ impl PacketPool for Pool {
         let room =
             (info.slot_bytes as usize).checked_sub(start + quic_lite::PACKET_SUFFIX_RESERVE)?;
         let cap = room.min(info.max_packet as usize);
-        let mut handle = 0;
-        let rc = unsafe {
-            (*self.native.hw.as_ptr()).pkt_acquire?(
-                self.native.hw.ctx(),
-                u32::try_from(reserved).ok()?,
-                &mut handle,
-            )
-        };
-        if rc < 0 {
-            return None;
-        }
+        let handle = self
+            .native
+            .hw
+            .pkt_acquire(u32::try_from(reserved).ok()?)
+            .ok()?;
         let buffer = Buffer::owned(self.native, handle).ok()?;
         Some(Writer { buffer, start, cap })
     }

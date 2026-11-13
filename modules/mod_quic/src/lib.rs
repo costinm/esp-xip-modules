@@ -249,7 +249,7 @@ impl Core {
                         &mut out,
                     )
                 };
-                if rc == 1 {
+                if rc >= 0 && out.packet != 0 {
                     let buffer = Buffer::owned(self.pool.native, out.packet)?;
                     let packet = OwnedPacket::new(
                         buffer,

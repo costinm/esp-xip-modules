@@ -26,13 +26,10 @@ impl PacketEgress<Buffer> for Bearer {
         let submission=EgressSubmission::from_parts(OwnedPacket::new(buffer,range.clone()).unwrap_or_else(|_|panic!("range")),completion);
         // The protocol retains its immutable reference. The driver owns one
         // additional reference only until it has finished reading the bytes.
-        let Some(tx)=(unsafe {&*self.native.hw.as_ptr()}).pkt_tx else {
-            submission.complete(PacketSendOutcome::Failed,0);return Ok(());
-        };
         if self.native.hw.pkt_keep(h)<0 {
             submission.complete(PacketSendOutcome::Failed,0);return Ok(());
         }
-        let rc=unsafe {tx(self.native.hw.ctx(),h,range.start as u32,(range.end-range.start) as u32,bridge.link,peer.value())};
+        let rc=self.native.hw.pkt_tx(h,range.start as u32,(range.end-range.start) as u32,bridge.link,peer.value());
         if rc==ERR_BUSY {
             self.native.hw.pkt_free(h);
             return Err(PacketSubmitError::WouldBlock(submission));
