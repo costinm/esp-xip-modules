@@ -1,0 +1,40 @@
+[package]
+name = "esp-mod-qlink"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Standalone single-stream quic-link endpoint over UDP and PPP serial"
+publish = false
+
+[workspace]
+
+[dependencies]
+xip-abi = { path = "../../crates/xip-abi" }
+quic-link = { git = "https://github.com/costinm/ssh-mesh", default-features = false }
+
+[package.metadata]
+mkmod = "--name qlink --tag 54 --stack 8192 --state 8 --port 242"
+
+[features]
+flat-image = ["xip-abi/global-alloc"]
+sim = ["xip-abi/global-alloc"]
+
+[[bin]]
+name = "mod_qlink"
+required-features = ["flat-image"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+debug = false
+strip = "none"
+
+[dev-dependencies]
+quic-base = { git = "https://github.com/costinm/ssh-mesh", default-features = false, features = ["host-pools"] }
+
+[patch."https://github.com/costinm/ssh-mesh"]
+mesh-api = { path = "../../../rust/ssh-mesh/crates/mesh-api" }
+quic-base = { path = "../../../rust/ssh-mesh/crates/quic-base" }
+quic-link = { path = "../../../rust/ssh-mesh/crates/quic-link" }

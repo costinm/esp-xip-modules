@@ -1,0 +1,40 @@
+[package]
+name = "esp-mod-mux"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "QUIC stream multiplexer endpoint over PPP serial and TCP sockets"
+publish = false
+
+[workspace]
+
+[dependencies]
+xip-abi = { path = "../../crates/xip-abi" }
+quic-mux = { git = "https://github.com/costinm/ssh-mesh", default-features = false }
+
+[package.metadata]
+mkmod = "--name mux --tag 52 --stack 8192 --state 8 --port 245 --stream 4"
+
+[features]
+flat-image = ["xip-abi/global-alloc"]
+sim = ["xip-abi/global-alloc"]
+
+[[bin]]
+name = "mod_mux"
+required-features = ["flat-image"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+debug = false
+strip = "none"
+
+[dev-dependencies]
+quic-base = { git = "https://github.com/costinm/ssh-mesh", default-features = false, features = ["host-pools"] }
+
+[patch."https://github.com/costinm/ssh-mesh"]
+mesh-api = { path = "../../../rust/ssh-mesh/crates/mesh-api" }
+quic-base = { path = "../../../rust/ssh-mesh/crates/quic-base" }
+quic-mux = { path = "../../../rust/ssh-mesh/crates/quic-mux" }
