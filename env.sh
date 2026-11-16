@@ -46,14 +46,16 @@ _em_cli_bin=""
 export PATH="${XIP_DEV_BIN:+$XIP_DEV_BIN:}${_em_cli_bin}${_em_path#:}${_em_path:+:}/usr/bin:/bin:$PATH"
 unset _em_cli_bin
 unset _em_path _em_d
-# Service catalogs (tools.json per service) for `mesh` and `dmesh-cli`: the dmesh build installs them (flake.nix, dmesh-cli package).
+# Service catalogs (api.cbor / tools.json per service) for `mesh` and `dmesh-cli`: the dmesh build installs them (flake.nix, dmesh-cli package).
 if [ -z "${MESH_SCHEMA_DIR:-}" ] || [ "$MESH_SCHEMA_DIR" = "$_em_target/nix/dmesh/etc/schemas" ] || [ "$MESH_SCHEMA_DIR" = "$ESP_DEV-dmesh/etc/schemas" ]; then
-    if [ -d "$_em_target/local/dmesh-cli/etc/schemas" ]; then
+    if [ -d "$_em_target/local/dmesh-cli/etc/schemas" ] && [ -f "$_em_target/local/dmesh-cli/etc/schemas/xip-flash/api.cbor" ]; then
         export MESH_SCHEMA_DIR="$_em_target/local/dmesh-cli/etc/schemas"
-    elif [ -d "$ESP_DEV-dmesh/etc/schemas" ]; then
+    elif [ -d "$ESP_DEV-dmesh/etc/schemas" ] && [ -f "$ESP_DEV-dmesh/etc/schemas/xip-flash/api.cbor" ]; then
         export MESH_SCHEMA_DIR="$ESP_DEV-dmesh/etc/schemas"
-    elif [ -d "$_em_target/nix/dmesh/etc/schemas" ]; then
+    elif [ -d "$_em_target/nix/dmesh/etc/schemas" ] && [ -f "$_em_target/nix/dmesh/etc/schemas/xip-flash/api.cbor" ]; then
         export MESH_SCHEMA_DIR="$_em_target/nix/dmesh/etc/schemas"
+    elif [ -d "$XIP_REPO/api/generated/schemas" ]; then
+        export MESH_SCHEMA_DIR="$XIP_REPO/api/generated/schemas"
     fi
 fi
 

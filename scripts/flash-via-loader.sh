@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install our Main or a module on a device over Wi-Fi with the TOOLS OF THE OLD LOADER PROJECT (esp-wifi-loader), which sign.
-# This is the only script of this repository that needs that project (docs: notes/docs/flash-via-loader.md).
+# This is the only script of this repository that needs that project (see docs/flashing.md, "The loader Wi-Fi path").
 #   scripts/flash-via-loader.sh [options] main FILE.bin | module NAME FILE.dmod | loader FILE.bin | stage2 FILE.bin
 #     --loader DIR    the checkout of esp-wifi-loader (or $ESP_WIFI_LOADER_DIR)
 #     --key FILE      private key (PEM); default: a key created in target/flash-via-loader.pem (the first package pins its public key)

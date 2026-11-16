@@ -58,6 +58,17 @@ def static_address(chip, slot):
     return dmod.STATIC_BASES[chip] + slot * dmod.STATIC_SLOT_BYTES
 
 
+# Mutually exclusive QUIC transport modules share the QUIC window range (9..12):
+# a device installs mod_quic2 (9 2), mod_qlink (9), or mod_mux (11) (never a combination).
+MUTUALLY_EXCLUSIVE_GROUPS = (
+    frozenset(("mod_quic2", "mod_qlink", "mod_mux")),
+)
+
+
+def _mutually_exclusive(a, b):
+    return any(a in group and b in group for group in MUTUALLY_EXCLUSIVE_GROUPS)
+
+
 def read_slot_layout(path=None):
     """name start [span] registry. Span reserves consecutive 64 KiB windows;
     only the first slot supplies the allocator/state RAM cell."""
@@ -76,9 +87,10 @@ def read_slot_layout(path=None):
             if name in layout or span < 1 or start + span > dmod.STATIC_SLOTS:
                 raise ValueError(f"{path}:{n}: invalid or duplicate slot range for {name}")
             for slot in range(start, start + span):
-                if slot in occupied:
-                    raise ValueError(f"{path}:{n}: {name} overlaps {occupied[slot]} at slot {slot}")
-                occupied[slot] = name
+                for prev in occupied.get(slot, ()):
+                    if not _mutually_exclusive(name, prev):
+                        raise ValueError(f"{path}:{n}: {name} overlaps {prev} at slot {slot}")
+                occupied.setdefault(slot, []).append(name)
             layout[name] = (start, span)
     return layout
 
@@ -382,7 +394,7 @@ def build(chip, out, name=None, tag=None, slot=0, stack=8192, state=0, keep_elf=
     if slot + span > min(dmod.STATIC_SLOTS, cfg["slots"]):
         sys.exit(f"module span exceeds the virtual window of {chip} ({cfg['slots']} slots)")
     for other, (start, count) in layout.items():
-        if other != module_key and slot < start + count and start < slot + span:
+        if other != module_key and not _mutually_exclusive(module_key, other) and slot < start + count and start < slot + span:
             sys.exit(f"module slot range overlaps {other}: {slot}..{slot + span - 1}")
     capacity = span * WINDOW_SLOT
     tool = cfg["prefix"] + "-"

@@ -17,31 +17,30 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
-# mesh-api-gen comes from the ssh-mesh flake (the `deps` profile puts it on PATH); the function-table passes below need a version with
-# --vtable-conf (a checkout of ssh-mesh: XIP_DEV_BIN=/ws/ssh-mesh/target/debug . ./env.sh).
+# mesh-api-gen comes from the ssh-mesh flake (the `deps` profile puts it on PATH); the XIP table/catalog passes below need a version with
+# --out-xip-vtable / --out-console-native-rs (a checkout of ssh-mesh: XIP_DEV_BIN=/ws/rust/ssh-mesh/target/x86_64-unknown-linux-musl/debug . ./env.sh).
 gen=$(command -v mesh-api-gen || true)
 [ -n "$gen" ] || { echo "mesh-api-gen not found: run scripts/esp-deps.sh (nix build .#esp-dev --out-link \$ESP_DEV) and . ./env.sh" >&2; exit 1; }
-"$gen" --help | grep -q -- --vtable-conf || { echo "$gen is too old (no --vtable-conf): build ssh-mesh's crates/mesh-api-gen and put it first with XIP_DEV_BIN" >&2; exit 1; }
+"$gen" --help | grep -q -- --out-xip-vtable || { echo "$gen is too old (no --out-xip-vtable): build ssh-mesh's crates/mesh-api-gen and put it first with XIP_DEV_BIN" >&2; exit 1; }
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' || { echo "python3 $(python3 --version) is too old: use the one of the flake (scripts/esp-deps.sh, then . ./env.sh)" >&2; exit 1; }
 
 # the table of each component a module hosts, and the module's glue for it, from the module's API.md and the C types it names
-#   crates/xip-abi/src/ble_vtable.rs, modules/mod_ble/src/api_gen.rs   (tools/gen_vtables.py)
-python3 tools/gen_vtables.py --api modules/mod_ble/API.md --types crates/xip-abi/src/ble.rs \
-    --abi-out crates/xip-abi/src/ble_vtable.rs --module-out modules/mod_ble/src/api_gen.rs
+"$gen" --api modules/mod_ble/API.md --xip-types crates/xip-abi/src/ble.rs \
+    --out-xip-vtable crates/xip-abi/src/ble_vtable.rs --out-xip-module modules/mod_ble/src/api_gen.rs
 
-python3 tools/gen_vtables.py --api modules/mod_nan/API.md --types crates/xip-abi/src/nan.rs --local-only \
-    --abi-out crates/xip-abi/src/nan_vtable.rs --module-out modules/mod_nan/src/api_gen.rs
+"$gen" --api modules/mod_nan/API.md --xip-types crates/xip-abi/src/nan.rs --xip-local-only \
+    --out-xip-vtable crates/xip-abi/src/nan_vtable.rs --out-xip-module modules/mod_nan/src/api_gen.rs
 
-python3 tools/gen_vtables.py --api modules/mod_lora/API.md --types crates/xip-abi/src/lib.rs --local-only \
-    --abi-out crates/xip-abi/src/lora_vtable.rs --module-out modules/mod_lora/src/api_gen.rs
+"$gen" --api modules/mod_lora/API.md --xip-types crates/xip-abi/src/lib.rs --xip-local-only \
+    --out-xip-vtable crates/xip-abi/src/lora_vtable.rs --out-xip-module modules/mod_lora/src/api_gen.rs
 
 # (the device-control methods 5-8, 10-11 are CBOR-only: the table and its adapter have the diagnostics 1-3 alone)
-python3 tools/gen_vtables.py --api crates/sys/API.md --types crates/xip-abi/src/sys.rs --table-methods heap,heap_dump,dump_tasks \
-    --abi-out crates/xip-abi/src/sys_vtable.rs --module-out crates/sys/src/api_gen.rs
+"$gen" --api crates/sys/API.md --xip-types crates/xip-abi/src/sys.rs --xip-table-methods heap,heap_dump,dump_tasks \
+    --out-xip-vtable crates/xip-abi/src/sys_vtable.rs --out-xip-module crates/sys/src/api_gen.rs
 
 # Power keeps its native runtime table; NAN owns its selected generated wire methods.
-python3 tools/gen_vtables.py --api modules/mod_nan/API.md --types crates/xip-abi/src/power.rs \
-    --dispatch-only --methods powerinfo,powersleep,dump_locks --module-out modules/mod_nan/src/power_gen.rs
+"$gen" --api modules/mod_nan/API.md --xip-types crates/xip-abi/src/power.rs \
+    --xip-dispatch-only --xip-methods powerinfo,powersleep,dump_locks --out-xip-module modules/mod_nan/src/power_gen.rs
 
 # the C header
 (cd crates/xip-abi && cbindgen --config cbindgen.toml --crate xip-abi 2>/dev/null) | sed 's/\bxip_\([A-Z]\)/XIP_\1/g' > include/xip.h
@@ -63,32 +62,31 @@ for src in api/*.API.md; do
 done
 
 # The sys component's native dispatch needs native component layouts, not a text/name catalog.
-"$gen" --api api/wifi.API.md --rustdoc "$layout" --pointer-width 4 --out-console-native "$tmp/native.h"
-python3 tools/catalog_rs.py "$tmp/native.h" > crates/sys/src/tables.rs
+"$gen" --api api/wifi.API.md --rustdoc "$layout" --pointer-width 4 --out-console-native-rs crates/sys/src/tables.rs
 
 # A module's own API.md is modules/<name>/API.md. The components a module composes are crates (crates/<name>/API.md, the title
 # `# \`name\` API (id)`): they get no manifest, the module packs its own.
 for api in modules/*/API.md; do
+    head -1 "$api" | grep -qE '^# `[a-z0-9_-]+` API \([0-9]+\)$' || continue
     "$gen" --api "$api" --out-manifest "${api%.md}.manifest"
-done
-for api in crates/*/API.md; do
-    [ -f "$api" ] || continue
-    head -1 "$api" | grep -qE '^# `[a-z0-9_-]+` API \([0-9]+\)$' || { echo "$api: the title must be # \`name\` API (id)" >&2; exit 1; }
 done
 
 # the service catalogs for mesh clients (mesh, dmesh-cli): one directory per component or module, as `mesh::catalog` resolves them
 # ($MESH_SCHEMA_DIR/<service>/ or <prefix>/etc/schemas); checked in, and installed by the flake's dmesh-cli package.
-#   api/generated/schemas/xip-<name>/{tools.json,schema.json}
+#   api/generated/schemas/xip-<name>/{api.cbor,tools.json,schema.json}
 # The scan takes crates/*/API.md (any component crate with that title) as well. Discovering the API.md of dependency crates (a crate that
 # arrives from another repository as a Cargo git dependency) through `cargo metadata` is future work: until then such a crate is listed here.
 rm -rf api/generated/schemas
 for api in api/*.API.md modules/*/API.md crates/*/API.md; do
     [ -f "$api" ] || continue
+    head -1 "$api" | grep -qE '^# `[a-z0-9_-]+` API \([0-9]+\)$' || continue
     case "$api" in
         api/*) name=$(basename "$api" .API.md) ;;
         crates/*) name=$(basename "$(dirname "$api")") ;;
         *) name=$(basename "$(dirname "$api")"); name=${name#mod_} ;;
     esac
     mkdir -p "api/generated/schemas/xip-$name"
-    "$gen" --api "$api" --out-tools "api/generated/schemas/xip-$name/tools.json" --out-schema "api/generated/schemas/xip-$name/schema.json"
+    "$gen" --api "$api" --rustdoc "$layout" --pointer-width 4 \
+        --out-api-cbor "api/generated/schemas/xip-$name/api.cbor" \
+        --out-tools "api/generated/schemas/xip-$name/tools.json" --out-schema "api/generated/schemas/xip-$name/schema.json"
 done

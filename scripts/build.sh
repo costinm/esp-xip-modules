@@ -101,7 +101,12 @@ for cpu in $cpus; do
                 if [ $rc == 3 ]; then continue; fi
                 [ $rc == 0 ] || exit $rc
             fi
-            [[ $part != all ]] || echo "$mod $(python3 -c "import sys; sys.path.insert(0, 'tools'); import mkmod; print(mkmod.read_slots()['$mod'])")" >> $out/modules.list
+            # Exclude single-layer alternatives (mod_qlink, mod_mux) from the default all-module flash layout;
+            # mod_quic2 is the default combined QUIC module.
+            case "$mod" in mod_qlink|mod_mux) ;; *)
+                [[ $part != all ]] || echo "$mod $(python3 -c "import sys; sys.path.insert(0, 'tools'); import mkmod; print(mkmod.read_slots()['$mod'])")" >> $out/modules.list
+                ;;
+            esac
         done
     fi
     # The complete build also emits an optional placement report; partial builds

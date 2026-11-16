@@ -67,11 +67,18 @@ class Dmod(unittest.TestCase):
                     mkmod.static_address(chip, bad_slot)
 
     def test_the_slot_registry_is_unique_and_covers_every_module(self):
+        layout = mkmod.read_slot_layout()
         slots = mkmod.read_slots()
-        self.assertEqual(len(set(slots.values())), len(slots))
-        import glob
-        for directory in glob.glob(os.path.join(ROOT, "modules", "mod_*")):
-            self.assertIn(os.path.basename(directory), slots)
+        self.assertEqual(layout["mod_quic2"], (9, 2))
+        self.assertEqual(layout["mod_qlink"], (9, 1))
+        self.assertEqual(layout["mod_mux"], (10, 1))
+        for a, (a_start, a_span) in layout.items():
+            for b, (b_start, b_span) in layout.items():
+                if a != b and not mkmod._mutually_exclusive(a, b):
+                    self.assertFalse(a_start < b_start + b_span and b_start < a_start + a_span, f"{a} overlaps {b}")
+        budgets = json.loads(read("modules", "retained-memory.json"))
+        for module in budgets:
+            self.assertIn(module, slots)
         with tempfile.TemporaryDirectory() as d:
             for text in ("a 1\nb 1\n", "a 1\na 2\n", "a 64\n", "a\n"):
                 path = os.path.join(d, "SLOTS")
@@ -283,12 +290,18 @@ class Manifest(unittest.TestCase):
 
 
 class GenVtables(unittest.TestCase):
-    """tools/gen_vtables.py: the table and the glue of a hosted component, from its API.md and the C types."""
+    """mesh-api-gen --out-xip-vtable/--out-xip-module: the table and the glue of a hosted component, from its API.md and the C types."""
+
+    def _gen_bin(self):
+        gen = shutil.which("mesh-api-gen")
+        if not gen:
+            self.fail("mesh-api-gen not found on PATH")
+        return gen
 
     def run_tool(self, api, types, directory):
         abi, mod = os.path.join(directory, "abi.rs"), os.path.join(directory, "mod.rs")
-        subprocess.run([sys.executable, os.path.join(ROOT, "tools/gen_vtables.py"), "--api", api, "--types", types,
-                        "--abi-out", abi, "--module-out", mod], check=True, capture_output=True, cwd=ROOT)
+        subprocess.run([self._gen_bin(), "--api", api, "--xip-types", types,
+                        "--out-xip-vtable", abi, "--out-xip-module", mod], check=True, capture_output=True, cwd=ROOT)
         return Path(abi).read_text(), Path(mod).read_text()
 
     def test_the_checked_in_files_are_what_the_tool_writes(self):
@@ -300,9 +313,9 @@ class GenVtables(unittest.TestCase):
     def test_power_dispatch_preserves_native_abi_and_excludes_trace_tables(self):
         with tempfile.TemporaryDirectory() as d:
             mod = os.path.join(d, "power.rs")
-            subprocess.run([sys.executable, os.path.join(ROOT, "tools/gen_vtables.py"),
-                            "--api", "modules/mod_nan/API.md", "--types", "crates/xip-abi/src/power.rs",
-                            "--dispatch-only", "--methods", "powerinfo,powersleep,dump_locks", "--module-out", mod], check=True, capture_output=True, cwd=ROOT)
+            subprocess.run([self._gen_bin(),
+                            "--api", "modules/mod_nan/API.md", "--xip-types", "crates/xip-abi/src/power.rs",
+                            "--xip-dispatch-only", "--xip-methods", "powerinfo,powersleep,dump_locks", "--out-xip-module", mod], check=True, capture_output=True, cwd=ROOT)
             glue = Path(mod).read_text()
         self.assertEqual(glue, read("modules", "mod_nan", "src", "power_gen.rs"))
         self.assertIn("w.map(27)", glue)
@@ -338,8 +351,8 @@ class GenVtables(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             types = os.path.join(d, "ble.rs")
             Path(types).write_text(read("crates", "xip-abi", "src", "ble.rs").replace("pub paired: u8,", "pub renamed: u8,"))
-            r = subprocess.run([sys.executable, os.path.join(ROOT, "tools/gen_vtables.py"), "--api", os.path.join(ROOT, "modules/mod_ble/API.md"),
-                                "--types", types, "--abi-out", os.path.join(d, "a.rs"), "--module-out", os.path.join(d, "m.rs")], capture_output=True, text=True)
+            r = subprocess.run([self._gen_bin(), "--api", os.path.join(ROOT, "modules/mod_ble/API.md"),
+                                "--xip-types", types, "--out-xip-vtable", os.path.join(d, "a.rs"), "--out-xip-module", os.path.join(d, "m.rs")], capture_output=True, text=True)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("paired", r.stderr)
 

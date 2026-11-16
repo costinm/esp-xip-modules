@@ -94,7 +94,7 @@ if [[ $what == ci-runtime || $what == all ]]; then
 fi
 if [[ $what == rust || $what == runtime || $what == ci-runtime || $what == all ]]; then
     # the crates and the Rust modules: logic on a PC (the images are built by scripts/build.sh with the esp toolchain)
-    module_crates=(modules/mod_system modules/mod_lora modules/mod_nan modules/mod_disc modules/mod_quic)
+    module_crates=(modules/mod_system modules/mod_lora modules/mod_nan modules/mod_disc modules/mod_quic2 modules/mod_mux)
     module_crates+=(modules/mod_flash)
     RUSTC_BOOTSTRAP=1 cargo test --quiet --manifest-path modules/mod_rtest/Cargo.toml
     for crate in "${module_crates[@]}"; do

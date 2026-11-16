@@ -493,9 +493,9 @@ typedef struct {
   uint32_t version;
   // `sizeof` this table: members past it do not exist.
   uint32_t size;
-  // Local only (no CBOR form, no envelope reaches it): NAN calls this to replace or restore its LoRa/FSK receive role without racing a queued module stop. The borrowed start-format request is validated before stopping existing work; only rx, fsk without payload, and idle are accepted. Success admits asynchronous board initialization, not reception.
+  // Local only (no CBOR form, no envelope reaches it): NAN calls this to replace or restore its LoRa/FSK receive role without racing a queued module stop.
   int (*configure)(void *ctx, const uint8_t *record, size_t len);
-  // Local only (no CBOR form, no envelope reaches it): NAN calls this before coordinated sleep or explicit radio off to synchronously cancel radio work and release SPI, IRQ and power. The mapped module remains callable until explicitly stopped.
+  // Local only (no CBOR form, no envelope reaches it): NAN calls this before coordinated sleep or explicit radio off to synchronously cancel radio work and release SPI, IRQ and power.
   int (*suspend)(void *ctx);
 } xip_lora;
 

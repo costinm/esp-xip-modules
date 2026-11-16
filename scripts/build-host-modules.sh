@@ -13,7 +13,7 @@ mkdir -p $out
 slots=${XIP_WASM_SLOTS:-8}
 # the `sim` feature adds the panic handler and the global allocator of a no_std library
 modules=("$@")
-if [ ${#modules[@]} -eq 0 ]; then modules=(rtest ble system quic disc flash); fi
+if [ ${#modules[@]} -eq 0 ]; then modules=(rtest ble system mux qlink quic2 disc flash); fi
 for m in "${modules[@]}"; do
     [[ "$m" =~ ^[a-z0-9_]+$ && -f modules/mod_$m/Cargo.toml ]] || { echo "unknown module: $m" >&2; exit 2; }
     for s in $(seq 1 "$slots"); do
