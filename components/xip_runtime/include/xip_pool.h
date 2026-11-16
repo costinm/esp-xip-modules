@@ -47,6 +47,9 @@ void xip_pool_set_policy(xip_pool *pool, uint16_t keep, size_t (*free_heap)(void
 void xip_pool_set_keep(xip_pool *pool, uint16_t keep);
 /* Give back the storage of idle slots beyond `keep` (after the policy was lowered). */
 void xip_pool_trim(xip_pool *pool);
+/* Pressure reclaim: release at least `bytes` of idle cached storage when available,
+ * regardless of keep. Never touches a live lease; external pools return 0. */
+size_t xip_pool_reclaim(xip_pool *pool, size_t bytes);
 /* Slots that hold storage now. */
 uint16_t xip_pool_allocated(const xip_pool *pool);
 

@@ -930,7 +930,11 @@ int xip_loader_modules_info(uint8_t *out, size_t cap)
         xip_loader_status((int)i, &st);
         size_t shadowed = 0;
         for (size_t k = 0; k < em.shadow_found; k++) shadowed += em.shadows[k].shadowed_by == slot->offset;
-        xip_cbor_map(&w, 14);
+        uint32_t heap_used, heap_quota;
+        xip_instance_memory(running_instance((int)i), &heap_used, &heap_quota);
+        xip_cbor_map(&w, 16);
+        xip_cbor_uint(&w, 15); xip_cbor_uint(&w, heap_used);
+        xip_cbor_uint(&w, 16); xip_cbor_uint(&w, heap_quota);
         xip_cbor_uint(&w, 14); xip_cbor_bool(&w, xip_module_panicked(slot->name));
         xip_cbor_uint(&w, 1); xip_cbor_text(&w, slot->name, strlen(slot->name));
         xip_cbor_uint(&w, 2); xip_cbor_uint(&w, slot->tag);

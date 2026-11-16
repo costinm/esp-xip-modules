@@ -8,6 +8,7 @@
 #   include/xip.h                         the C header (cbindgen)
 # From api/*.API.md, modules/*/API.md and crates/*/API.md (mesh-api-gen) and the layout of the types (rustdoc's JSON of xip-abi):
 #   api/generated/<name>.api.json         the full-fidelity form of each API (docs, enums, the C layout of types and functions)
+#   target/schemas/xip-<name>/<VERSION>/tools.json   the service catalogs for mesh clients (build artifact, not checked in)
 #   modules/<name>/API.manifest           the module's name, component and API catalog (tools/mkmod.py packs only keys 1 and 2 into an image)
 #   crates/<name>/API.md                  a component crate (sys, hw): its API, no manifest (a module packs its own)
 #   crates/sys/src/tables.rs              the sys component's native component layouts and functions
@@ -24,6 +25,7 @@ gen=$(command -v mesh-api-gen || true)
 "$gen" --help | grep -q -- --out-xip-vtable || { echo "$gen is too old (no --out-xip-vtable): build ssh-mesh's crates/mesh-api-gen and put it first with XIP_DEV_BIN" >&2; exit 1; }
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' || { echo "python3 $(python3 --version) is too old: use the one of the flake (scripts/esp-deps.sh, then . ./env.sh)" >&2; exit 1; }
 
+if [[ ${1:-} != --schemas-only ]]; then
 # the table of each component a module hosts, and the module's glue for it, from the module's API.md and the C types it names
 "$gen" --api modules/mod_ble/API.md --xip-types crates/xip-abi/src/ble.rs \
     --out-xip-vtable crates/xip-abi/src/ble_vtable.rs --out-xip-module modules/mod_ble/src/api_gen.rs
@@ -71,11 +73,6 @@ for api in modules/*/API.md; do
     "$gen" --api "$api" --out-manifest "${api%.md}.manifest"
 done
 
-# the service catalogs for mesh clients (mesh, dmesh-cli): one directory per component or module, as `mesh::catalog` resolves them
-# ($MESH_SCHEMA_DIR/<service>/ or <prefix>/etc/schemas); checked in, and installed by the flake's dmesh-cli package.
-#   api/generated/schemas/xip-<name>/{api.cbor,tools.json,schema.json}
-# The scan takes crates/*/API.md (any component crate with that title) as well. Discovering the API.md of dependency crates (a crate that
-# arrives from another repository as a Cargo git dependency) through `cargo metadata` is future work: until then such a crate is listed here.
 rm -rf api/generated/schemas
 for api in api/*.API.md modules/*/API.md crates/*/API.md; do
     [ -f "$api" ] || continue
@@ -90,3 +87,27 @@ for api in api/*.API.md modules/*/API.md crates/*/API.md; do
         --out-api-cbor "api/generated/schemas/xip-$name/api.cbor" \
         --out-tools "api/generated/schemas/xip-$name/tools.json" --out-schema "api/generated/schemas/xip-$name/schema.json"
 done
+fi
+for api in crates/*/API.md; do
+    [ -f "$api" ] || continue
+    head -1 "$api" | grep -qE '^# `[a-z0-9_-]+` API \([0-9]+\)$' || { echo "$api: the title must be # \`name\` API (id)" >&2; exit 1; }
+done
+
+# the service catalogs for mesh clients (mesh, dmesh-cli): one directory per component or module, as `mesh::catalog` resolves them:
+# `MESH_SCHEMA_DIR/<service>/<VERSION>/` (the resolver takes the highest numeric VERSION), and the package layout `PACKAGE/etc/schemas/`
+# installed by the flake's dmesh-cli package. Not checked in; the build artifact is `target/schemas/xip-<name>/<VERSION>/tools.json`.
+version=${XIP_RUNTIME_VERSION:-$(( $(date +%s) - 1735689600 ))}
+[[ $version =~ ^[0-9]+$ ]] || { echo "XIP_RUNTIME_VERSION must be a number (got $version)" >&2; exit 2; }
+for api in api/*.API.md modules/*/API.md crates/*/API.md; do
+    [ -f "$api" ] || continue
+    head -1 "$api" | grep -qE '^# `[a-z0-9_-]+` API \([0-9]+\)$' || continue
+    case "$api" in
+        api/*) name=$(basename "$api" .API.md) ;;
+        crates/*) name=$(basename "$(dirname "$api")") ;;
+        *) name=$(basename "$(dirname "$api")"); name=${name#mod_} ;;
+    esac
+    mkdir -p "target/schemas/xip-$name/$version"
+    "$gen" --api "$api" --out-tools "target/schemas/xip-$name/$version/tools.json"
+done
+mkdir -p "target/schemas/lmesh/$version"
+cp crates/dmesh-cli/schemas/lmesh/tools.json "target/schemas/lmesh/$version/tools.json"

@@ -419,6 +419,8 @@ uint32_t xip_host_stack_high_water(void);
 /* Rust panic quarantine, retained across software restarts until power-on. */
 bool xip_module_panicked(const char *name);
 void xip_instance_stats(const xip_instance_t *inst, xip_stats_t *out);
+/* Live managed heap counters; zero when the instance no longer exists. */
+void xip_instance_memory(const xip_instance_t *inst, uint32_t *used, uint32_t *quota);
 
 #ifdef __cplusplus
 }

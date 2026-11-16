@@ -242,8 +242,8 @@ mod tests {
 /// Report a module panic without allocating, then let the host restart it in quarantine.
 /// Older hosts still receive a reset request.
 pub fn module_panic(info: &core::panic::PanicInfo) -> ! {
-    struct Message { bytes: [u8; 192], len: usize }
-    impl core::fmt::Write for Message {
+    struct Message<'a> { bytes: &'a mut [u8], len: usize }
+    impl core::fmt::Write for Message<'_> {
         fn write_str(&mut self, text: &str) -> core::fmt::Result {
             let n = text.len().min(self.bytes.len() - self.len);
             self.bytes[self.len..self.len+n].copy_from_slice(&text.as_bytes()[..n]);
@@ -253,7 +253,14 @@ pub fn module_panic(info: &core::panic::PanicInfo) -> ! {
     }
     unsafe {
         if let Some(hw) = Hw::new(context::get() as *const Host) {
-            let mut message = Message { bytes: [0; 192], len: 0 };
+            let mut fallback=[0;192];
+            let packet=hw.pkt_alloc().ok();
+            let storage=packet.and_then(|p|hw.pkt_buf(p).ok());
+            let bytes=match storage {
+                Some((ptr,len))=>core::slice::from_raw_parts_mut(ptr,len.min(768)),
+                None=>&mut fallback[..],
+            };
+            let mut message = Message { bytes, len: 0 };
             use core::fmt::Write;
             let _ = write!(message, "{}", info);
             let name = core::ffi::CStr::from_bytes_with_nul_unchecked(b"module-panic\0");
@@ -263,6 +270,7 @@ pub fn module_panic(info: &core::panic::PanicInfo) -> ! {
                     (service.report)(hw.ctx(), message.bytes.as_ptr(), message.len);
                 }
             }
+            if let Some(p)=packet {hw.pkt_free(p);}
             let _ = hw.reset();
         }
     }

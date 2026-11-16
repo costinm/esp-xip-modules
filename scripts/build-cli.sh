@@ -20,7 +20,15 @@ install -m755 "$cargo_target/$profile/dmesh-cli" "$package/bin/.dmesh-cli-real.n
 mv "$package/bin/.dmesh-cli-real.new" "$package/bin/.dmesh-cli-real"
 rm -rf "$package/etc/schemas"
 mkdir -p "$package/etc/schemas/lmesh"
-cp -r api/generated/schemas/. "$package/etc/schemas/"
+if command -v cbindgen >/dev/null && command -v mesh-api-gen >/dev/null; then
+    scripts/gen.sh
+fi
+if [ -d target/schemas ]; then
+    cp -r target/schemas/. "$package/etc/schemas/"
+fi
+if [ -d api/generated/schemas ]; then
+    cp -r api/generated/schemas/. "$package/etc/schemas/"
+fi
 cp "$ROOT/crates/dmesh-cli/schemas/lmesh/tools.json" "$package/etc/schemas/lmesh/tools.json"
 cat > "$package/bin/dmesh-cli.new" <<'WRAPPER'
 #!/usr/bin/env bash

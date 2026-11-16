@@ -208,7 +208,7 @@ impl Engine {
             });
         }
         let mut matched = false;
-        for item in wire::service_descriptors(data) {
+        for item in wire::service_descriptors_iter(data) {
             if item.service_id == wire::DMESH_SERVICE_ID {
                 matched = true;
             }

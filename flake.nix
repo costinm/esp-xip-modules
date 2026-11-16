@@ -83,6 +83,35 @@
             ];
             meta.priority = 1;
           };
+          # The service catalogs of this repository's components and modules (scripts/gen.sh), published as
+          # <service>/<VERSION>/tools.json. Not checked in: the store build generates them (fixed VERSION for reproducibility)
+          # and the dmesh-cli package installs them under its etc/schemas, the layout `mesh::catalog` searches.
+          xip-schemas = pkgs.stdenvNoCC.mkDerivation {
+            pname = "xip-schemas";
+            version = "0.1.0";
+            src = pkgs.lib.cleanSourceWith {
+              src = ./.;
+              filter = path: type: !(builtins.elem (baseNameOf path) [ "target" ".git" ]);
+            };
+            nativeBuildInputs = [
+              pkgs.python3
+              pkgs.coreutils
+              pkgs.gnugrep
+            ] ++ pkgs.lib.optional (ssh-mesh.packages ? ${system}) ssh-mesh.packages.${system}.mesh-api-gen;
+            XIP_RUNTIME_VERSION = "1";
+            buildPhase = ''
+              runHook preBuild
+              scripts/gen.sh --schemas-only
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/etc/schemas
+              cp -r target/schemas/. $out/etc/schemas/
+              chmod -R u+w $out/etc/schemas
+              runHook postInstall
+            '';
+          };
           # dmesh-cli (crates/dmesh-cli, moved here from DMesh on 2026-10-20): talks to a device over UART/USB with the PPP framing,
           # UDP6 or NAN/NOW. Built from the crates/ workspace (one Cargo.lock); its DMesh libraries are the git dependencies pinned there.
           dmesh-cli = pkgs.rustPlatform.buildRustPackage {
@@ -109,8 +138,9 @@
             postInstall = ''
               mkdir -p "$out/etc"
               cp -r dmesh-cli/schemas "$out/etc/schemas"
-              # the service catalogs of this repository's components and modules (scripts/gen.sh): xip-wifi, xip-power, xip-sys, ...
-              cp -r ${./api/generated/schemas}/. "$out/etc/schemas/"
+              # the service catalogs of this repository's components and modules (scripts/gen.sh): xip-wifi, xip-sys, ...
+              # as <service>/<VERSION>/tools.json, the layout `mesh::catalog` searches (the wrapper's MESH_SCHEMA_DIR root).
+              cp -r ${self.packages.${system}.xip-schemas}/etc/schemas/. "$out/etc/schemas/"
               chmod -R u+w "$out/etc/schemas"
               wrapProgram "$out/bin/dmesh-cli" --set-default MESH_SCHEMA_DIR "$out/etc/schemas"
             '';

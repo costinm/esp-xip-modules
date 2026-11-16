@@ -40,6 +40,10 @@ if [[ $what == c || $what == all ]]; then
     target/test_runtime_range
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_module_panic tests/host/test_module_panic.c
     target/test_module_panic
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_panic_flash tests/host/test_panic_flash.c
+    target/test_panic_flash
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -o target/test_memory_files tests/host/test_memory_files.c
+    target/test_memory_files
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include -o target/test_module_alloc tests/host/test_module_alloc.c components/xip_runtime/src/xip_pool.c
     target/test_module_alloc
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -o target/test_port_bind tests/host/test_port_bind.c
@@ -78,6 +82,8 @@ if [[ $what == c || $what == all ]]; then
     gcc -Wall -Wextra -fsanitize=address,undefined -g -I components/xip_runtime/include -o target/test_pool tests/host/test_pool.c \
         components/xip_runtime/src/xip_pool.c -lpthread
     target/test_pool
+    gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -o target/test_module_pressure tests/host/test_module_pressure.c
+    target/test_module_pressure
     # the PPP codec of the serial line, on a fake pool
     gcc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I include -I components/xip_runtime/include -I tests/host/fake_idf -I tests/host \
         -o target/test_ppp tests/host/test_ppp.c components/xip_runtime/src/xip_ppp.c
@@ -106,6 +112,13 @@ if [[ $what == rust || $what == runtime || $what == ci-runtime || $what == all ]
     cargo test --quiet --locked --manifest-path crates/Cargo.toml --workspace --exclude dmesh-cli
 fi
 if [[ $what == rust || $what == cli || $what == all ]]; then
+    # the catalogs the CLI resolves at runtime (the same search path as mesh-cli): regenerate with a fixed version so
+    # the tests read target/schemas deterministically; without the generators the catalogs must already be there.
+    if command -v cbindgen >/dev/null && command -v mesh-api-gen >/dev/null; then
+        XIP_RUNTIME_VERSION=1 scripts/gen.sh
+    else
+        echo "SKIPPED: catalogs not regenerated (no cbindgen or mesh-api-gen); dmesh-cli tests need target/schemas" >&2
+    fi
     # Collect failures without hiding them behind a presumed dependency diagnosis.
     # Integration targets compile here; hardware cases remain #[ignore].
     if ! cargo test --quiet --locked --manifest-path crates/Cargo.toml -p dmesh-cli; then

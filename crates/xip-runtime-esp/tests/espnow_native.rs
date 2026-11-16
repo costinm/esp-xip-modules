@@ -45,7 +45,6 @@ fn run_native(packets_only:bool) {
     let mut tx=String::new();
     for signature in [
         "static void serial_release(",
-        "static int port_bind(",
         "static void drop_slot(",
         "static xip_packet_ref packet_take(",
         "static int link_tx(",
@@ -56,6 +55,8 @@ fn run_native(packets_only:bool) {
         tx.push_str(&function(&runtime, signature));
         tx.push('\n');
     }
+    tx.push_str(&std::fs::read_to_string(root.join("components/xip_runtime/src/port_bind.inc")).unwrap());
+    tx.push('\n');
     std::fs::write(out.join("runtime_tx.inc"), tx).unwrap();
     std::fs::write(out.join("runtime_init.inc"), function(&runtime, "esp_err_t xip_host_init_simple(")).unwrap();
     std::fs::write(out.join("wifi_monitor.inc"), function(&wifi, "int xip_wifi_owner_monitor(")).unwrap();

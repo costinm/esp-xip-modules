@@ -40,6 +40,7 @@ static void (*during_poll)(void);
 static void *esp_netif_next_unsafe(void *previous) { (void)previous; return netif_up ? (void *)1 : NULL; }
 static void lwip_socket_thread_init(void) { thread_inits++; }
 static void lwip_socket_thread_cleanup(void) { thread_cleanups++; }
+static int lwip_setsockopt(int fd, int level, int opt, const void *val, socklen_t len) { (void)fd; (void)level; (void)opt; (void)val; (void)len; return 0; }
 static int64_t test_io_time(void) { return (int64_t)io_time; }
 static void vSemaphoreDelete(void *lock) { (void)lock; }
 static unsigned tasks, closes, drops, queued;

@@ -22,11 +22,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1792350714,
-        "narHash": "sha256-pCvlTgmqXUuHemHTNlcm37BpGXH/S3hlmEl8hty7Mys=",
+        "lastModified": 1794289352,
+        "narHash": "sha256-eKeouwREeDB3aTtGnQUR+9t2lMU7sFCaXZvDkXY4ZNk=",
         "owner": "costinm",
         "repo": "dmesh",
-        "rev": "0b3e629444b072d65799baab73a8868c476498b0",
+        "rev": "9e3450e07adeb3f5de6ce1f6918ca37917fda854",
         "type": "github"
       },
       "original": {
@@ -142,11 +142,11 @@
         "rust-overlay": "rust-overlay_2"
       },
       "locked": {
-        "lastModified": 1792349824,
-        "narHash": "sha256-TkIS0mCEjXmlDm9VWkOOZt2WkgJnLDMUmbs7GiYw+tc=",
+        "lastModified": 1794283963,
+        "narHash": "sha256-pDrhiF56CKVRDQkcEt9tq8XVNZC6sKV/jiXyyO9Babw=",
         "owner": "costinm",
         "repo": "ssh-mesh",
-        "rev": "c210c3af8687d101fe99bcce5611b705ea08e2e3",
+        "rev": "6c914a29280997becc2319703df5f67f5e1d88f9",
         "type": "github"
       },
       "original": {

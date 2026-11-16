@@ -5,12 +5,16 @@ pragma_once = true
 documentation_style = "c99"
 cpp_compat = true
 no_includes = true
-sys_includes = ["stddef.h", "stdint.h"]
+sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
 style = "type"
 
 usize_is_size_t = true
 
 trailer = """
+_Static_assert(sizeof(xip_memory_file) == (sizeof(void *) == 4 ? 24 : 32), "xip_memory_file layout");
+_Static_assert(sizeof(xip_memory_files) == 8 + 4 * sizeof(void *), "xip_memory_files layout");
+_Static_assert(sizeof(xip_module_quarantine) == 8 + sizeof(void *), "xip_module_quarantine layout");
+_Static_assert(sizeof(xip_panic_flash) == 8 + 3 * sizeof(void *), "xip_panic_flash layout");
 _Static_assert(sizeof(xip_module_panic) == 8 + 3 * sizeof(void *), "xip_module_panic layout");
 _Static_assert(sizeof(xip_relay_hop) == 64, "xip_relay_hop layout");
 _Static_assert(sizeof(xip_relay_route) == 280, "xip_relay_route layout");
@@ -65,11 +69,15 @@ int xip_handle(const xip_host *host, void *state, const xip_call *call);
 """
 
 [export]
-include = ["ModulePanic", "Sys", "SysHeapInfo", "SysHeapDump", "Lora", "Nan", "NanTransport", "Serial", "Stream", "StreamPacket", "Quic", "RelayHop", "RelayRoute", "RelayStats", "PacketPoolInfo", "Identity", "Crypto", "Native", "SerialRxBuffer", "SerialPacketTx", "SerialPacketClient", "Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware", "Ble", "BleStart", "BleScan", "BleConnect", "BleListen", "BleMode", "BleStatus", "BleScanResults", "Nimble", "NimbleFilter", "NimbleStart", "NimbleScan", "NimbleConnect"]
+include = ["PanicFlash", "MemoryFile", "MemoryFiles", "ModuleQuarantine", "ModulePanic", "Sys", "SysHeapInfo", "SysHeapDump", "Lora", "Nan", "NanTransport", "Serial", "Stream", "StreamPacket", "Quic", "RelayHop", "RelayRoute", "RelayStats", "PacketPoolInfo", "Identity", "Crypto", "Native", "SerialRxBuffer", "SerialPacketTx", "SerialPacketClient", "Host", "Call", "SpiConfig", "DmodHeader", "WifiIntent", "WifiState", "Wifi", "WifiTuning", "WifiTuner", "Link", "LinkInfo", "WifiMonitor", "WifiAp", "Power", "PowerSleep", "PowerInfo", "Hardware", "Ble", "BleStart", "BleScan", "BleConnect", "BleListen", "BleMode", "BleStatus", "BleScanResults", "Nimble", "NimbleFilter", "NimbleStart", "NimbleScan", "NimbleConnect"]
 prefix = "xip_"
 
 [export.rename]
+PanicFlash = "panic_flash"
 ModulePanic = "module_panic"
+ModuleQuarantine = "module_quarantine"
+MemoryFile = "memory_file"
+MemoryFiles = "memory_files"
 Sys = "sys"
 SysHeapInfo = "sys_heap_info"
 SysHeapDump = "sys_heap_dump"

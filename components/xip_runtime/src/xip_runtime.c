@@ -16,6 +16,7 @@
 #include "esp_attr.h"
 #include "nvs.h"
 #include "esp_flash.h"
+#include "esp_partition.h"
 #include "esp_netif.h"
 #include "lwip/sockets.h"
 #include <errno.h>
@@ -704,7 +705,23 @@ static void components_publish(struct xip_instance *in)
     }
 }
 
+static const xip_panic_flash panic_flash_service;
+static void panic_flash_write(const uint8_t *data,size_t len);
+static void allocation_pressure_snapshot(uint32_t out[8])
+{
+    out[0]=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+    out[1]=heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+    out[2]=pool?xip_pool_allocated(pool):0;
+    out[3]=pool?xip_pool_cached_available(pool):0;
+    portENTER_CRITICAL(&registry_lock);
+    out[4]=packet_queue.count;out[5]=packet_queue.capacity;
+    uint32_t used=0;
+    for(unsigned k=0;k<XIP_MAX_INSTANCES;k++)if(registry[k])used+=registry[k]->mem.used;
+    portEXIT_CRITICAL(&registry_lock);
+    out[6]=used;out[7]=0;
+}
 #include "module_panic.inc"
+#include "memory_files.inc"
 
 static const void *h_get_component(void *user, const char *name)
 {
@@ -714,6 +731,9 @@ static const void *h_get_component(void *user, const char *name)
     extern const xip_native *xip_native_component(void);
     if (!name) return NULL;
     if (!strcmp(name, "module-panic")) return &module_panic_service;
+    if (!strcmp(name, "panic-flash")) return &panic_flash_service;
+    if (!strcmp(name, "module-quarantine")) return &module_quarantine_service;
+    if (!strcmp(name, "memory-files")) return &memory_files_service;
     if (!strcmp(name, "serial")) return xip_serial_component();
     if (strcmp(name, "crypto") == 0) return xip_crypto_component();
     if (strcmp(name, "identity") == 0) return xip_identity_component();
@@ -796,7 +816,7 @@ static int h_state_resize(void *user, uint32_t key, uint32_t cls, size_t size, u
     (void)xip_state_get(&in->state_set, &retained_store, in->name, in->version, key, NULL, &cur);
     int rc = XIP_OK;
     if (size > cur) {
-        const size_t margin = 32768, avail = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+        const size_t margin = XIP_MODULE_HEAP_RESERVE, avail = module_heap_available(size - cur);
         if (avail <= margin || size - cur > avail - margin) rc = XIP_ERR_NOMEM;
     }
     if (rc == XIP_OK) rc = xip_state_resize(&in->state_set, &in->mem, &retained_store, in->name, in->version, key, cls, size, out);
@@ -837,7 +857,7 @@ static xip_pool *pool_get(void)
             else ESP_LOGE(TAG, "application pool slots are too small (%u < %u)", (unsigned)hooks.pool->slot_size(hooks.pool->ctx), (unsigned)XIP_PKT_SLOT_MIN);
         } else {
             pool = xip_pool_create(CONFIG_XIP_PKT_SLOTS, XIP_PKT_SLOT_MIN);
-            xip_pool_set_policy(pool, CONFIG_XIP_PKT_KEEP, pool_free_heap, CONFIG_XIP_PKT_HEAP_RESERVE);
+            xip_pool_set_policy(pool, CONFIG_XIP_PKT_KEEP, pool_free_heap, XIP_PACKET_HEAP_RESERVE);
         }
     }
     xSemaphoreGive(pool_lock);
@@ -919,6 +939,7 @@ static int h_pkt_acquire(void *ctx,uint32_t reserve,uint32_t *out)
 /* Generic HAL implementations; no upload format or loader policy. */
 #include "socket_hal.inc"
 #include "flash_hal.inc"
+#include "panic_flash.inc"
 
 static int h_pkt_keep(void *user, uint32_t pkt)
 {
@@ -964,6 +985,13 @@ static bool packet_deliveries_prepare(void)
         const unsigned maximum=CONFIG_XIP_PKT_KEEP>32?CONFIG_XIP_PKT_KEEP:32;
         if(keep>maximum)keep=maximum;
     }
+    const size_t idle_free = pool_free_heap();
+    /* Native SDK users may consume the reserve after cache warmup. Reclaim
+     * idle buffers before admitting more best-effort radio work. */
+    if (pool && idle_free <= XIP_PACKET_HEAP_RESERVE) {
+        keep = 0;
+        (void)xip_pool_reclaim(pool, XIP_PACKET_HEAP_RESERVE - idle_free + XIP_PKT_SLOT_MIN);
+    }
     if(pool && packet_queue.rx_keep!=keep){
         const unsigned previous=packet_queue.rx_keep;
         xip_pool_set_keep(pool,(uint16_t)keep);
@@ -976,13 +1004,14 @@ static bool packet_deliveries_prepare(void)
     if(capacity>SIZE_MAX/2)return true;
     size_t target=capacity?capacity*2:CONFIG_XIP_PKT_QUEUE_INITIAL;
     const size_t free_bytes=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
-    const size_t maximum=free_bytes>CONFIG_XIP_PKT_HEAP_RESERVE?
-        (free_bytes-CONFIG_XIP_PKT_HEAP_RESERVE)/sizeof(packet_delivery):0;
+    const size_t maximum=free_bytes>XIP_PACKET_HEAP_RESERVE?
+        (free_bytes-XIP_PACKET_HEAP_RESERVE)/sizeof(packet_delivery):0;
     if(target>maximum)target=maximum;
     if(target<=capacity)return capacity!=0;
     const size_t bytes=target*sizeof(packet_delivery);
     packet_delivery *replacement=malloc(bytes);
     if(!replacement)return capacity!=0;
+    if(pool_free_heap()<XIP_PACKET_HEAP_RESERVE){free(replacement);return capacity!=0;}
     portENTER_CRITICAL(&registry_lock);
     packet_delivery *old=NULL;
     if(packet_queue.capacity==capacity){
@@ -2777,5 +2806,13 @@ void xip_instance_stats(const xip_instance_t *in, xip_stats_t *out)
     memset(out, 0, sizeof(*out));
     portENTER_CRITICAL(&registry_lock);
     if (known_locked(in)) *out = in->stats;
+    portEXIT_CRITICAL(&registry_lock);
+}
+
+void xip_instance_memory(const xip_instance_t *in, uint32_t *used, uint32_t *quota)
+{
+    *used = 0; *quota = 0;
+    portENTER_CRITICAL(&registry_lock);
+    if (known_locked(in)) { *used = in->mem.used; *quota = in->mem.quota; }
     portEXIT_CRITICAL(&registry_lock);
 }

@@ -9,7 +9,7 @@ It follows the cluster clock on DW0/DW8 and sends NOW timing announcements on ea
 when following a peer.
 
 Build with `scripts/build.sh esp32c6`; the package is `mod_nan.dmod`
-(upload through the running mod_flash service). The installed module is autostarted;
+(upload through the running mod_flash service). The installed module listens for the boot event (`onBoot`);
 query `nan.status` for synchronization. Use the five-second `discovery.nodes` stream for fresh discovery
 observations; the module keeps no peer inventory. The module
 caches an opaque supplied announcement, answers compatible discovery requests, and exchanges NAN

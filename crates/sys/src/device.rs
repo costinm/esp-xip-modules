@@ -11,10 +11,11 @@ pub(crate) const M_STOP: i32 = 7;
 pub(crate) const M_RESET: i32 = 8;
 pub(crate) const M_NV: i32 = 10;
 pub(crate) const M_LINK_SEND: i32 = 11;
+pub(crate) const M_QUARANTINE_CLEAR: i32 = 12;
 
 /// Is `method` one of the device-control methods (their direct calls answer an error as a signed scalar)?
 pub(crate) fn is_device_method(method: i32) -> bool {
-    matches!(method, M_STATUS | M_START | M_STOP | M_RESET | M_NV | M_LINK_SEND)
+    matches!(method, M_STATUS | M_START | M_STOP | M_RESET | M_NV | M_LINK_SEND | M_QUARANTINE_CLEAR)
 }
 
 fn binary_result(rc: i32) -> Result<Vec<u8>, i32> {
@@ -50,6 +51,20 @@ pub(crate) fn binary_method(hw: &Hw, method: i32, data: &[u8]) -> Result<Vec<u8>
                 Some(mut r) => match r.next() { Some(Item::Bytes(b)) => b, _ => return Err(xip_abi::ERR_ARG) },
             };
             binary_result(hw.module_start(name, request))
+        }
+        M_QUARANTINE_CLEAR => {
+            let name = cbor::get_text(data, 1).map_err(|_| xip_abi::ERR_ARG)?
+                .filter(|n| !n.is_empty() && n.len() < 16 && !n.contains(&0))
+                .ok_or(xip_abi::ERR_ARG)?;
+            let service = hw.get_component(c"module-quarantine").cast::<xip_abi::ModuleQuarantine>();
+            if service.is_null() { return Err(ERR_UNSUPPORTED); }
+            // The header is checked before reading the optional function pointer.
+            unsafe {
+                if (*service).version != 1 || ((*service).size as usize) < core::mem::size_of::<xip_abi::ModuleQuarantine>() {
+                    return Err(ERR_UNSUPPORTED);
+                }
+                binary_result(((*service).clear)(hw.ctx(), name.as_ptr(), name.len()))
+            }
         }
         M_RESET => binary_result(hw.reset()),
         M_NV => {
@@ -104,3 +119,46 @@ fn link_send(hw: &Hw, data: &[u8]) -> Result<Vec<u8>, i32> {
     binary_result(rc)
 }
 
+
+#[cfg(test)]
+mod quarantine_tests {
+    use super::*;
+    use core::ffi::{c_char, c_void};
+    use xip_abi::{Host, ModuleQuarantine, ABI_VERSION, ERR_ARG};
+
+    unsafe extern "C" fn component(user: *mut c_void, name: *const c_char) -> *const c_void {
+        assert_eq!(unsafe { core::ffi::CStr::from_ptr(name) }, c"module-quarantine");
+        user.cast_const()
+    }
+    unsafe extern "C" fn clear(_: *mut c_void, name: *const u8, len: usize) -> i32 {
+        assert_eq!(unsafe { core::slice::from_raw_parts(name, len) }, b"nan");
+        0
+    }
+    #[test]
+    fn clear_validates_requests_and_optional_runtime_service() {
+        // Host contains scalars, raw pointers and optional function pointers.
+        let mut host: Host = unsafe { core::mem::zeroed() };
+        host.abi_version = ABI_VERSION;
+        host.size = core::mem::size_of::<Host>() as u32;
+        host.get_component = Some(component);
+        let request = b"\xa1\x01\x63nan";
+        let run = |host: &Host, request: &[u8]| {
+            binary_method(&unsafe { Hw::new(host).unwrap() }, M_QUARANTINE_CLEAR, request)
+        };
+        assert_eq!(run(&host, request), Err(ERR_UNSUPPORTED));
+        assert_eq!(run(&host, b"\xa0"), Err(ERR_ARG));
+        assert_eq!(run(&host, b"\xa1\x01\x60"), Err(ERR_ARG));
+        assert_eq!(run(&host, b"\xa1\x01\x43nan"), Err(ERR_ARG));
+        assert_eq!(run(&host, b"\xa1\x01\x63n\0n"), Err(ERR_ARG));
+        let mut service = ModuleQuarantine { version: 1, size: core::mem::size_of::<ModuleQuarantine>() as u32, clear };
+        host.user = core::ptr::addr_of_mut!(service).cast();
+        assert_eq!(run(&host, request), Ok(vec![0xa0]));
+        service.size = 8;
+        host.user = core::ptr::addr_of_mut!(service).cast();
+        assert_eq!(run(&host, request), Err(ERR_UNSUPPORTED));
+        service.size = core::mem::size_of::<ModuleQuarantine>() as u32;
+        service.version = 2;
+        host.user = core::ptr::addr_of_mut!(service).cast();
+        assert_eq!(run(&host, request), Err(ERR_UNSUPPORTED));
+    }
+}

@@ -27,6 +27,12 @@ static const xip_pool_ops fake_ops = {
 };
 
 static xip_pool *shared;
+static void *reclaim_cache(void *arg)
+{
+    (void)arg;
+    for(int i=0;i<20000;i++)(void)xip_pool_reclaim(shared,4096);
+    return NULL;
+}
 static int taken[2000];
 
 static void *grab_release(void *arg)
@@ -111,13 +117,33 @@ int main(void)
     for(int i=1;i<32;i++)xip_pool_release(large,slots[i]);
     CHECK(xip_pool_available(large)==32);xip_pool_destroy(large);
 
+    /* Pressure can discard cache even with a high keep policy, but must never
+     * release/modify a live lease or invalidate its generation-bearing handle. */
+    xip_pool_set_keep(p,8);
+    int held=xip_pool_acquire(p,0),idle=xip_pool_acquire(p,0);
+    CHECK(held>=0 && idle>=0);
+    xip_pool_slot(p,held)[0]=0x5a;
+    uint32_t held_handle=xip_packet_handle(p,held,0,1);
+    xip_pool_retain(p,held);
+    xip_pool_release(p,idle);
+    CHECK(xip_pool_reclaim(p,1)==1204);
+    CHECK(xip_pool_refs(p,held)==2 && xip_packet_get(p,held_handle));
+    CHECK(xip_pool_slot(p,held)[0]==0x5a);
+    CHECK(xip_pool_reclaim(p,SIZE_MAX)==0);
+    xip_pool_release(p,held);xip_pool_release(p,held);
+    CHECK(xip_pool_reclaim(p,SIZE_MAX)==1204 && xip_pool_allocated(p)==0);
+    CHECK(xip_pool_available(p)==8);
+    xip_pool_set_keep(p,2);
+
     /* two tasks hammering the pool never go below the reserve or lose a slot */
     shared = p;
-    pthread_t t1, t2;
+    pthread_t t1, t2, tr;
     pthread_create(&t1, NULL, grab_release, NULL);
     pthread_create(&t2, NULL, grab_release, NULL);
+    pthread_create(&tr, NULL, reclaim_cache, NULL);
     pthread_join(t1, NULL);
     pthread_join(t2, NULL);
+    pthread_join(tr,NULL);
     CHECK(xip_pool_available(p) == 8);
     (void)taken;
 

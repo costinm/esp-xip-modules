@@ -7,6 +7,12 @@
 #include "xip_pool.h"
 #include "../../components/xip_runtime/src/xip_state.c"
 #define MALLOC_CAP_DEFAULT 0
+#define MALLOC_CAP_INTERNAL 4
+#define MALLOC_CAP_8BIT 2
+static void *heap_caps_malloc(size_t size,int caps){assert(caps==(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT));return malloc(size);}
+#define CONFIG_XIP_PKT_HEAP_RESERVE 16384
+static xip_pool *pool;
+static uint32_t allocation_reclaimed_bytes;
 struct xip_instance { xip_mem mem; };
 static struct xip_instance *I(void *user){return user;}
 static size_t available[2];
@@ -89,6 +95,11 @@ static void state_objects(void)
 }
 
 int main(void){
+    heap(32768,32768);assert(memory_internal_alloc(1)==NULL);
+    heap(40000,32000);assert(memory_internal_alloc(100)==NULL);
+    heap(40000,39000);void *file=memory_internal_alloc(100);assert(file);free(file);
+    heap(40000,40000);assert(memory_internal_alloc(SIZE_MAX)==NULL);
+
     struct xip_instance in;xip_mem_init(&in.mem,1024);
     heap(32768,32768);assert(!h_mem_alloc(&in,100));assert(in.mem.used==0 && failures==1 && last_reason==1);
     heap(32800,32800);assert(!h_mem_alloc(&in,100));assert(in.mem.used==0 && failures==1 && last_reason==1);

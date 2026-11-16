@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -447,6 +448,68 @@
 #define XIP_FILES_LOG_PUT 19
 
 #define XIP_FILES_LOG_GET 20
+
+// Namespace IDs (wire tag 16). Missing means flash for backwards compatibility.
+#define XIP_FILES_NS_FLASH 0
+
+#define XIP_FILES_NS_RAM 1
+
+#define XIP_FILES_NS_PSRAM 2
+
+#define XIP_FILES_NS_RTC 3
+
+#define XIP_FILES_NS_PROC 4
+
+#define XIP_FILES_NS_SYS 5
+
+// Prepared, one-shot panic file. arm checks erased bytes during normal operation.
+typedef struct {
+  uint32_t version;
+  uint32_t size;
+  int (*arm)(void *user, uint32_t address, uint32_t len);
+  void (*range)(void *user, uint32_t *address, uint32_t *len);
+  void (*disarm)(void *user);
+} xip_panic_flash;
+
+// A pinned local memory file. The token must be closed before its provider stops.
+typedef struct {
+  uint8_t *data;
+  uint32_t len;
+  uint32_t version;
+  size_t token;
+  uint8_t name[6];
+  uint8_t name_len;
+  uint8_t flags;
+} xip_memory_file;
+
+// Optional memory/proc filesystem backend. Functions run on the serialized owner.
+// open modes: 0 read, 1 replacement, 2 stat, 3 RAM/PSRAM in-place edit.
+// close(commit=false) aborts replacements. Edit release always advances the version;
+// in-place edits have no rollback. Regions outlive calls until removed or reset.
+// next returns 1 entry, 0 end, or a negative ABI error. No pointer crosses the wire.
+typedef struct {
+  uint32_t version;
+  uint32_t size;
+  int (*open)(void *user,
+              uint8_t ns,
+              const uint8_t *name,
+              size_t len,
+              uint8_t mode,
+              uint32_t size,
+              uint32_t version,
+              xip_memory_file *out);
+  int (*close)(void *user, size_t token, bool commit);
+  int (*next)(void *user, uint8_t ns, const uint8_t *after, size_t len, xip_memory_file *out);
+  int (*remove)(void *user, uint8_t ns, const uint8_t *name, size_t len);
+} xip_memory_files;
+
+// Optional native quarantine control, obtained as `module-quarantine`.
+// Clear one name without starting it or discarding pending panic diagnostics.
+typedef struct {
+  uint32_t version;
+  uint32_t size;
+  int (*clear)(void *user, const uint8_t *name, size_t len);
+} xip_module_quarantine;
 
 // Native `module-panic` component, version 1. Panic reporting uses no allocator.
 // `report` records the calling module and bounded message in RTC RAM and restarts.
@@ -2371,6 +2434,10 @@ typedef struct {
   int (*resume)(void *ctx);
 } xip_nimble;
 
+_Static_assert(sizeof(xip_memory_file) == (sizeof(void *) == 4 ? 24 : 32), "xip_memory_file layout");
+_Static_assert(sizeof(xip_memory_files) == 8 + 4 * sizeof(void *), "xip_memory_files layout");
+_Static_assert(sizeof(xip_module_quarantine) == 8 + sizeof(void *), "xip_module_quarantine layout");
+_Static_assert(sizeof(xip_panic_flash) == 8 + 3 * sizeof(void *), "xip_panic_flash layout");
 _Static_assert(sizeof(xip_module_panic) == 8 + 3 * sizeof(void *), "xip_module_panic layout");
 _Static_assert(sizeof(xip_relay_hop) == 64, "xip_relay_hop layout");
 _Static_assert(sizeof(xip_relay_route) == 280, "xip_relay_route layout");

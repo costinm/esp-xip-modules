@@ -946,3 +946,55 @@ pub struct ModulePanic {
 }
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(core::mem::size_of::<ModulePanic>() == 20);
+
+/// Optional native quarantine control, obtained as `module-quarantine`.
+/// Clear one name without starting it or discarding pending panic diagnostics.
+#[repr(C)]
+pub struct ModuleQuarantine {
+    pub version: u32,
+    pub size: u32,
+    pub clear: unsafe extern "C" fn(user: *mut c_void, name: *const u8, len: usize) -> core::ffi::c_int,
+}
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::size_of::<ModuleQuarantine>() == 12);
+
+/// A pinned local memory file. The token must be closed before its provider stops.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MemoryFile {
+    pub data: *mut u8,
+    pub len: u32,
+    pub version: u32,
+    pub token: usize,
+    pub name: [u8; 6],
+    pub name_len: u8,
+    pub flags: u8,
+}
+/// Optional memory/proc filesystem backend. Functions run on the serialized owner.
+/// open modes: 0 read, 1 replacement, 2 stat, 3 RAM/PSRAM in-place edit.
+/// close(commit=false) aborts replacements. Edit release always advances the version;
+/// in-place edits have no rollback. Regions outlive calls until removed or reset.
+/// next returns 1 entry, 0 end, or a negative ABI error. No pointer crosses the wire.
+#[repr(C)]
+pub struct MemoryFiles {
+    pub version: u32,
+    pub size: u32,
+    pub open: unsafe extern "C" fn(user: *mut c_void, ns: u8, name: *const u8, len: usize, mode: u8, size: u32, version: u32, out: *mut MemoryFile) -> core::ffi::c_int,
+    pub close: unsafe extern "C" fn(user: *mut c_void, token: usize, commit: bool) -> core::ffi::c_int,
+    pub next: unsafe extern "C" fn(user: *mut c_void, ns: u8, after: *const u8, len: usize, out: *mut MemoryFile) -> core::ffi::c_int,
+    pub remove: unsafe extern "C" fn(user: *mut c_void, ns: u8, name: *const u8, len: usize) -> core::ffi::c_int,
+}
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::size_of::<MemoryFile>() == 24 && core::mem::size_of::<MemoryFiles>() == 24);
+
+/// Prepared, one-shot panic file. arm checks erased bytes during normal operation.
+#[repr(C)]
+pub struct PanicFlash {
+    pub version: u32,
+    pub size: u32,
+    pub arm: unsafe extern "C" fn(user: *mut c_void, address: u32, len: u32) -> core::ffi::c_int,
+    pub range: unsafe extern "C" fn(user: *mut c_void, address: *mut u32, len: *mut u32),
+    pub disarm: unsafe extern "C" fn(user: *mut c_void),
+}
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::size_of::<PanicFlash>() == 20);

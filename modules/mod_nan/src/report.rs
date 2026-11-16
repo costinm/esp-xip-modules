@@ -130,7 +130,7 @@ pub fn forward_to(peer: [u8;6], frame: &[u8], rssi: i8, emit: &mut impl FnMut(&[
         if !sync.service_info.is_empty() {observation_to(4,peer,None,0,true,rssi,sync.service_info,emit);}
         return;
     }
-    for item in dmesh_rawnan::service_descriptors(frame) {
+    for item in dmesh_rawnan::service_descriptors_iter(frame) {
         let d=item.descriptor;
         let kind=match d.control&3 {0=>1,1=>2,2=>3,_=>continue};
         observation_to(kind,peer,Some(item.service_id),d.instance,false,rssi,payload(frame,&d),emit);

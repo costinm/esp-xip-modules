@@ -39,7 +39,8 @@ This call never invokes another module. No sys module is needed. No partial reco
 | 3 | `heap` | `Heap` | As `heap_info`. |
 | 4 | `modules` | `Slot[]` | Every module slot; an empty array when the host cannot enumerate them. |
 | 5 | `components` | `map` | `{component: {method: {1: updated_ms, 2: status_map}}}`, milliseconds since boot. |
-| 6 | `packets` | `map` | Global packet queue and pool snapshot below; empty when unsupported. |
+| 6 | `packets` | `Packets` | Global packet queue and pool snapshot below; empty when unsupported. |
+| 7 | `power` | `PowerInfo` | Native sleep state, attempts, entries, skips, durations, wake cause and activity vetoes; independent of optional modules. |
 
 `Device` fields:
 
@@ -114,7 +115,69 @@ This call never invokes another module. No sys module is needed. No partial reco
 | 11 | `reboot` | `bool` | The module stopped with memory it had not freed: it cannot be replaced until the device restarts. |
 | 12 | `page` | `u32` | The 64 KiB page of the module partition the active image sits on. |
 | 13 | `shadowed` | `Shadowed[]` | The other installed images of this module name: lower versions (kept for recovery, the first pages to be reused) and duplicates. Empty when none. |
-| 14 | `quarantined` | `bool` | A Rust panic disabled this module until power-on; start requests are rejected. |
+| 14 | `quarantined` | `bool` | A Rust panic disabled this module until power-on or explicit quarantine clearing; start requests are rejected. |
+| 15 | `heap_used` | `u32` | Live managed allocations in bytes; excludes native SDK allocations, runtime-owned context/inbox storage and stack. Zero without a live instance. |
+| 16 | `heap_quota` | `u32` | Managed allocation limit in bytes; 4294967295 means unlimited. Zero without a live instance. |
+
+`PowerInfo` fields:
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `state` | `u8` | 0 idle, 1 sleeping, 2 resuming (the radio is coming back), 3 awake between cycles. |
+| 2 | `pm_configured` | `u8` | ESP-IDF power management is configured (frequency scaling). |
+| 3 | `auto_light_sleep` | `u8` | Automatic light sleep when idle (otherwise sleep is explicit). |
+| 4 | `tickless_idle` | `u8` | FreeRTOS tickless idle is built in. |
+| 5 | `cpu_mhz` | `u16` | CPU frequency now. |
+| 6 | `min_mhz` | `u16` | Lowest frequency of the power configuration. |
+| 7 | `max_mhz` | `u16` | Highest frequency of the power configuration. |
+| 8 | `tick_hz` | `u16` | FreeRTOS tick rate. |
+| 9 | `cycles_left` | `u16` | Sleeps still to run for the request. |
+| 10 | `wake_cause` | `u8` | Why the last sleep ended (`esp_sleep_wakeup_cause_t`: 4 timer, 7 GPIO, 8 UART, 0 none). |
+| 11 | `promiscuous` | `u8` | Promiscuous receive is on. |
+| 12 | `sleep_attempts` | `u32` | Sleeps attempted. |
+| 13 | `sleep_entries` | `u32` | Sleeps that returned without error. |
+| 14 | `sleep_skipped` | `u32` | Sleeps rejected at once (a power-management lock). |
+| 15 | `last_requested_us` | `u32` | The last sleep: microseconds asked. |
+| 16 | `last_duration_us` | `u32` | The last sleep: microseconds it lasted. |
+| 17 | `last_resume_us` | `u32` | The last sleep: microseconds from wake until the radio was started again. |
+| 18 | `tasks` | `u32` | FreeRTOS tasks. |
+| 19 | `ticks` | `u32` | FreeRTOS tick count since boot. |
+| 20 | `heap_free` | `u32` | Internal heap free. |
+| 21 | `heap_min` | `u32` | Internal heap, lowest ever. |
+| 22 | `heap_largest` | `u32` | Internal heap, largest block. |
+| 23 | `filter_dropped` | `u32` | Frames the early receive filter dropped. |
+| 24 | `promisc_frames` | `u32` | Promiscuous frames delivered. |
+| 25 | `soft_sleep` | `u8` | How the last sleep was done: 1 soft, 0 physical. Soft while the console is on USB-Serial/JTAG with a host attached (light sleep powers that port down and the host does not recover the device): the radio is stopped and restarted around a plain delay and the CPU does not sleep. Physical with a UART console or no host. |
+| 26 | `active_window` | `u8` | A five-second activity interval from local serial bytes or a validated directed network record is still active. Modules decide sleep policy; querying this flag does not acquire a PM lock. |
+| 27 | `ip_sockets` | `u8` | Open runtime TCP sockets plus the default UDP listener. Zero during NAN/NOW-only sleepy windows. |
+| 28 | `usb_sleep_blocked` | `bool` | Attached/selected USB console currently vetoes physical sleep. |
+| 29 | `usb_sleep_allowed` | `bool` | USB sleep opt-in policy is enabled. |
+| 30 | `awake_remaining_ms` | `u32` | Remaining explicit temporary awake hold; this read does not extend it. |
+
+The native panic discriminator is key 0 with value 3.
+
+`Panic` fields:
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `event` | `string` | panic. |
+| 2 | `module` | `string` | Module name. |
+| 3 | `message` | `bytes` | Rust panic message. |
+| 4 | `requested` | `u32` | Failed allocation size. |
+| 5 | `free` | `u32` | Free internal heap at rejection. |
+| 6 | `largest` | `u32` | Largest free internal block. |
+| 7 | `used` | `u32` | Module managed allocations. |
+| 8 | `quota` | `u32` | Module managed allocation limit. |
+| 9 | `reason` | `u32` | 1 reserve, 2 allocator/quota, 3 post-allocation reserve. |
+| 10 | `module_version` | `u32` | Crashing module version. |
+| 11 | `internal_free` | `u32` | Free internal RAM at allocation failure. |
+| 12 | `internal_largest` | `u32` | Largest free internal block at failure. |
+| 13 | `pool_allocated` | `u32` | Packet slots holding storage at failure. |
+| 14 | `pool_cached` | `u32` | Idle packet buffers available for reclamation. |
+| 15 | `queue_depth` | `u32` | Queued packet references at failure. |
+| 16 | `queue_capacity` | `u32` | Allocated queue descriptors at failure. |
+| 17 | `module_heap_used` | `u32` | Sum of live modules' managed heap payload bytes. |
+| 18 | `reclaimed_bytes` | `u32` | Idle packet storage reclaimed during this allocation attempt. |
 
 `Shadowed` fields:
 
@@ -134,7 +197,7 @@ remote console signing method; announcement wire format and caching policy
 belong to its module caller.
 
 
-`packets` fields (native C runtime):
+`Packets` fields:
 
 | Tag | Field | Type | Description |
 |---:|---|---|---|
@@ -174,7 +237,8 @@ No module cleanup or flash write runs from the panic handler.
 `read` returns a pending diagnostic as CBOR `{0:3, 1: "panic", 2: module_name,
 3: message_bytes}` and the caller's module address. After reboot, mod_flash
 appends this record through the files log API. It calls `logged` only after a
-successful durable reply; errors retain the record for retry. Quarantine
+successful durable reply; errors retain the record for retry. Acknowledgement
+marks the record logged without deleting the last diagnostic. Quarantine
 remains after logging. RTC holds the last diagnostic and up to 32 disabled
 names; a full list refuses all module starts. A power cycle clears RTC state.
 Older runtimes without this component receive an ordinary reset request.
@@ -191,3 +255,52 @@ Allocation denial record: `{0:4, 1:module, 2:bytes, 3:free, 4:largest,
 failure (heap/quota), 3 is post-allocation host reserve. These are diagnostics, not ABI
 return codes. RTC holds diagnostics before reboot; mod_flash persists them
 through the ordinary telemetry commit path after boot.
+
+### Quarantine retry
+
+`get_component("module-quarantine")` returns optional version-1 `ModuleQuarantine`.
+Its `clear(user, name, len)` removes one exact name from RTC quarantine without
+starting it or discarding pending diagnostics. Names contain 1–15 bytes without
+NUL. Clearing an absent name succeeds. sys.quarantine_clear exposes this operation.
+
+### Memory filesystem backend
+
+`get_component("memory-files")` returns optional version-1 `MemoryFiles`.
+The functions take explicit caller context. Names have 1–6 nonzero bytes and
+namespace IDs are one byte: 1 RAM, 2 PSRAM, 3 RTC, 4 proc, 5 sys (0 is flash,
+served by mod_flash). open mode 0 pins a readable allocation, mode 1 allocates
+an unpublished replacement, and mode 2 obtains a pinned stat snapshot, and mode 3 pins RAM/PSRAM for in-place
+editing. An edit release always advances the version and does not support rollback. The
+returned MemoryFile contains an address/length, version and lease token. Close
+every successful open: commit publishes a complete replacement; abort preserves
+the old contents. A read lease prevents replacement/removal. Addresses never
+cross the remote API; native users must release leases before teardown.
+
+Main reserves exactly 6144 retained bytes including panic state and RTC files.
+ESP32 and S3 require RTC data in SLOW memory; C6 uses unified LP memory. Current
+retained panic messages allow 768 bytes. Rust panic formatting borrows a packet
+and falls back to 192 stack bytes if the pool is exhausted. No heap allocation
+or filesystem write runs in the panic handler. mod_flash persists the diagnostic
+after restart through the ordinary log API.
+
+### Prepared panic file
+
+`get_component("panic-flash")` returns optional version-1 `PanicFlash`.
+During normal execution mod_flash prepares an erased non-cache named file and
+arms its body address. The native service validates the `panic` file header,
+partition bounds and erased contents. `range` pins that body against collection;
+`disarm` is used before explicit removal. The panic path consumes the destination
+once, skips a busy flash job, and writes the CBOR payload/header/commit with the
+ordinary synchronous SDK driver while the Rust module worker still has an OS.
+It performs no erase, allocation or filesystem calls. It does not handle CPU
+exceptions or watchdogs. Pending RTC data remains available for reboot logging.
+After `logged`, the pending read returns zero but proc/panic retains the last
+message and module version until a new panic or power-on.
+
+
+### Collector acknowledgement
+
+Writing the exact archived proc/panic CBOR bytes to namespace 5 `panic` compares
+with the retained record and clears it only on a match. A different newer panic
+returns VERSION; an already empty diagnostic succeeds. Quarantine is unchanged.
+The operation uses the existing file stream write API and does not require sys.

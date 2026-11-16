@@ -78,6 +78,44 @@ static const esp_partition_t *running_partition(void)
     return image;
 }
 
+/* Native sleep counters are available even without NAN or sys modules. */
+static void device_power_info(xip_cbor_w *w)
+{
+    xip_power_info i = {.size = sizeof(i)};
+    if (xip_power_get_info(&i) < 0) { xip_cbor_map(w, 0); return; }
+    xip_cbor_map(w, 30);
+    xip_cbor_uint(w, 1); xip_cbor_uint(w, i.state);
+    xip_cbor_uint(w, 2); xip_cbor_uint(w, i.pm_configured);
+    xip_cbor_uint(w, 3); xip_cbor_uint(w, i.auto_light_sleep);
+    xip_cbor_uint(w, 4); xip_cbor_uint(w, i.tickless_idle);
+    xip_cbor_uint(w, 5); xip_cbor_uint(w, i.cpu_mhz);
+    xip_cbor_uint(w, 6); xip_cbor_uint(w, i.min_mhz);
+    xip_cbor_uint(w, 7); xip_cbor_uint(w, i.max_mhz);
+    xip_cbor_uint(w, 8); xip_cbor_uint(w, i.tick_hz);
+    xip_cbor_uint(w, 9); xip_cbor_uint(w, i.cycles_left);
+    xip_cbor_uint(w, 10); xip_cbor_uint(w, i.wake_cause);
+    xip_cbor_uint(w, 11); xip_cbor_uint(w, i.promiscuous);
+    xip_cbor_uint(w, 12); xip_cbor_uint(w, i.sleep_attempts);
+    xip_cbor_uint(w, 13); xip_cbor_uint(w, i.sleep_entries);
+    xip_cbor_uint(w, 14); xip_cbor_uint(w, i.sleep_skipped);
+    xip_cbor_uint(w, 15); xip_cbor_uint(w, i.last_requested_us);
+    xip_cbor_uint(w, 16); xip_cbor_uint(w, i.last_duration_us);
+    xip_cbor_uint(w, 17); xip_cbor_uint(w, i.last_resume_us);
+    xip_cbor_uint(w, 18); xip_cbor_uint(w, i.tasks);
+    xip_cbor_uint(w, 19); xip_cbor_uint(w, i.ticks);
+    xip_cbor_uint(w, 20); xip_cbor_uint(w, i.heap_free);
+    xip_cbor_uint(w, 21); xip_cbor_uint(w, i.heap_min);
+    xip_cbor_uint(w, 22); xip_cbor_uint(w, i.heap_largest);
+    xip_cbor_uint(w, 23); xip_cbor_uint(w, i.filter_dropped);
+    xip_cbor_uint(w, 24); xip_cbor_uint(w, i.promisc_frames);
+    xip_cbor_uint(w, 25); xip_cbor_uint(w, i.soft_sleep);
+    xip_cbor_uint(w, 26); xip_cbor_uint(w, i.active_window);
+    xip_cbor_uint(w, 27); xip_cbor_uint(w, i.ip_sockets);
+    xip_cbor_uint(w, 28); xip_cbor_bool(w, xip_serial_usb_sleep_blocked());
+    xip_cbor_uint(w, 29); xip_cbor_bool(w, xip_serial_usb_sleep_allowed());
+    xip_cbor_uint(w, 30); xip_cbor_uint(w, (uint32_t)xip_power_awake_for(0));
+}
+
 int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
 {
     if (!out || !cap) return XIP_ERR_ARG;
@@ -89,7 +127,7 @@ int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
     const esp_partition_t *part = running_partition();
     uint32_t image_base=0,image_span=0;
     bool have_image=part && running_image_range(part->address,part->size,&image_base,&image_span);
-    xip_cbor_map(&w, 6);
+    xip_cbor_map(&w, 7);
     uint8_t mac[6];
     if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return XIP_ERR_IO;
     xip_cbor_uint(&w, 1); xip_cbor_map(&w, (part ? 7 : 4)+(have_image ? 2 : 0));
@@ -123,6 +161,7 @@ int xip_rt_device_info(const xip_host_hooks_t *hooks, uint8_t *out, size_t cap)
     if (n == XIP_ERR_UNSUPPORTED) xip_cbor_array(&w, 0);
     else if (n < 0) return n; else w.len += (size_t)n;
     xip_cbor_uint(&w, 5); info_components(&w);
+    xip_cbor_uint(&w,7); device_power_info(&w);
     xip_cbor_uint(&w,6);
     if(w.overflow)return XIP_ERR_SIZE;
     n=xip_packet_queue_info(out+w.len,cap-w.len);

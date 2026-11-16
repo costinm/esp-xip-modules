@@ -51,9 +51,9 @@ menu "esp-xip-modules host"
 
     config XIP_PKT_HEAP_RESERVE
         int "Free heap that must remain after a packet is allocated, bytes"
-        default 16384
+        default 32768
         help
-            A module cannot take the last RAM of the device for packets. The pool is shared by modules, QUIC endpoints and native links.
+            The effective minimum is the module heap's 32 KiB host reserve. The pool is shared by modules, QUIC endpoints and native links.
 
     config XIP_PKT_QUEUE_INITIAL
         int "Initial capacity of the shared packet delivery queue"

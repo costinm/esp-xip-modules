@@ -1275,14 +1275,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mod-cel"
-version = "0.1.0"
-dependencies = [
- "ucel",
- "xip-abi",
-]
-
-[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2287,13 +2279,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ucel"
-version = "0.1.0"
-dependencies = [
- "xip-abi",
-]
-
-[[package]]
 name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2699,7 +2684,6 @@ version = "0.1.0"
 dependencies = [
  "berry-c",
  "dmesh-cli",
- "mod-cel",
  "quic-base",
  "quic-link",
  "quic-mux",
@@ -2709,7 +2693,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "ucel",
  "wasm3-c",
  "wat",
  "xip-abi",

@@ -51,6 +51,8 @@ fn global_fifo_absorbs_bursts_and_releases_stopped_owners_without_payload_copies
 #define CONFIG_XIP_PKT_SLOTS 64
 #define CONFIG_XIP_PKT_KEEP 4
 #define CONFIG_XIP_PKT_HEAP_RESERVE 16384
+#define XIP_PACKET_HEAP_RESERVE 32768
+#define XIP_PKT_SLOT_MIN 1704
 #define XIP_MAX_INSTANCES 8
 #define MALLOC_CAP_INTERNAL 1
 #define MALLOC_CAP_8BIT 2
@@ -68,10 +70,12 @@ static void *pool;
 static size_t free_bytes=1000000;
 static int64_t clock_us=1000;
 static size_t heap_caps_get_free_size(int caps){{(void)caps;return free_bytes;}}
+static size_t pool_free_heap(void){{return free_bytes;}}
 static int64_t esp_timer_get_time(void){{return clock_us;}}
 static unsigned policy_keep,prepared,trimmed;
 static void xip_pool_set_keep(void *p,unsigned keep){{(void)p;policy_keep=keep;}}
 static void xip_pool_trim(void *p){{(void)p;trimmed++;}}
+static unsigned xip_pool_reclaim(void *p,size_t bytes){{(void)p;(void)bytes;trimmed++;return 0;}}
 static unsigned xip_pool_cached_available(void *p){{(void)p;return 4;}}
 static void xip_pool_prepare_rx(void *p){{(void)p;prepared++;}}
 static unsigned xip_pool_slots(void *p){{(void)p;return 64;}}

@@ -31,5 +31,3 @@ tokio = { version = "1", features = ["test-util", "process"] }
 berry-c = { path = "../berry-c" }
 wasm3-c = { path = "../wasm3-c" }
 wat = "1"
-mod-cel = { path = "../../modules/mod_cel" }
-ucel = { path = "../uCEL", features = ["parser"] }

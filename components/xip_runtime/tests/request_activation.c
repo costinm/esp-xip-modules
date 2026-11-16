@@ -5,17 +5,18 @@
 #include <string.h>
 #include "xip.h"
 #define XIP_MAX_INSTANCES 4
+#define XIP_WIRE_MAX 8
+#define NATIVE_FALLBACK_COMPONENT 49
 #define QUIC_CONSOLE_COMPONENT 20
 #define portMAX_DELAY -1
 #define portENTER_CRITICAL(p) ((void)(p))
 #define portEXIT_CRITICAL(p) ((void)(p))
-struct xip_instance {uint32_t id;int component;uint32_t port,stream;bool start_done;int envelope_components[XIP_COMPONENTS_MAX];struct{char name[16];}comps[XIP_COMPONENTS_MAX];const uint8_t *start_request;size_t start_len;};
+struct xip_instance {uint32_t id;int component;uint32_t port,stream;bool start_done;int envelope_components[XIP_COMPONENTS_MAX];struct{int id;}wire[XIP_WIRE_MAX];struct{char name[16];}comps[XIP_COMPONENTS_MAX];const uint8_t *start_request;size_t start_len;};
 static struct xip_instance *registry[XIP_MAX_INSTANCES],owner,console;
 static int registry_lock,exec_lock,starts,published,loads,initialization_error,load_error;
 static struct {int (*request_start)(int32_t,uint32_t);} hooks;
 static void xSemaphoreTakeRecursive(int lock,int timeout){(void)lock;(void)timeout;}
 static void xSemaphoreGiveRecursive(int lock){(void)lock;}
-static struct xip_instance *by_component(int c,const struct xip_instance *except){for(unsigned i=0;i<4;i++)if(registry[i] && registry[i]!=except && registry[i]->component==c)return registry[i];return NULL;}
 static int dispatch(struct xip_instance *in,int c,int m,int value,uint32_t flags,const uint8_t *data,size_t n){(void)in;(void)value;(void)flags;(void)data;(void)n;assert(c==XIP_HOST_COMPONENT && m==XIP_HOST_START);starts++;return initialization_error;}
 static bool settle(struct xip_instance *in,int rc){if(!rc)return false;for(unsigned i=0;i<4;i++)if(registry[i]==in)registry[i]=NULL;return true;}
 static void components_publish(struct xip_instance *in){assert(in->start_done);published++;}

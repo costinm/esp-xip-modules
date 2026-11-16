@@ -90,6 +90,26 @@ void xip_pool_trim(xip_pool *p)
     }
 }
 
+size_t xip_pool_reclaim(xip_pool *p, size_t bytes)
+{
+    if (!p || p->ext) return 0;
+    size_t released = 0;
+    for (uint16_t i = 0; i < p->slots && released < bytes; i++) {
+        unsigned zero = 0;
+        /* A callback may race us for a ready slot. Claim it exactly as an RX
+         * taker does; no live packet pointer or reference can be invalidated. */
+        if (!atomic_compare_exchange_strong(&p->refs[i], &zero, 1)) continue;
+        uint8_t *mem = atomic_exchange(&p->mem[i], NULL);
+        if (mem) {
+            free(mem);
+            atomic_fetch_sub(&p->buffers, 1);
+            released += p->slot_size;
+        }
+        atomic_store(&p->refs[i], 0);
+    }
+    return released;
+}
+
 uint16_t xip_pool_allocated(const xip_pool *p) { return p->ext ? p->ext->slots(p->ext->ctx) - p->ext->available(p->ext->ctx) : (uint16_t)atomic_load(&((xip_pool *)p)->buffers); }
 
 /* Claim slot i (its count 0 -> 1) and make sure it has storage; undo and fail when it cannot. */
@@ -102,6 +122,7 @@ static int claim(xip_pool *p, uint16_t i, int allocate)
         if (!allocate) { atomic_store(&p->refs[i], 0); return 0; }
         uint8_t *m = NULL;
         if (!p->free_heap || p->free_heap() >= (size_t)p->slot_size + p->reserve_bytes) m = malloc(p->slot_size);
+        if (m && p->free_heap && p->free_heap() < p->reserve_bytes) { free(m); m=NULL; }
         if (!m) { atomic_store(&p->refs[i], 0); return -1; }
         p->mem[i] = m;
         atomic_fetch_add(&p->buffers, 1);

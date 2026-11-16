@@ -574,8 +574,7 @@ impl Context {
             if !data.get(4..10).and_then(|m| m.try_into().ok()).is_some_and(|m| self.owns_mac(m)) { return; }
             if let Some(payload) = wire::followup_service_info(data, wire::DMESH_SERVICE_ID) {
                 directed_activity(hw,payload);
-                let instance = wire::service_descriptors(data)
-                    .into_iter()
+                let instance = wire::service_descriptors_iter(data)
                     .find(|d| d.service_id == wire::DMESH_SERVICE_ID)
                     .map_or(1, |d| d.descriptor.instance);
                 self.receive_message(
@@ -597,7 +596,7 @@ impl Context {
         let active = wire::active_subscribe_service_info(data, wire::DMESH_SERVICE_ID);
         let mut empty_subscribe = None;
         let mut payload_seen = false;
-        for item in wire::service_descriptors(data) {
+        for item in wire::service_descriptors_iter(data) {
             if item.service_id != wire::DMESH_SERVICE_ID {
                 continue;
             }

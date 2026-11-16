@@ -49,7 +49,7 @@ replaces the whole intent.
 | 11 | `reboot` | `bool` | The module stopped with memory it had not freed: it cannot be replaced until the device restarts. |
 | 12 | `page` | `uint` | The 64 KiB page of the module partition the active image sits on. |
 | 13 | `shadowed` | `Shadowed[]` | The other installed images of this module name: lower versions (kept for recovery, the first pages to be reused) and duplicates. Empty when none. |
-| 14 | `quarantined` | `bool` | A Rust panic disabled this module until power-on; start requests are rejected. |
+| 14 | `quarantined` | `bool` | A Rust panic disabled this module until power-on or explicit quarantine_clear; start requests are rejected. |
 
 `Shadowed` fields:
 
@@ -188,6 +188,21 @@ so the reply is sent at the current rate. Volatile physical-rate exchange is a
 C serial control operation, not QUIC or component policy: the shared host library
 `uart-codec::host::UartPort::negotiate_baud_blocking` performs it before starting
 a bearer. Native USB-JTAG ignores physical baud settings and rejects exchange.
+
+
+## 12. `quarantine_clear` — allow a module to start again
+
+### Request
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `name` | `string` | Required module name, 1–15 bytes, without NUL. |
+
+Returns an empty map. Clears only this name from the retained panic quarantine;
+it does not start the module or delete panic diagnostics. Repeating the call is
+safe. Use `sys.start` afterwards; another panic quarantines the module again.
+Requires Main's optional `module-quarantine` service; older runtimes return
+UNSUPPORTED without changing state.
 
 
 # Types
