@@ -19,8 +19,8 @@ impl FlashOps for Raw {
         true
     }
 }
-struct Fake {
-    flash: Vec<u8>,
+pub(crate) struct Fake {
+    pub(crate) flash: Vec<u8>,
     input: Vec<u8>,
     at: usize,
     out: Vec<u8>,
@@ -39,7 +39,7 @@ struct Fake {
     rescans: u32,
 }
 impl Fake {
-    fn new(image: &[u8], target: u8, dry: bool) -> Self {
+    pub(crate) fn new(image: &[u8], target: u8, dry: bool) -> Self {
         Self::named(image, target, dry, b"test")
     }
     fn named(image: &[u8], target: u8, dry: bool, name: &[u8]) -> Self {
@@ -99,7 +99,7 @@ impl Fake {
             rescans: 0,
         }
     }
-    fn host(&mut self) -> xip_abi::Host {
+    pub(crate) fn host(&mut self) -> xip_abi::Host {
         let mut h: xip_abi::Host = unsafe { core::mem::zeroed() };
         h.abi_version = xip_abi::ABI_VERSION;
         h.size = core::mem::size_of_val(&h) as u32;

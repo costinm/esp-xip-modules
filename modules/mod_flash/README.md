@@ -2,12 +2,20 @@
 
 Read and write files, telemetry batches, modules and runtime images over TCP 5227 or QUIC
 streams. Authentication and authorization are supplied by the calling framework.
-The module is autostarted at boot (its onBoot event) and joins saved Wi-Fi. It announces its recovery
+The module receives its onBoot event at boot and joins saved Wi-Fi. It announces its recovery
 service over UDP while normal discovery is unavailable; explicit recovery probes
 still work when mod_disc is running.
 Other modules use the direct `files` service (component 15) for small files and
 telemetry: up to 1024 bytes per call, with range reads for larger files.
 Image uploads can be retried with the same operation id after interruption.
+Updated Main also retains Rust panic diagnostics in RTC and a prepared `panic`
+file; `dmesh-cli devices refresh` archives available panics and logs.
+
+On updated ESP runtimes, `--namespace` selects flash (0, default), RAM (1),
+PSRAM (2, if available), retained RTC (3), proc snapshots (4), or sys controls (5).
+Memory names have up to six bytes; RTC files share a compact best-effort log. For example,
+`flash.file.read --namespace=4 --name=status --output=status.cbor` reads a CBOR
+snapshot. See [examples](../../notes/docs/fs-examples.md#ram-rtc-and-virtual-files).
 
 See [API.md](API.md) for methods, fields and response framing. The host client
 must use this stream API; the older `dmesh-cli flash` WLU1 uploader requires a

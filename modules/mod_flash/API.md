@@ -41,6 +41,7 @@ holds at most its current flash packet and three alignment bytes.
 | Tag | Field | Type | Description |
 |---:|---|---|---|
 | 1 | `name` | `bytes` | 1–8 opaque bytes, zero padded. |
+| 16 | `namespace` | `u8` | Default 0 (flash); 1 RAM, 2 PSRAM, 3 RTC, 4 proc, 5 sys. |
 
 Response `{1: version, 2: size, 3: kind, 4: cache}`.
 
@@ -54,6 +55,7 @@ Response `{1: version, 2: size, 3: kind, 4: cache}`.
 | 5 | `expect` | `u32` | Optional current-version check. |
 | 6 | `offset` | `u32` | Default zero. |
 | 7 | `len` | `u32` | Default remaining file size. |
+| 16 | `namespace` | `u8` | Default 0 (flash); 1 RAM, 2 PSRAM, 3 RTC, 4 proc, 5 sys. |
 
 Response `{1: version, 2: total_size, 3: kind, 4: cache, 5: body_size,
 6: offset}`, followed by exactly body_size raw bytes and FIN. This operation
@@ -71,6 +73,7 @@ holds the single operation slot until its stream closes.
 | 4 | `cache` | `bool` | Default false; allows dropping at collection. |
 | 5 | `expect` | `u32` | Optional version check; zero requires absence. |
 | 9 | `version` | `u32` | Optional positive file version/epoch, greater than the current version. |
+| 16 | `namespace` | `u8` | Default 0 (flash); 1 RAM, 2 PSRAM, 3 RTC, 4 proc, 5 sys. |
 
 Exactly size bytes and FIN follow. Without version, the module increments the
 current file version (or starts at 1). A supplied version must be greater than
@@ -87,6 +90,7 @@ first after the replacement commits. No whole-file staging allocation is made.
 |---:|---|---|---|
 | 1 | `name` | `bytes` | Opaque name. |
 | 5 | `expect` | `u32` | Optional current-version check. |
+| 16 | `namespace` | `u8` | Default 0 (flash); 1 RAM, 2 PSRAM, 3 RTC, 4 proc, 5 sys. |
 
 Older copies are cleared before the newest. Response is an empty map.
 
@@ -98,16 +102,31 @@ Older copies are cleared before the newest. Response is an empty map.
 |---:|---|---|---|
 | 1 | `after` | `bytes` | Optional exclusive lower name bound. |
 | 2 | `max` | `u32` | Default 16, capped at 32. |
+| 16 | `namespace` | `u8` | Default 0 (flash); 1 RAM, 2 PSRAM, 3 RTC, 4 proc, 5 sys. |
 
 Response `{1: entries, 2: more}`. Each entry is `{1: name, 2: version, 3: size,
 4: kind, 5: cache}`. Names are sorted bytewise.
 
 ## 7. `file.sync` — wait for committed writes
 
+### Request
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 16 | `namespace` | `u8` | Default 0 (flash); 1 RAM, 2 PSRAM, 3 RTC, 4 proc, 5 sys. |
+
+
 Empty request and response. Every successful write already waits for its record
 and index entry to reach flash. This is a barrier on the serialized operation path.
 
 ## 8. `fs.info` — allocation summary
+
+### Request
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 16 | `namespace` | `u8` | Default 0 (flash); 1 RAM, 2 PSRAM, 3 RTC, 4 proc, 5 sys. |
+
 
 Empty request. Response `{1: free_pages, 2: dirty_pages, 3: max_file,
 5: largest_run}`. largest_run is contiguous blank bytes, measured without collection. Counts cover
@@ -365,3 +384,70 @@ Continue with next_offset until zero (an empty images array). public_key is the
 runtime's uncompressed SEC1 public key, or null if identity is unavailable.
 This response is an observation over the selected transport, not a signed
 identity proof. Reading inventory never erases, formats, collects or rescans.
+
+## Memory namespaces
+
+Tag 16 is a one-byte namespace ID; omitted/0 preserves existing flash behavior.
+IDs 1 RAM and 2 PSRAM allocate contents lazily; PSRAM returns NOMEM when unavailable.
+ID 3 RTC uses a packed append log with linear scans, variable-size records and
+in-place compaction when necessary. It has no fixed file count or per-file slot.
+RTC is best effort: interruption during compaction can lose RTC files. These namespaces accept 1–6 nonzero name bytes,
+including four-byte names. Versions increment on writes; an explicit version must
+be higher. Streamed writes go directly to the pending allocation (an appended RTC record for RTC), published only
+on exact-length FIN. Interrupted writes preserve the prior file. Reads pin their
+allocation; replacement/removal while pinned returns BUSY.
+
+ID 4 proc lists read-only `status` (CBOR device snapshot) and `panic` (pending CBOR
+panic diagnostic, empty if none). ID 5 sys lists `quar`: read its CBOR list of disabled
+module names; write raw module-name bytes to clear one quarantine, without starting
+it or deleting the diagnostic. It also lists `panic`: read the retained panic, or
+write the exact archived CBOR record to acknowledge and clear only that matching
+diagnostic. A different newer panic returns VERSION. An already empty diagnostic
+succeeds; quarantine is not changed. Generated file versions/sizes in listings are zero;
+stat/read snapshots provide their current sizes. Non-flash files are marked cache
+and are excluded from ordinary persistent-file reconciliation. Logs and image
+methods remain flash-only. There is no general path parser or arbitrary memory access.
+
+Local callers may obtain `get_component("memory-files")`, a version-1 MemoryFiles
+table, to open a read lease returning MemoryFile.data/len without copying. Close
+the token before unloading the caller or releasing its context. Do not retain the
+address after close, put it on the wire, or persist pointers in RTC. The table also
+supports replacement allocations, explicit commit/abort, listing and removal.
+RAM/PSRAM are volatile. RTC storage survives software restart/deep sleep, subject
+to retention power; it is cleared on power-on or incompatible format. Main reserves
+6 KiB for panic/quarantine and RTC files together, in slow RTC on ESP32/S3 and LP
+RAM on C6. IDF bootloader/timer/wake reservations remain separate.
+
+RAM/PSRAM blobs are not limited to the flash record's 65504-byte maximum: capacity
+is limited by available heap and the u32 length interface. Contents outlive an
+invocation, until explicitly removed or reset. The RAM directory currently uses
+a linked list; large blob size does not add lookup cost. A hashmap can replace
+that directory without moving the separately allocated blobs if entry count grows.
+Native open mode 3 pins an existing RAM/PSRAM blob for in-place editing without
+copying or allocating a replacement. Release advances its version, including on
+abort: in-place edits cannot be rolled back. Remote writes remain replacements.
+RTC compaction is blocked while an RTC address is borrowed. There are no RTC RAM
+index nodes between calls. The best-effort format may be cleared on upgrade.
+
+## Panic persistence
+
+Image.list entries also include tag 8 `quarantined` (bool, or null if unknown).
+Quarantine applies to the module name, including shadowed images. No sys module
+is required for this observation.
+
+Updated Main retains the last RTC panic after telemetry commits; its pending-log
+acknowledgement only suppresses duplicate appends. proc/panic remains readable.
+mod_flash prepares a 1024-byte non-cache file named `panic` filled with FF, and
+arms the optional native panic-flash service. This file's version identifies its
+preparation, not the later emergency write; host refresh must reread it. Armed
+storage is pinned against collection, image retirement and replacement. Explicit
+file.remove disarms it. Existing used, partial or unrelated contents are preserved.
+
+The Rust panic handler makes a bounded, one-shot synchronous SDK write, without
+allocation, erase or filesystem dispatch. A busy flash job skips it in favor of
+RTC. This is not a CPU-exception/watchdog core-dump facility. Panic-file body:
+16-byte little-endian header (magic `PFL1`, CBOR length, FNV-1a32 checksum,
+commit word 0x50414e49), then CBOR bytes and FF padding. Payload and first three
+header words are written before the commit word. Failed records are never armed
+again until removed; RTC remains the fallback. Panic event tag 10 is the crashing
+module image version. No new flash record kind or partition is introduced.

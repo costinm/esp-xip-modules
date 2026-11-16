@@ -84,6 +84,8 @@ impl Collection {
     }
 }
 struct Transfer {
+    ns: u8,
+    memory: Option<crate::memory::Lease>,
     local: Option<Local>,
     handle: u32,
     tcp: bool,
@@ -113,6 +115,7 @@ struct Transfer {
     collect: Option<Collect>,
     collection: Option<Collection>,
     removing: bool,
+    panic_removed: bool,
     sweep: Option<[u8; 256]>,
     erasing_logs: Option<u64>,
     list_after: Option<[u8; 8]>,
@@ -136,6 +139,7 @@ pub struct Files {
     queued: VecDeque<Request>,
     transfer: Option<Transfer>,
     cursor: Option<u32>,
+    panic_removed: bool,
 }
 // Retry metadata is volatile; reset recovery relies only on native image state.
 #[derive(Clone, Copy)]
@@ -198,6 +202,94 @@ fn entry(f: File) -> [u8; 16] {
     e
 }
 impl Transfer {
+    fn open_memory(&mut self,hw:Hw,c:&CallView)->Result<(),i32> {
+        if !(1..=5).contains(&self.ns) {return Err(ERR_ARG);}
+        self.cache=true;
+        if matches!(c.method,6|7|8) {
+            if c.method==6 {
+                self.list_after=cbor::get(c.data,1).map_err(|_|ERR_ARG)?.map(|_|name(c.data)).transpose()?;
+                self.count=integer(c.data,2,16)?.clamp(1,32) as u16;
+            }
+            return Ok(());
+        }
+        if !matches!(c.method,2|3|4|5) {return Err(ERR_UNSUPPORTED);}
+        self.name=name(c.data)?;
+        let len=self.name.iter().position(|b|*b==0).unwrap_or(8);
+        if len==0 || len>6 || self.name[len..].iter().any(|b|*b!=0) {return Err(ERR_ARG);}
+        let write=c.method==4;
+        let size=if write{integer(c.data,2,u32::MAX)?}else{0};
+        if write && size==u32::MAX{return Err(ERR_ARG);}
+        if let Some(expect)=cbor::get_int(c.data,5).map_err(|_|ERR_ARG)? {
+            let old=match crate::memory::Lease::open(hw,self.ns,&self.name[..len],0,0,0) {
+                Ok(m)=>m.region.version,Err(ERR_NOTFOUND)=>0,Err(e)=>return Err(e),
+            };
+            if expect!=old as i64 {return Err(VERSION);}
+        }
+        if c.method==5 {
+            let s=crate::memory::service(hw)?;
+            let rc=unsafe{(s.remove)(hw.ctx(),self.ns,self.name.as_ptr(),len)};
+            return if rc<0 {Err(rc)}else{Ok(())};
+        }
+        let version=integer(c.data,9,0)?;
+        if write && version==0 && cbor::get(c.data,9).map_err(|_|ERR_ARG)?.is_some(){return Err(VERSION);}
+        let lease=crate::memory::Lease::open(hw,self.ns,&self.name[..len],write as u8,size,version)?;
+        self.size=lease.region.len;self.version=lease.region.version;
+        self.old=Some(File{name:self.name,version:self.version,size:self.size,at:0,kind:1,cache:true,live:true});
+        if c.method==3 {
+            let offset=integer(c.data,6,0)?.min(self.size);
+            self.read_at=16+offset;self.read_len=integer(c.data,7,self.size-offset)?.min(self.size-offset);
+        }
+        self.memory=Some(lease);Ok(())
+    }
+    fn read_content(&self,hw:Hw,at:u32,out:&mut[u8])->Result<(),i32>{
+        if let Some(m)=&self.memory {
+            let offset=at.checked_sub(16).ok_or(ERR_SIZE)? as usize;
+            if offset+out.len()>m.region.len as usize{return Err(ERR_SIZE);}
+            unsafe{core::ptr::copy_nonoverlapping(m.region.data.add(offset),out.as_mut_ptr(),out.len());}
+            Ok(())
+        }else{self.layout.read(hw,at,out)}
+    }
+    fn memory_list(&self,hw:Hw,w:&mut cbor::Writer)->Result<(),i32>{
+        let s=crate::memory::service(hw)?;
+        let mut after=self.list_after.unwrap_or([0;8]);
+        let mut entries=Vec::new();let mut more=false;
+        for _ in 0..=self.count {
+            let len=after.iter().position(|b|*b==0).unwrap_or(8);
+            if len>6{return Err(ERR_ARG);}
+            let mut entry: xip_abi::MemoryFile=unsafe{core::mem::zeroed()};
+            let rc=unsafe{(s.next)(hw.ctx(),self.ns,after.as_ptr(),len,&mut entry)};
+            if rc<0{return Err(rc);}if rc==0{break;}
+            if entries.len()==self.count as usize {more=true;break;}
+            after=[0;8];after[..entry.name_len as usize].copy_from_slice(&entry.name[..entry.name_len as usize]);
+            entries.push(entry);
+        }
+        w.map(2).uint(1).array(entries.len());
+        for e in entries {w.map(6).uint(1).bytes(&e.name[..e.name_len as usize]).uint(2).uint(e.version as u64)
+            .uint(3).uint(e.len as u64).uint(4).uint(1).uint(5).boolean(true).uint(16).uint(self.ns as u64);}
+        w.uint(2).boolean(more);Ok(())
+    }
+    fn memory_pump(&mut self,hw:Hw)->Result<(),i32>{
+        if self.error<0{return self.output(hw);}
+        if !self.fin {
+            if let Some(local)=self.local {
+                if self.method==4 && self.received<self.size {
+                    let (ptr,_)=hw.pkt_buf(local.request.pkt)?;
+                    let at=self.received as usize;
+                    self.data(hw,unsafe{core::slice::from_raw_parts(ptr.add(local.body_at+at),local.body_len-at)})?;
+                }
+                if self.method!=4 || self.received==self.size {self.fin=true;}
+            }
+            if !self.fin{return Ok(());}
+        }
+        if !self.committing {
+            if self.method==4 {
+                if self.received!=self.size{return Err(ERR_SIZE);}
+                self.memory.as_mut().ok_or(ERR_ARG)?.commit()?;
+            }
+            self.committing=true;
+        }
+        self.output(hw)
+    }
     fn program(&mut self, at: u32, b: &[u8]) {
         self.queue.push_back(Work::Program(at, b.to_vec()));
     }
@@ -308,6 +400,8 @@ impl Transfer {
             }
         }
         let mut t = Self {
+            ns: u8::try_from(integer(c.data,16,0)?).map_err(|_|ERR_ARG)?,
+            memory: None,
             local: None,
             handle: c.id as u32,
             tcp,
@@ -337,6 +431,7 @@ impl Transfer {
             collect: None,
             collection: None,
             removing: false,
+            panic_removed: false,
             sweep: None,
             erasing_logs: None,
             list_after: None,
@@ -354,10 +449,12 @@ impl Transfer {
             read_at: 0,
             read_len: 0,
         };
+        if t.ns != 0 { t.open_memory(hw,c)?; return Ok(t); }
         match c.method {
             2 | 3 | 4 | 5 => {
                 t.name = name(c.data)?;
                 t.old = l.lookup(hw, t.name)?;
+                if c.method==4 && t.old.is_some_and(|f|crate::panic_log::pinned(hw,l.base+f.at,16+f.size)){return Err(ERR_BUSY);}
                 if let Some(mut r) = cbor::get(c.data, 5).map_err(|_| ERR_ARG)? {
                     let Some(cbor::Item::Uint(expect)) = r.next() else {
                         return Err(ERR_ARG);
@@ -369,6 +466,7 @@ impl Transfer {
                 if c.method != 4 && t.old.is_none() {
                     return Err(ERR_NOTFOUND);
                 }
+                if c.method==5 && t.name==crate::panic_log::PANIC_NAME {crate::panic_log::disarm(hw);}
                 if let Some(f) = t.old {
                     t.version = f.version;
                     t.size = f.size;
@@ -897,7 +995,7 @@ impl Transfer {
         let plan = self.collection.as_ref().unwrap();
         let mut victim = None;
         l.areas(hw, |a| {
-            if a.kind != b'D' || a.start < store::FRONT
+            if crate::panic_log::pinned(hw,l.base+a.start,a.end-a.start) || a.kind != b'D' || a.start < store::FRONT
                 || Collection::has(&plan.seen, a.start / PAGE)
                 || Collection::has(&plan.pinned, a.start / PAGE)
             { return Ok(()); }
@@ -1038,6 +1136,7 @@ impl Transfer {
             return Err(ERR_UNSUPPORTED);
         };
         let dest = self.layout.base + at;
+        if crate::panic_log::pinned(hw,dest,size){return Err(ERR_BUSY);}
         if dest < running.saturating_add(len)
             && running < dest.saturating_add(size.div_ceil(PAGE) * PAGE)
         {
@@ -1122,6 +1221,12 @@ impl Transfer {
         Ok(())
     }
     fn data(&mut self, hw: Hw, data: &[u8]) -> Result<usize, i32> {
+        if self.ns != 0 {
+            if self.method!=4 || self.fin || data.len() as u64>u64::from(self.size-self.received) {return Err(ERR_SIZE);}
+            let m=self.memory.as_ref().ok_or(ERR_ARG)?;
+            unsafe{core::ptr::copy_nonoverlapping(data.as_ptr(),m.region.data.add(self.received as usize),data.len());}
+            self.received+=data.len() as u32;return Ok(data.len());
+        }
         if !matches!(self.method, 4 | 10 | 13 | 14) {
             return if data.is_empty() { Ok(0) } else { Err(ERR_ARG) };
         }
@@ -1245,6 +1350,7 @@ impl Transfer {
             );
         } else {
             self.removing = false;
+            if self.method==5 && self.name==crate::panic_log::PANIC_NAME {self.panic_removed=true;}
         }
         Ok(())
     }
@@ -1297,6 +1403,7 @@ impl Transfer {
     }
     #[inline(never)]
     fn pump(&mut self, hw: Hw) -> Result<(), i32> {
+        if self.ns != 0 { return self.memory_pump(hw); }
         if self.waiting {
             return Ok(());
         }
@@ -1501,8 +1608,7 @@ impl Transfer {
                 } else if self.local.is_some_and(|l| l.request.method == 17) {
                     let mut data = [0; LOCAL_MAX as usize];
                     if self.read_len != 0 {
-                        self.layout
-                            .read(hw, self.read_at, &mut data[..self.read_len as usize])?;
+                        self.read_content(hw, self.read_at, &mut data[..self.read_len as usize])?;
                     }
                     let offset = self.read_at - self.old.unwrap().at - 16;
                     w.map(6)
@@ -1550,6 +1656,10 @@ impl Transfer {
                             .uint(6)
                             .uint((self.read_at - self.old.unwrap().at - 16) as u64);
                     }
+                } else if self.method == 6 && self.ns != 0 {
+                    self.memory_list(hw, &mut w)?;
+                } else if self.method == 8 && self.ns != 0 {
+                    w.map(2).uint(4).uint(LOCAL_MAX as u64).uint(16).uint(self.ns as u64);
                 } else if self.method == 6 {
                     let mut after = self.list_after;
                     let mut count = 0;
@@ -1627,7 +1737,7 @@ impl Transfer {
                 w.finish().ok_or(ERR_SIZE)?.len()
             } else {
                 let n = self.read_len.min(PKT_MAX) as usize;
-                self.layout.read(hw, self.read_at, &mut buf[..n])?;
+                self.read_content(hw, self.read_at, &mut buf[..n])?;
                 n
             };
             self.out = p;
@@ -1732,6 +1842,7 @@ impl Transfer {
         self.batch = None;
     }
     fn dispose(&mut self, hw: Hw) {
+        self.memory.take();
         if let Some(local) = self.local.take() {
             hw.pkt_free(local.request.pkt);
         }
@@ -1897,6 +2008,7 @@ impl Files {
             queued: VecDeque::new(),
             transfer: Some(t),
             cursor: None,
+            panic_removed: false,
         })
     }
     pub fn with_cursor(cursor: u32) -> Self {
@@ -1905,8 +2017,10 @@ impl Files {
             queued: VecDeque::new(),
             transfer: None,
             cursor: (cursor >= store::FRONT).then_some(cursor),
+            panic_removed: false,
         }
     }
+    pub fn take_panic_removed(&mut self)->bool {core::mem::take(&mut self.panic_removed)}
     pub fn cursor(&self) -> u32 {
         self.cursor.unwrap_or(0)
     }
@@ -1923,6 +2037,7 @@ impl Files {
         if local_method(c.method).is_none() {
             return ERR_UNSUPPORTED;
         }
+        if self.queued.try_reserve(1).is_err(){return ERR_NOMEM;}
         if self.queued.len() >= 4 {
             return ERR_BUSY;
         }
@@ -2049,6 +2164,7 @@ impl Files {
                 }
             }
         }
+        if let Some(t)=self.transfer.as_mut(){self.panic_removed|=core::mem::take(&mut t.panic_removed);}
         if self
             .transfer
             .as_ref()
@@ -2077,5 +2193,46 @@ impl Files {
             t.dispose(hw);
         }
         self.transfer = None;
+    }
+}
+
+#[cfg(test)]
+mod memory_size_tests {
+    use super::*;
+    #[test]
+    fn panic_removal_notifies_only_after_retirement_is_complete(){
+        let mut fake=crate::tests::Fake::new(&[],0,false);
+        fake.flash[0x8000+12..0x8000+16].copy_from_slice(b"xip\0");
+        fake.flash[0x8000+8..0x8000+12].copy_from_slice(&0x3f0000u32.to_le_bytes());
+        let at=0x190000;
+        fake.flash[at]=b'D';fake.flash[at+4..at+8].copy_from_slice(&65536u32.to_le_bytes());
+        fake.flash[at+16..at+20].copy_from_slice(&[0xb1,255,12,4]);
+        fake.flash[at+20..at+28].copy_from_slice(&crate::panic_log::PANIC_NAME);
+        fake.flash[at+28..at+32].copy_from_slice(&1u32.to_le_bytes());
+        let host=fake.host();let hw=unsafe{Hw::new(&host)}.unwrap();
+        let call=CallView{component:44,method:5,id:1,from:0,value:0,flags:0,data:b"\xa1\x01\x48panic\0\0\0",time_us:0,pkt:0,request_id:None,src:None};
+        let mut t=Transfer::open(hw,&call,None,false,None).ok().unwrap();
+        t.remove_step(hw).unwrap();assert!(!t.panic_removed);
+        // Completion of the queued retire write clears the live bit.
+        fake.flash[at+16]&=!16;
+        t.remove_step(hw).unwrap();assert!(t.panic_removed);
+    }
+    #[test]
+    fn memory_write_requires_size_before_opening_a_lease() {
+        let mut fake=crate::tests::Fake::new(&[],0,false);
+        fake.flash[0x8000+12..0x8000+16].copy_from_slice(b"xip\0");
+        fake.flash[0x8000+8..0x8000+12].copy_from_slice(&0x3f0000u32.to_le_bytes());
+        let host=fake.host();let hw=unsafe{Hw::new(&host)}.unwrap();
+        // Valid RAM name/namespace, but size is absent, maximal, or zero.
+        for (data,expected) in [
+            (&b"\xa2\x01\x45probe\x10\x01"[..],ERR_ARG),
+            (&b"\xa3\x01\x45probe\x10\x01\x02\x1a\xff\xff\xff\xff"[..],ERR_ARG),
+            (&b"\xa3\x01\x45probe\x10\x01\x02\x00"[..],ERR_UNSUPPORTED),
+        ] {
+            let call=CallView{component:15,method:4,id:1,from:44,value:0,flags:0,data,time_us:0,pkt:0,request_id:None,src:None};
+            // No memory service: a valid zero size reaches the backend, while
+            // malformed sizes must fail as ARG before trying to open a lease.
+            assert_eq!(Transfer::open(hw,&call,None,false,None).err(),Some(expected));
+        }
     }
 }

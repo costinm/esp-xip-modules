@@ -16,6 +16,7 @@ pub fn write(hw: Hw, layout: Layout, cursor: u32, w: &mut cbor::Writer<'_>) -> R
     if let Some(a) = found {
         let mut name = [0; 32];
         let (mut len, mut version, mut live) = (0, 0u32, false);
+        let mut quarantined=None;
         let size;
         if a.kind == 0xe9 {
             size = layout.image_size(hw, a.start)?.ok_or(ERR_IO)?;
@@ -53,7 +54,8 @@ pub fn write(hw: Hw, layout: Layout, cursor: u32, w: &mut cbor::Writer<'_>) -> R
             } else {
                 return Err(ERR_IO);
             }
-            if !crate::for_modules(hw, |module_name, _, active, page| {
+            if !crate::for_module_status(hw, |module_name, _, active, page, disabled| {
+                if module_name==&name[..len] {quarantined=disabled;}
                 live |= active
                     && module_name == &name[..len]
                     && page == Some(((layout.base + a.start) / PAGE) as u64);
@@ -61,7 +63,7 @@ pub fn write(hw: Hw, layout: Layout, cursor: u32, w: &mut cbor::Writer<'_>) -> R
                 return Err(ERR_IO);
             }
         }
-        w.map(7)
+        w.map(8)
             .uint(1)
             .text(if a.kind == 0xe9 { "runtime" } else { "module" })
             .uint(2)
@@ -75,7 +77,8 @@ pub fn write(hw: Hw, layout: Layout, cursor: u32, w: &mut cbor::Writer<'_>) -> R
             .uint(6)
             .uint(a.start as u64)
             .uint(7)
-            .boolean(live);
+            .boolean(live).uint(8);
+        if let Some(v)=quarantined {w.boolean(v);}else{w.null();}
     }
     w.uint(2).uint(found.map_or(0, |a| a.end) as u64).uint(3);
     if let Some(k) = key {

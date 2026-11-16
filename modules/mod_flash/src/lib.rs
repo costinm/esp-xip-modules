@@ -12,6 +12,7 @@ mod state;
 mod extents;
 mod store;
 mod files;
+mod memory;
 mod inventory;
 mod tcp;
 mod network;
@@ -279,7 +280,12 @@ fn module_floor(hw: Hw, l: &Layout, view: &state::View, name: &[u8]) -> Result<O
 /// `f(name, component, running, page)` for every module the host lists (`page`: the flash page of the image, key 12, when the host says);
 /// false when the list cannot be read.
 fn for_modules(hw: Hw, mut f: impl FnMut(&[u8], u64, bool, Option<u64>)) -> bool {
-    let mut bytes = [0u8; 2048];
+    for_module_status(hw,|name,tag,running,page,_|f(name,tag,running,page))
+}
+fn for_module_status(hw: Hw, mut f: impl FnMut(&[u8], u64, bool, Option<u64>, Option<bool>)) -> bool {
+    let mut bytes=alloc::vec::Vec::new();
+    if bytes.try_reserve_exact(2048).is_err(){return false;}
+    bytes.resize(2048,0);
     let n = hw.modules_info(&mut bytes);
     if n < 0 {
         return false;
@@ -292,12 +298,13 @@ fn for_modules(hw: Hw, mut f: impl FnMut(&[u8], u64, bool, Option<u64>)) -> bool
         let Some(cbor::Item::Map(fields)) = r.next() else {
             return false;
         };
-        let (mut tag, mut running, mut name, mut page) = (0, false, &[][..], None);
+        let (mut tag, mut running, mut name, mut page, mut quarantined) = (0, false, &[][..], None, None);
         for _ in 0..fields {
             let Some(cbor::Item::Uint(key)) = r.next() else {
                 return false;
             };
             match key {
+                14 => { quarantined=match r.next(){Some(cbor::Item::Bool(v))=>Some(v),_=>None}; }
                 1 | 2 | 4 | 12 => match (key, r.next()) {
                     (1, Some(cbor::Item::Text(v))) => name = v,
                     (2, Some(cbor::Item::Uint(v))) => tag = v,
@@ -313,7 +320,7 @@ fn for_modules(hw: Hw, mut f: impl FnMut(&[u8], u64, bool, Option<u64>)) -> bool
                 }
             }
         }
-        f(name, tag, running, page);
+        f(name, tag, running, page, quarantined);
     }
     true
 }
@@ -1116,6 +1123,8 @@ pub struct State {
     status_published: bool,
     status_busy: bool,
     panic_inflight: bool,
+    // Retained dump: retry only after Files reports its removal.
+    panic_occupied: bool,
 }
 impl State {
     fn close_tcp(&mut self,hw:Hw){
@@ -1126,6 +1135,7 @@ impl State {
         }
     }
     fn release_files_if_idle(&mut self,hw:Hw){
+        if !self.files.is_null() && unsafe{(*self.files).take_panic_removed()}{self.panic_occupied=false;}
         if self.tcp.is_null() && !self.files.is_null() && unsafe{(*self.files).releasable()} {
             unsafe{self.files_cursor=(*self.files).cursor();core::ptr::drop_in_place(self.files);}
             hw.mem_free(self.files.cast());self.files=core::ptr::null_mut();
@@ -1162,6 +1172,11 @@ impl State {
 }
 impl Module for State {
     fn handle(&mut self, hw: &Hw, call: &CallView) -> i32 {
+        if self.panic_inflight && call.component==15 && call.method==18 && call.id==panic_log::PREPARE_ID {
+            self.panic_inflight=false;
+            if matches!(xip_abi::cbor::Reader::new(call.data).next(),Some(xip_abi::cbor::Item::Map(_))){self.panic_occupied=panic_log::arm_existing(*hw);}
+            return 0;
+        }
         if self.panic_inflight && panic_log::acknowledge(*hw, call) { self.panic_inflight=false; return 0; }
         if self.started && call.method==TICK && !self.panic_inflight && self.tcp.is_null() && self.connection.is_null() && panic_log::available(*hw) {
             if self.files.is_null() {
@@ -1171,6 +1186,13 @@ impl Module for State {
             if let Some(files)=unsafe{self.files.as_mut()} {
                 if !files.busy() { self.panic_inflight=panic_log::pending(*hw, files); }
             }
+        }
+        if self.started && call.method==TICK && !self.panic_inflight && hw.now_ms()%5000<100 && !self.panic_occupied && panic_log::needs_prepare(*hw) && self.tcp.is_null() && self.connection.is_null() {
+            if self.files.is_null(){
+                let p=hw.mem_alloc(core::mem::size_of::<files::Files>()).cast::<files::Files>();
+                if !p.is_null(){unsafe{p.write(files::Files::with_cursor(self.files_cursor));}self.files=p;}
+            }
+            if let Some(files)=unsafe{self.files.as_mut()} {if !files.busy(){self.panic_inflight=panic_log::prepare(*hw,files,&mut self.panic_occupied);}}
         }
         if call.is_host(HOST_START) {
             if self.started {
