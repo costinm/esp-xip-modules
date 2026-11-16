@@ -1517,8 +1517,24 @@ fn run_devices_sync(dry_run: bool) -> Result<(), String> {
         }
         changed += 1;
     }
-    if changed == 0 {
-        return Err("no node answered with a signed discovery identity; nothing recorded".into());
+    let mut refreshed = 0usize;
+    if !dry_run {
+        let inventory = crate::inventory::Inventory::from_env()?;
+        for (id, config) in inventory.intended()? {
+            let result = inventory.endpoint(&config).and_then(|endpoint| inventory.refresh(&config, &endpoint));
+            match result {
+                Ok(status) => {
+                    refreshed += 1;
+                    println!("dmesh_devices_sync device={} stats={} logs={} panics={} acknowledged_through={:?} errors={:?} schema_gaps={:?}",
+                        id, status.diagnostics.stats.len(), status.diagnostics.logs.len(), status.diagnostics.panics.len(),
+                        status.diagnostics.logs_acknowledged_through, status.diagnostics.errors, status.diagnostics.schema_gaps);
+                }
+                Err(error) => eprintln!("dmesh_devices_sync device={} refresh_error={}", id, error),
+            }
+        }
+    }
+    if changed == 0 && refreshed == 0 {
+        return Err("no signed discovery responses or successful managed-device refreshes".into());
     }
     Ok(())
 }

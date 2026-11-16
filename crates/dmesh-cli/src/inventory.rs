@@ -1,6 +1,12 @@
 //! Desired configuration, reconstructible device status and transient discovery.
 //! No credentials are serialized by this module.
 mod files;
+mod diagnostics;
+mod diagnostic_text;
+mod telemetry;
+mod telemetry_text;
+mod compact;
+pub use diagnostics::Diagnostics;
 pub use files::{FileSpec, FileStatus, ManagedFile};
 
 use dmesh_discovery::{
@@ -94,8 +100,9 @@ impl Identity {
         for mac in &self.macs {
             parse_mac(mac)?;
         }
-        Ok(hex(&Sha256::digest(&key)))
+        Ok(hex(&vip[8..]))
     }
+    fn legacy_id(&self)->Result<String,String>{self.id()?;Ok(hex(&Sha256::digest(unhex(&self.public_key)?)))}
     pub fn from_record(r: &DeviceRecord) -> Result<Self, String> {
         let identity = Self {
             public_key: hex(&r.public_key),
@@ -177,9 +184,13 @@ pub struct ImageStatus {
     pub allocated_bytes: u32,
     pub offset: u32,
     pub running: bool,
+    #[serde(default)]
+    pub quarantined: Option<bool>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {
+    #[serde(default)]
+    pub diagnostics: Diagnostics,
     pub identity: Identity,
     pub observed_at: u64,
     pub attempted_at: u64,
@@ -291,7 +302,12 @@ impl Inventory {
         let mac = facts["mac"]
             .as_str()
             .ok_or("recovery announcement missing MAC")?;
-        let id = format!("mac-{}", hex(&parse_mac(mac)?));
+        let provisional = format!("mac-{}", hex(&parse_mac(mac)?));
+        let identity=self.intended()?.into_iter().map(|(_,c)|c.identity)
+            .chain(self.statuses()?.into_iter().map(|(_,s)|s.identity))
+            .chain(self.observations()?.into_iter().filter_map(|(_,o)|o.identity))
+            .find(|i|i.macs.iter().any(|m|m.eq_ignore_ascii_case(mac)));
+        let id=identity.as_ref().map(Identity::id).transpose()?.unwrap_or_else(||provisional.clone());
         self.save_observation(
             &id,
             &Observation {
@@ -299,10 +315,16 @@ impl Inventory {
                 source: "mod_flash".into(),
                 endpoint: endpoint.into(),
                 verified: false,
-                identity: None,
+                identity,
                 facts: facts.clone(),
             },
-        )
+        )?;
+        if id!=provisional {
+            match fs::remove_file(self.paths.discovery.join("observations").join(format!("{provisional}.json"))){
+                Ok(())=>{},Err(e)if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.to_string()),
+            }
+        }
+        Ok(())
     }
     fn save_observation(&self, id: &str, o: &Observation) -> Result<(), String> {
         atomic(
@@ -513,7 +535,8 @@ impl Inventory {
     }
 }
 fn identity_matches(id: &str, i: &Identity, target: &str) -> bool {
-    id == target
+    id.eq_ignore_ascii_case(target)
+        || i.legacy_id().is_ok_and(|id|id.eq_ignore_ascii_case(target))
         || i.vip6
             .parse::<Ipv6Addr>()
             .ok()
@@ -817,6 +840,7 @@ impl Inventory {
                     .find(|(k, _)| k == &id)
                     .map(|(_, s)| s);
                 let mut s = previous.unwrap_or(Status {
+                    diagnostics: Diagnostics::default(),
                     identity,
                     observed_at: 0,
                     attempted_at: 0,
@@ -897,6 +921,7 @@ impl Inventory {
                     allocated_bytes: allocated,
                     offset,
                     running: e["7"].as_bool().ok_or("missing running state")?,
+                    quarantined: e["8"].as_bool(),
                 });
             }
             let next = u32_field(&v, "2")?;
@@ -908,6 +933,7 @@ impl Inventory {
                 flash["xip_base"] = shape.0.into();
                 flash["xip_size"] = shape.1.into();
                 let mut status = Status {
+                    diagnostics: Diagnostics::default(),
                     identity,
                     observed_at: now(),
                     attempted_at: now(),
@@ -924,6 +950,7 @@ impl Inventory {
                     error: None,
                 };
                 self.pull_files(&mut status)?;
+                self.collect_diagnostics(&mut status)?;
                 self.save_status(&status)?;
                 return Ok(status);
             }
@@ -1387,9 +1414,16 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let inventory = Inventory::from_env()?;
     let command = args.first().map(String::as_str).unwrap_or("list");
     let output=match command {
+        "compact"=>inventory.compact()?,
         "paths"=>serde_json::to_value(&inventory.paths).map_err(|e|e.to_string())?,
         "key-init"=>{let key=ControlKey::load_or_create(&inventory.paths.key)?;serde_json::json!({"path":inventory.paths.key,"public_key":hex(&key.public_key())})},
         "list"=>serde_json::json!({"intended":inventory.intended()?,"status":inventory.statuses()?,"discovery":inventory.observations()?}),
+        "sample"=>{
+            let (_,c)=inventory.resolve(args.get(1).ok_or("devices sample DEVICE --serial=/dev/...")?)?;
+            let serial=option(args,"serial").ok_or("serial sampling needs --serial=/dev/...")?;
+            let mut status=inventory.statuses()?.into_iter().find(|(_,s)|s.identity==c.identity||s.identity.public_key==c.identity.public_key).ok_or("refresh this device's TCP inventory once before serial sampling")?.1;
+            inventory.sample_serial(&mut status,serial,true)?;inventory.save_status(&status)?;serde_json::to_value(status).map_err(|e|e.to_string())?
+        },
         "adopt"=>{let target=args.get(1).ok_or("devices adopt ID|VIP|NAME|MAC")?;serde_json::json!({"config":inventory.adopt(target,option(args,"endpoint"))?})},
         "bump"=>{
             let (id,_)=inventory.resolve(args.get(1).ok_or("devices bump DEVICE")?)?;
@@ -1405,7 +1439,14 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             if command=="show" {serde_json::json!({"id":id,"files_dir":inventory.files_dir(&c)?,"status_dir":inventory.status_dir(&c.identity)?,"status_files_dir":inventory.status_files_dir(&c.identity)?,"files":inventory.managed_files(&c)?,"intended":c,"status":inventory.statuses()?.into_iter().find(|(k,_)|*k==id).map(|(_,s)|s)})}
             else {
                 let endpoint=match option(args,"endpoint"){Some(e)=>e.to_owned(),None=>inventory.endpoint(&c)?};
-                if command=="refresh"{serde_json::to_value(inventory.refresh(&c,&endpoint)?).map_err(|e|e.to_string())?}
+                if command=="refresh"{
+                    let mut status=inventory.refresh(&c,&endpoint)?;
+                    if let Some(serial)=option(args,"serial"){
+                        if let Err(e)=inventory.sample_serial(&mut status,serial,false){status.diagnostics.errors.push(format!("serial sleep: {e}"));if !status.conditions.iter().any(|c|c=="DiagnosticsIncomplete"){status.conditions.push("DiagnosticsIncomplete".into());}}
+                        inventory.save_status(&status)?;
+                    }
+                    serde_json::to_value(status).map_err(|e|e.to_string())?
+                }
                 else {inventory.reconcile(&c,&endpoint,command=="reconcile"&&args.iter().any(|a|a=="--apply"))?}
             }
         },
@@ -1414,7 +1455,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             let serial=option(args,"serial").filter(|s|s.starts_with("/dev/")).ok_or("USB provisioning requires --serial=/dev/...")?;
             provision_usb(&inventory,&c,serial)?;serde_json::json!({"provisioned":c.identity.vip6})
         },
-        _=>return Err("devices paths|list|adopt|show|bump|refresh|plan|reconcile|key-init|provision (also check|sync)".into()),
+        _=>return Err("devices paths|list|adopt|show|bump|refresh|sample|plan|reconcile|compact|key-init|provision (also check|sync)".into()),
     };
     println!(
         "{}",
@@ -1504,7 +1545,7 @@ mod tests {
             device_type: Some("esp32c6".into()),
         }
     }
-    fn inventory(root: &Path) -> Inventory {
+    pub(super) fn inventory(root: &Path) -> Inventory {
         Inventory {
             paths: Paths {
                 intended: root.join("config/devices"),
@@ -1514,7 +1555,7 @@ mod tests {
             },
         }
     }
-    fn config() -> Intended {
+    pub(super) fn config() -> Intended {
         Intended {
             generation: 1,
             identity: identity(7),
@@ -1526,8 +1567,9 @@ mod tests {
             prune: false,
         }
     }
-    fn status() -> Status {
+    pub(super) fn status() -> Status {
         Status {
+            diagnostics: Diagnostics::default(),
             identity: identity(7),
             observed_at: 12,
             attempted_at: 12,
@@ -1542,6 +1584,7 @@ mod tests {
                 allocated_bytes: 131072,
                 offset: 0x200000,
                 running: true,
+                quarantined: None,
             }],
             files: vec![],
             flash: serde_json::json!({"1":20}),
@@ -1632,7 +1675,7 @@ mod tests {
         c.modules.insert("berry".into(), ImageSpec::default());
         assert!(i.plan(&c, &s).is_err());
     }
-    fn encode_json(e: &mut minicbor::Encoder<Vec<u8>>, v: &serde_json::Value) {
+    pub(super) fn encode_json(e: &mut minicbor::Encoder<Vec<u8>>, v: &serde_json::Value) {
         use serde_json::Value::*;
         match v {
             Null => {
@@ -1666,7 +1709,7 @@ mod tests {
             }
         }
     }
-    fn server(replies: Vec<serde_json::Value>) -> (String, std::thread::JoinHandle<()>) {
+    pub(super) fn server(replies: Vec<serde_json::Value>) -> (String, std::thread::JoinHandle<()>) {
         use std::io::Read;
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1675,6 +1718,9 @@ mod tests {
             format!("tcp://{addr}"),
             std::thread::spawn(move || {
                 for mut reply in replies {
+                    let expected_method=reply.as_object_mut().and_then(|v|v.remove("_expect_method"));
+                    let expected_body=reply.as_object_mut().and_then(|v|v.remove("_expect_body"));
+                    let expected_fields=reply.as_object_mut().and_then(|v|v.remove("_expect_fields"));
                     let body = reply
                         .as_object_mut()
                         .and_then(|v| v.remove("_body"))
@@ -1694,6 +1740,14 @@ mod tests {
                         if d.skip().is_ok() {
                             break;
                         }
+                    }
+                    if let Some(expected)=expected_body {
+                        let expected=unhex(expected.as_str().unwrap()).unwrap();let mut body=vec![0;expected.len()];socket.read_exact(&mut body).unwrap();assert_eq!(body,expected);
+                    }
+                    if expected_method.is_some() || expected_fields.is_some() {
+                        let decoded=crate::console::decode(&request).unwrap();
+                        if let Some(method)=expected_method {assert_eq!(decoded["2"],method);}
+                        if let Some(fields)=expected_fields {assert_eq!(decoded["5"],fields);}
                     }
                     // Deliberately reply before FIN: metadata-only requests are length delimited.
                     let mut e = minicbor::Encoder::new(Vec::new());
@@ -1795,6 +1849,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(i.endpoint(&c).unwrap(), "tcp://192.0.2.12:5227");
+        i.save_intended(&c).unwrap();
+        i.observe_recovery(&serde_json::json!({"mac":c.identity.macs[0],"port":5227}),"192.0.2.12:5227").unwrap();
+        assert_eq!(i.observations().unwrap().len(),1);
+        assert_eq!(i.observations().unwrap()[0].0,c.identity.id().unwrap());
         i.save_status(&status()).unwrap();
         fs::remove_dir_all(&i.paths.discovery).unwrap();
         assert_eq!(i.endpoint(&c).unwrap(), status().endpoint);

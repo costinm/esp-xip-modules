@@ -79,7 +79,7 @@ pub(super) fn request(endpoint: &str, method: u32, fields: &[u8]) -> Result<TcpS
     stream.write_all(&envelope).map_err(|e| e.to_string())?;
     Ok(stream)
 }
-fn metadata(stream: &mut TcpStream) -> Result<serde_json::Value, String> {
+pub(super) fn metadata(stream: &mut TcpStream) -> Result<serde_json::Value, String> {
     let mut bytes = Vec::new();
     loop {
         let mut byte = [0];
@@ -96,14 +96,14 @@ fn metadata(stream: &mut TcpStream) -> Result<serde_json::Value, String> {
         }
     }
 }
-fn check(v: &serde_json::Value) -> Result<(), String> {
+pub(super) fn check(v: &serde_json::Value) -> Result<(), String> {
     if let Some(e) = v["7"].as_i64().filter(|e| *e < 0) {
         Err(format!("flash error {e}"))
     } else {
         Ok(())
     }
 }
-fn read_versioned(endpoint: &str, file: &FileStatus) -> Result<Vec<u8>, String> {
+pub(super) fn read_versioned(endpoint: &str, file: &FileStatus) -> Result<Vec<u8>, String> {
     let mut e = minicbor::Encoder::new(Vec::new());
     e.map(2)
         .unwrap()
@@ -243,7 +243,7 @@ impl Inventory {
     pub fn status_files_dir(&self, identity: &Identity) -> Result<PathBuf, String> {
         Ok(self.status_dir(identity)?.join("files"))
     }
-    fn cached_path(&self, identity: &Identity, file: &FileStatus) -> Result<PathBuf, String> {
+    pub(super) fn cached_path(&self, identity: &Identity, file: &FileStatus) -> Result<PathBuf, String> {
         let root = self.status_dir(identity)?;
         Ok(match &file.name_hex {
             Some(v) => root.join("opaque-files").join(hex(&unhex(v)?)),
@@ -264,6 +264,12 @@ impl Inventory {
             .find(|(k, _)| *k == id)
             .map(|(_, s)| s);
         for file in &mut status.files {
+            // Panic capture belongs to the telemetry collector, not regular file sync.
+            if file.name=="panic" && file.name_hex.is_none(){
+                let cached=self.cached_path(&status.identity,file)?;
+                if fs::read(&cached).is_ok_and(|b|b.iter().all(|v|*v==255)){fs::remove_file(cached).map_err(|e|e.to_string())?;}
+                continue;
+            }
             let path = self.cached_path(&status.identity, file)?;
             let old = previous.as_ref().and_then(|s| {
                 s.files.iter().find(|f| {
@@ -273,6 +279,7 @@ impl Inventory {
                         && f.size_bytes == file.size_bytes
                 })
             });
+            let old=old.filter(|_|file.name!="panic");
             let cached = old.and_then(|f| f.sha256.as_ref()).and_then(|hash| {
                 let body = fs::read(&path).ok()?;
                 (body.len() == file.size_bytes as usize && hex(&Sha256::digest(&body)) == *hash)

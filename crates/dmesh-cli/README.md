@@ -61,13 +61,15 @@ VIP6 selects an identity; it is not a directly routable UDP address.
 
 `dmesh-cli devices paths` shows the three stores:
 
+Device IDs are the VIP’s eight bytes as 16 lowercase hex digits.
+
 - Intended configuration: `~/.config/dmesh/devices/<id>/device.toml` and `files/` (keep in Git).
 - Observed status: `~/.local/state/dmesh/devices/<id>/status.json` and pulled `files/` (recreated by refresh).
 - Discovery: `$XDG_RUNTIME_DIR/dmesh/discovery/`, or `/tmp/dmesh-$UID/discovery/`.
 
 XDG config/state overrides are supported. Discovery commands save public
-observations automatically. Signed devices are keyed by their public key;
-unsigned recovery advertisements remain provisional MAC observations.
+observations automatically. Known devices use their VIP ID; recovery advertisements
+without a known public identity remain provisional MAC observations.
 Existing `DMESH_NODES_DIR` / `DMESH_PAIRED_DEVICES_DIR` records remain readable.
 New discovery does not write credentials or change intended configuration.
 
@@ -269,12 +271,17 @@ admission, and an application response.
 ## Settings and controls
 
 The [single lmesh tools catalog](../lmesh/resources/tools.json) carries local and
-device methods with their CBOR tags and field types. dmesh-cli discovers it in
-the same per-service layout as mesh-cli: all `.json` files under
-`MESH_SCHEMA_DIR/lmesh/`, then `/opt/lmesh/etc/schemas/`,
-`$HOME/opt/lmesh/etc/schemas/`, and `$HOME/etc/schemas/`. The repository
-`env.sh` selects the source catalog; the packaged CLI selects its installed
-catalog. The shared device
+device methods with their CBOR tags and field types. dmesh-cli resolves every
+catalog at runtime through the same `mesh::catalog` search path as mesh-cli:
+`MESH_SCHEMA_DIR/<service>/`, then the same root's highest numeric
+`<VERSION>/` subdirectory, then `$HOME/.cache/schemas/<service>/` (same),
+then the numeric `VERSION` directories of every installed package
+(`/opt/PACKAGE/etc/schemas/<service>/<VERSION>/` and `$HOME/opt/...`), and
+finally the direct-file locations `/opt/<service>/etc/schemas/`,
+`$HOME/opt/<service>/etc/schemas/` and `$HOME/etc/schemas/`. The repository
+`env.sh` points `MESH_SCHEMA_DIR` at `target/schemas` (published by
+`scripts/gen.sh` for the xip-* services, including the lmesh snapshot); the
+packaged CLI selects its installed catalog. The shared device
 control contract is specified in [root API](../../API.md).
 The firmware transport [README](../../fw/transport/README.md) records
 implementation and radio policy, not a second API schema.
@@ -391,3 +398,13 @@ radio facts only. Older observer inventory responses remain readable. See the
 without soliciting a discovery pass. ESP has no retained inventory. Both hosts
 and ESP return original announcement bytes with optional last-seen, age and
 direct/crawled metadata; the CLI verifies signatures and labels unsigned records.
+
+Telemetry is in `~/.local/state/dmesh/devices/<vip>/diagnostics/telemetry.txt`
+and `telemetry.cbor`, with dated names on rotation. Text has UTC timestamps and
+flat `key=value` records, split by heap, sleep, module, image and event. CBOR
+retains the full structured data. `dmesh-cli devices compact` regenerates readable
+text and updates the older directory/archive layout while preserving collected data.
+Use `devices refresh DEVICE --endpoint=tcp://HOST:5227 --serial=/dev/serial/by-id/DEVICE`
+for older firmware that needs serial sleep stats. After an initial TCP refresh,
+`devices sample DEVICE --serial=/dev/serial/by-id/DEVICE` records current stats
+without draining logs or panics.

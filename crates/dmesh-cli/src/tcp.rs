@@ -739,6 +739,7 @@ mod wifi_tests {
     use super::*;
     #[test]
     fn credentials_are_text_and_validated_without_echoing_secrets() {
+        crate::console::set_test_schema_dir();
         let args = ["--ssid=00123".into(), "--psk=0123456789".into()];
         let v =
             crate::console::decode(&wifi_request("flash.wifi.join", &args, 77).unwrap()).unwrap();
@@ -768,6 +769,7 @@ mod image_retry_tests {
     use super::*;
     #[test]
     fn lost_commit_reply_retransmits_the_identical_image_operation() {
+        crate::console::set_test_schema_dir();
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();

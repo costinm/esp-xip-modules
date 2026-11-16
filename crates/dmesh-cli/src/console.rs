@@ -368,12 +368,21 @@ fn run_udp(target:&str,request:&Request)->Result<(),String>{
     }
     Err(format!("native method {}.{} did not reply",request.component,request.method))
 }
-fn run_request(owner: &mut XipPort, port: u32, request: &Request, timeout: Duration, endpoint:&str) -> Result<(),String> {
+fn run_request(owner:&mut XipPort,port:u32,request:&Request,timeout:Duration,endpoint:&str)->Result<(),String>{
+    let answer=request_reply(owner,port,request,timeout,endpoint)?;println!("{answer}");Ok(())
+}
+pub(crate) fn query_serial(path:&str,method:&str)->Result<Value,String>{query_serial_args(path,&[method.into()])}
+pub(crate) fn query_serial_args(path:&str,words:&[String])->Result<Value,String>{
+    let req=request(words,crate::client::fresh_request_id())?;
+    let mut owner=XipPort::open_baud(path,None).map_err(|e|e.to_string())?;owner.wake()?;
+    request_reply(&mut owner,PORT_QUIC,&req,Duration::from_secs(6),path)
+}
+fn request_reply(owner: &mut XipPort, port: u32, request: &Request, timeout: Duration, endpoint:&str) -> Result<Value,String> {
     owner.write_all(&encode_record(port,&wrap_request(&request.bytes))).map_err(|e|e.to_string())?;
     let mut reader=Reader::default();let end=Instant::now()+timeout;
     while Instant::now()<end {
         let chunk=owner.read().map_err(|e|e.to_string())?;
-        if let Some(answer)=response(&mut reader,&chunk,port,request)? {crate::inventory::Inventory::from_env()?.observe_native(&answer,endpoint)?;println!("{answer}");return Ok(());}
+        if let Some(answer)=response(&mut reader,&chunk,port,request)? {crate::inventory::Inventory::from_env()?.observe_native(&answer,endpoint)?;return Ok(answer);}
         if chunk.is_empty() {std::thread::sleep(Duration::from_millis(5));}
     }
     Err(format!("native method {}.{} did not reply",request.component,request.method))
@@ -420,6 +429,13 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     let mut owner = XipPort::open(path).map_err(|e| e.to_string())?;
     owner.wake()?;
     run_request(&mut owner,port,&request,Duration::from_secs_f64(seconds),path)
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_schema_dir() {
+    unsafe {
+        std::env::set_var("MESH_SCHEMA_DIR", concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/schemas"))
+    }
 }
 
 #[cfg(test)]

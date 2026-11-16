@@ -11,10 +11,15 @@ const CATALOG_SERVICE: &str = "lmesh";
 pub(crate) fn resolve_service_catalog(
     service: &str,
 ) -> Result<Arc<mesh::catalog::ResolvedCatalog>> {
+    if let Some(resolved) = mesh::catalog::service_catalog_resolver().resolve(service) {
+        return resolved;
+    }
     #[cfg(test)]
     {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         for candidate in [
+            manifest_dir.join(format!("../../target/schemas/{service}/1/api.cbor")),
+            manifest_dir.join(format!("../../target/schemas/{service}/1/tools.json")),
             manifest_dir.join(format!("../../api/generated/schemas/{service}/api.cbor")),
             manifest_dir.join(format!("../../api/generated/schemas/{service}/tools.json")),
             manifest_dir.join(format!("schemas/{service}/api.cbor")),
@@ -24,9 +29,6 @@ pub(crate) fn resolve_service_catalog(
                 return mesh::catalog::service_catalog_resolver().load_path(service, candidate);
             }
         }
-    }
-    if let Some(resolved) = mesh::catalog::service_catalog_resolver().resolve(service) {
-        return resolved;
     }
     mesh::catalog::service_catalog_resolver().require(service)
 }

@@ -162,6 +162,7 @@ mod sync {
                             }
                             reply
                         }
+                        11 => serde_json::json!({}),
                         other => panic!("unexpected method {other}"),
                     };
                     drop(s);
