@@ -117,10 +117,10 @@ fn take_item<'a>(data: &'a [u8], d: &mut minicbor::Decoder<'a>) -> Result<&'a [u
 }
 
 pub(super) fn decode_nodes(reporter: &str, data: &[u8]) -> Result<Vec<ObservedNode>, String> {
-    use dmesh_server::discovery_nodes as wire;
+    use dmesh_discovery::discovery_nodes as wire;
     let mut d = minicbor::Decoder::new(data);
     let header = take_item(data, &mut d)?;
-    let header = dmesh_server::tagged::decode(header).ok_or("missing discovery response header")?;
+    let header = mesh::mesh_api::envelope::decode(header).ok_or("missing discovery response header")?;
     if !wire::is_header(header) {
         return Err("unsupported discovery.nodes format".into());
     }
@@ -198,7 +198,7 @@ pub(super) fn decode_nodes(reporter: &str, data: &[u8]) -> Result<Vec<ObservedNo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dmesh_server::discovery_nodes::{self as wire, Observation};
+    use dmesh_discovery::discovery_nodes::{self as wire, Observation};
     fn response(payload: &[u8]) -> Vec<u8> {
         let mut out = vec![0; 64];
         let n = wire::header(42, &mut out).unwrap();
@@ -264,15 +264,15 @@ mod tests {
     #[test]
     fn linux_android_producer_and_cli_share_fragmented_signed_stream_contract() {
         use dmesh_discovery::{Engine,UnsignedIdentity,P256Identity,NoFacts,Carrier};
-        use dmesh_server::{discovery::DiscoveryPacketKind,discovery_nodes::Options};
+        use dmesh_discovery::{discovery::DiscoveryPacketKind,discovery_nodes::Options};
         use std::sync::Arc;
         let sender=Engine::new(Arc::new(P256Identity::generate()),Arc::new(NoFacts));
         let original=sender.announce_wire().unwrap();
         let observer=Arc::new(Engine::new(Arc::new(UnsignedIdentity::from_seed(b"observer")),Arc::new(NoFacts)));
         observer.on_datagram(&Carrier::radio("nan","02:02:02:02:02:02",DiscoveryPacketKind::ActivePublish),&original);
-        let mut reader=dmesh_discovery::nodes::stream_response(observer,42,Options{duration_ms:0,retained:true,active:false},false).unwrap().into_reader();
-        let mut response=Vec::new();let mut chunk=[0;7];
-        loop {let(n,done)=reader.read(&mut chunk);response.extend_from_slice(&chunk[..n]);if done{break;}assert!(n>0);}
+        let (mut response, mut source)=dmesh_discovery::nodes::open_stream(observer,42,Options{duration_ms:0,retained:true,active:false},false).unwrap();
+        let mut chunk=[0;7];
+        loop {let(n,done)=source.read(&mut chunk);response.extend_from_slice(&chunk[..n]);if done{break;}assert!(n>0);}
         let rows=decode_nodes("1122334455667788",&response).unwrap();
         assert_eq!(rows.len(),1);assert!(rows[0].fields.contains("authenticated=true retained=true origin=direct"));
         assert!(rows[0].fields.contains("last_seen_ms="));
@@ -303,7 +303,7 @@ mod tests {
 
 /// Persist only complete, validated streams; the decoder remains side-effect free.
 fn persist_nodes(reporter: &str, data: &[u8]) -> Result<(), String> {
-    use dmesh_server::discovery_nodes as wire;
+    use dmesh_discovery::discovery_nodes as wire;
     decode_nodes(reporter, data)?;
     let inventory = crate::inventory::Inventory::from_env()?;
     let mut d = minicbor::Decoder::new(data);

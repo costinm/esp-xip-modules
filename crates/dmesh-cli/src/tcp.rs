@@ -6,12 +6,13 @@ use std::{
     time::Duration,
 };
 fn tool(name: &str) -> Result<serde_json::Value, String> {
-    let tools: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../api/generated/schemas/xip-flash/tools.json"
-    ))
-    .map_err(|e| e.to_string())?;
+    let resolved = crate::schema::resolve_service_catalog("xip-flash").map_err(|e| e.to_string())?;
+    let tools = resolved
+        .tools
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| resolved.tools.as_array());
     tools
-        .as_array()
         .and_then(|tools| {
             tools
                 .iter()

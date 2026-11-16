@@ -13,7 +13,7 @@ use crate::{
         load_tagged_schema, render_device_record,
     },
 };
-use dmesh_server::announce;
+use dmesh_discovery::announce;
 use std::{
     env,
     io::{ErrorKind, Read},
@@ -84,6 +84,17 @@ pub fn run_dmesh_cli() -> Result<(), String> {
 /// gateway keep one L2/session implementation.
 pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     let mut arguments: Vec<String> = args.into_iter().collect();
+    if arguments
+        .first()
+        .is_some_and(|s| matches!(s.as_str(), "mux-listen" | "mux-serve"))
+    {
+        return crate::mux_cli::run_server_cli(&arguments);
+    }
+    if arguments.first().is_some_and(|s| {
+        s.starts_with("mux://") || s.starts_with("mux+unix://") || s.starts_with("mux+serial://")
+    }) {
+        return crate::mux_cli::run_client_cli(&arguments);
+    }
     if arguments.get(1).is_some_and(|s| matches!(s.as_str(), "flash.wifi.join" | "flash.wifi.info")) {
         return crate::tcp::wifi(&arguments);
     }
@@ -401,8 +412,8 @@ fn run_serial_stream_command(arguments: &[String]) -> Result<(), String> {
     let body = encode_stream_argv_with_id(&service_arguments, fresh_request_id())
         .map_err(|error| error.to_string())?;
     let path = arguments.first().ok_or("missing serial path")?;
-    let probe_request = dmesh_server::tagged::decode(&body)
-        .and_then(dmesh_server::probe::decode_probe_start_record)
+    let probe_request = mesh::mesh_api::envelope::decode(&body)
+        .and_then(quic_tools::decode_probe_start_record)
         .filter(|(_, request)| request.peer.is_none());
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     if let Some((id, probe_request)) = probe_request {
@@ -411,9 +422,9 @@ fn run_serial_stream_command(arguments: &[String]) -> Result<(), String> {
         }
         // Without a `peer` the CLI is the probe's client: it calls the probed
         // node's registered `probe.handler` handler and validates the payload.
-        let mut source = [0u8; dmesh_server::probe::PROBE_REQUEST_MAX];
+        let mut source = [0u8; quic_tools::PROBE_REQUEST_MAX];
         let used =
-            dmesh_server::probe::encode_probe_handler_request(probe_request, id, &mut source)
+            quic_tools::encode_probe_handler_request(probe_request, id, &mut source)
                 .ok_or("probe request does not fit a probe.handler header")?;
         let result = runtime.block_on(crate::node_client::probe_uart(
             path,
@@ -575,7 +586,7 @@ fn run_serial_direct_discovery(path: &str, baud: Option<u32>) -> Result<(), Stri
             Duration::from_secs(3),
         ))?
         .bytes;
-    let record = dmesh_server::tagged::decode(&response).ok_or("invalid check response")?;
+    let record = mesh::mesh_api::envelope::decode(&response).ok_or("invalid check response")?;
     if record.id != Some(id) {
         return Err("check response ID mismatch".into());
     }
@@ -772,8 +783,8 @@ fn run_tcp_service_client(arguments: &[String]) -> Result<(), String> {
     let request = encode_stream_argv_with_id(&arguments[1..], fresh_request_id())
         .map_err(|e| e.to_string())?;
     let timeout = timeout_override.unwrap_or(stream_request_timeout(&request)?);
-    let probe = dmesh_server::tagged::decode(&request)
-        .and_then(dmesh_server::probe::decode_probe_start_record);
+    let probe = mesh::mesh_api::envelope::decode(&request)
+        .and_then(quic_tools::decode_probe_start_record);
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
         tokio::time::timeout(timeout, async {
@@ -781,15 +792,15 @@ fn run_tcp_service_client(arguments: &[String]) -> Result<(), String> {
             stream.set_nodelay(true).map_err(|e| e.to_string())?;
             if let Some((id, probe)) = probe {
                 if probe.peer.is_some() { return Err("TCP probe peer forwarding is not supported".into()); }
-                let mut header = [0; dmesh_server::probe::PROBE_REQUEST_MAX];
-                let used = dmesh_server::probe::encode_probe_handler_request(probe, id, &mut header)
+                let mut header = [0; quic_tools::PROBE_REQUEST_MAX];
+                let used = quic_tools::encode_probe_handler_request(probe, id, &mut header)
                     .ok_or("probe header does not fit")?;
-                let result = if probe.direction == dmesh_server::probe::ProbeDirection::Both {
+                let result = if probe.direction == quic_tools::ProbeDirection::Both {
                     let mut down = tokio::net::TcpStream::connect(peer).await.map_err(|e| e.to_string())?;
                     down.set_nodelay(true).map_err(|e| e.to_string())?;
-                    dmesh_server::stream_client::probe_duplex(&mut stream, &mut down, probe, id).await
+                    quic_tools::stream_client::probe_duplex(&mut stream, &mut down, probe, id).await
                 } else {
-                    dmesh_server::stream_client::probe(&mut stream, &header[..used], probe).await
+                    quic_tools::stream_client::probe(&mut stream, &header[..used], probe).await
                 }.map_err(|e| e.to_string())?;
                 println!("dmesh_cli_probe bearer=tcp target={peer} direction={} bytes={} elapsed_us={} upload_mbps={:.3} download_mbps={:.3} upload_elapsed_us={} download_elapsed_us={} callback_errors={:?}",
                     probe.direction.as_str(), result.bytes, result.elapsed_us,
@@ -797,7 +808,7 @@ fn run_tcp_service_client(arguments: &[String]) -> Result<(), String> {
                     result.download_elapsed_us, result.callback_errors);
             } else {
                 let started = Instant::now();
-                let response = dmesh_server::stream_client::exchange(&mut stream, &[&request]).await
+                let response = quic_tools::stream_client::exchange(&mut stream, &[&request]).await
                     .map_err(|e| e.to_string())?;
                 println!("dmesh_cli_stream_command target={peer} fin=true bytes={} elapsed_us={} {}",
                     response.len(), started.elapsed().as_micros(), render_stream_response(&request, &response));
@@ -818,10 +829,7 @@ mod tcp_stream_tests {
             let server = std::thread::spawn(move || {
                 tokio::runtime::Runtime::new().unwrap().block_on(async {
                     let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-                    let registry = std::sync::Arc::new(dmesh_server::registry::Registry::new());
-                    assert!(registry.register_stream(dmesh_server::registry::methods::PROBE_HANDLER,
-                        dmesh_server::probe::ProbeHandler));
-                    let service = dmesh_server::stream_service::RegistryStreamHandler::new(registry);
+                    let service = crate::mux_cli::default_mux_server_handler();
                     tokio::time::timeout(std::time::Duration::from_secs(10), async {
                         let mut first = listener.accept().await.unwrap().0;
                         if direction == "both" {
@@ -859,8 +867,8 @@ fn run_udp_service_client_inner(arguments: &[String]) -> Result<(), String> {
     let request = encode_stream_argv_with_id(&arguments[1..], fresh_request_id())
         .map_err(|error| error.to_string())?;
     let timeout = timeout_override.unwrap_or(stream_request_timeout(&request)?);
-    let probe_request = dmesh_server::probe::decode_probe_start_record(
-        dmesh_server::tagged::decode(&request).ok_or("invalid tagged request")?,
+    let probe_request = quic_tools::decode_probe_start_record(
+        mesh::mesh_api::envelope::decode(&request).ok_or("invalid tagged request")?,
     );
     let started = Instant::now();
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
@@ -870,9 +878,9 @@ fn run_udp_service_client_inner(arguments: &[String]) -> Result<(), String> {
         {
             // The CLI is the probe's client: it calls the probed node's
             // registered `probe.handler` handler and validates the payload.
-            let mut source = [0u8; dmesh_server::probe::PROBE_REQUEST_MAX];
+            let mut source = [0u8; quic_tools::PROBE_REQUEST_MAX];
             let used =
-                dmesh_server::probe::encode_probe_handler_request(probe_request, id, &mut source)
+                quic_tools::encode_probe_handler_request(probe_request, id, &mut source)
                     .ok_or("probe request does not fit a probe.handler header")?;
             let result = runtime.block_on(crate::node_client::probe_udp_with_uart(
                 udp_bind_for_peer(peer),
@@ -1000,9 +1008,9 @@ fn split_uart_bearer_arguments(
 }
 
 fn render_stream_response(request: &[u8], response: &[u8]) -> String {
-    let discovery = dmesh_server::tagged::decode(request).is_some_and(|r|
-        r.component == Some(dmesh_server::tagged::Name::Tag(6))
-            && r.method == Some(dmesh_server::tagged::Name::Tag(9)));
+    let discovery = mesh::mesh_api::envelope::decode(request).is_some_and(|r|
+        r.component == Some(mesh::mesh_api::envelope::Name::Tag(6))
+            && r.method == Some(mesh::mesh_api::envelope::Name::Tag(9)));
     if discovery {
         return match observed_nodes(response) {
             Some(nodes) if nodes.is_empty() => "observations=0".into(),
@@ -1014,13 +1022,13 @@ fn render_stream_response(request: &[u8], response: &[u8]) -> String {
 }
 
 fn stream_request_timeout(request: &[u8]) -> Result<Duration, String> {
-    let record = dmesh_server::tagged::decode(request).ok_or("invalid tagged request")?;
-    if record.component == Some(dmesh_server::tagged::Name::Tag(6))
-        && record.method == Some(dmesh_server::tagged::Name::Tag(9)) {
-        let options=dmesh_server::discovery_nodes::Options::decode(record.fields).ok_or("invalid discovery.nodes options")?;
+    let record = mesh::mesh_api::envelope::decode(request).ok_or("invalid tagged request")?;
+    if record.component == Some(mesh::mesh_api::envelope::Name::Tag(6))
+        && record.method == Some(mesh::mesh_api::envelope::Name::Tag(9)) {
+        let options=dmesh_discovery::discovery_nodes::Options::decode(record.fields).ok_or("invalid discovery.nodes options")?;
         return Ok(Duration::from_millis(options.duration_ms as u64+3000));
     }
-    Ok(dmesh_server::probe::decode_probe_start_record(record)
+    Ok(quic_tools::decode_probe_start_record(record)
         .map(|(_, request)| probe_request_timeout(request.total_bytes()))
         .unwrap_or_else(|| Duration::from_secs(3)))
 }
@@ -1053,7 +1061,7 @@ pub(crate) fn udp_bind_for_peer(peer: SocketAddr) -> SocketAddr {
         // is the one port the CLI uses, so a firewall or capture can name it.
         .unwrap_or(DMESH_CLI_UDP_PORT);
     // If another `dmesh-cli` holds it, an ephemeral port is used (see `bind_client_udp`).
-    quic_lite::bearer_udp::wildcard_bind(peer, port)
+    quic_link::wildcard_bind(peer, port)
 }
 
 /// Parse a UDP peer, including the scoped IPv6 link-local form required by
@@ -1062,7 +1070,7 @@ pub(crate) fn udp_bind_for_peer(peer: SocketAddr) -> SocketAddr {
 /// does not parse interface names, so resolve the Linux interface index here
 /// at the host CLI boundary rather than teaching firmware about host scopes.
 pub(crate) fn parse_udp_peer(value: &str) -> Result<SocketAddr, String> {
-    quic_lite::bearer_udp::parse_peer(value, 3339).map_err(|error| error.to_string())
+    quic_link::parse_udp_peer(value, 3339).map_err(|error| error.to_string())
 }
 
 /// Verify a selected UDP neighbor through the supported directed-discovery
@@ -1083,7 +1091,7 @@ pub(crate) fn direct_discovery_announce(
     peer: SocketAddr,
 ) -> Result<(u64, announce::Announce), String> {
     let id = fresh_request_id();
-    let announce = dmesh_server::discovery::discover_udp(peer, id, Duration::from_secs(3))?;
+    let announce = dmesh_discovery::discovery::discover_udp(peer, id, Duration::from_secs(3))?;
     Ok((id, announce))
 }
 
@@ -1317,11 +1325,11 @@ pub(crate) fn discover_and_nan_activate(
             ));
         }
     }
-    let plan = dmesh_server::wake::plan_nan_wake(
+    let plan = dmesh_discovery::wake::plan_nan_wake(
         target.node.as_deref(),
         target_mac,
         observations.iter().map(|(observer, ready, node, mac)| {
-            dmesh_server::wake::NanObservation {
+            dmesh_discovery::wake::NanObservation {
                 observer: *observer,
                 observer_ready: *ready,
                 node: node.as_deref(),
@@ -1491,7 +1499,7 @@ fn run_devices_sync(dry_run: bool) -> Result<(), String> {
     let reachable = multicast_discover_peers_save(!dry_run)?;
     let mut changed = 0usize;
     for peer in &reachable {
-        let Some(record) = dmesh_server::device_record::DeviceRecord::from_announce(
+        let Some(record) = dmesh_discovery::device_record::DeviceRecord::from_announce(
             &peer.announce,
             mac_of_direct_peer(peer),
         ) else {
@@ -1550,7 +1558,7 @@ fn link_local_matches_mac(address: Ipv6Addr, mac: [u8; 6]) -> bool {
 }
 
 pub(crate) fn ensure_stream_success(response: Vec<u8>, action: &str) -> Result<(), String> {
-    let record = dmesh_server::tagged::decode(&response)
+    let record = mesh::mesh_api::envelope::decode(&response)
         .ok_or_else(|| format!("{action} response is not tagged CBOR"))?;
     if record.error.is_some() || record.result.is_none() {
         return Err(format!("{action} rejected by peer"));
@@ -1634,7 +1642,7 @@ pub(crate) fn multicast_discover_peers() -> Result<Vec<DiscoveredPeer>, String> 
     multicast_discover_peers_save(true)
 }
 fn multicast_discover_peers_save(save: bool) -> Result<Vec<DiscoveredPeer>, String> {
-    let discovered = dmesh_server::discovery::discover_multicast_ipv6()?;
+    let discovered = dmesh_discovery::discovery::discover_multicast_ipv6()?;
     if save {
         let inventory = crate::inventory::Inventory::from_env()?;
         for entry in &discovered {
@@ -1685,7 +1693,7 @@ struct ObservedNode {
 /// be averaged together.
 fn observed_nodes(response: &[u8]) -> Option<Vec<ObservedNode>> {
     let mut first=minicbor::Decoder::new(response);
-    if first.skip().is_ok() && dmesh_server::tagged::decode(&response[..first.position()]).is_some_and(dmesh_server::discovery_nodes::is_header) {
+    if first.skip().is_ok() && mesh::mesh_api::envelope::decode(&response[..first.position()]).is_some_and(dmesh_discovery::discovery_nodes::is_header) {
         return discover::decode_nodes("?",response).ok();
     }
     if minicbor::Decoder::new(response).map().ok() == Some(Some(7))
@@ -1694,7 +1702,7 @@ fn observed_nodes(response: &[u8]) -> Option<Vec<ObservedNode>> {
         return live_observed_nodes(response);
     }
     // Older observers still return a bounded inventory response.
-    dmesh_server::announce::decode_devices_observed_response(response).map(|devices| {
+    dmesh_discovery::announce::decode_devices_observed_response(response).map(|devices| {
         devices
             .into_iter()
             .map(|device| {
@@ -1763,7 +1771,7 @@ fn live_observed_nodes(response: &[u8]) -> Option<Vec<ObservedNode>> {
         let via_now = d.bool().ok()?;
         if d.u8().ok()? != 6 { return None; }
         let payload = d.bytes().ok()?;
-        let verified = dmesh_server::tagged::decode(payload)
+        let verified = mesh::mesh_api::envelope::decode(payload)
             .and_then(announce::decode_record)
             .filter(|a| a.has_identity() && announce::verify_identity(*a));
         let mut fields = vec![format!("peer={} channel={channel} rssi_dbm={rssi} received_us={received_us} bearer={} authenticated={}",
@@ -1972,7 +1980,7 @@ mod tests {
     #[test]
     fn mac_only_catalog_target_matches_its_discovered_link_local_address() {
         let mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
-        let mut announce = dmesh_server::announce::Announce::discovery([1; 16], 16, 1);
+        let mut announce = dmesh_discovery::announce::Announce::discovery([1; 16], 16, 1);
         announce.set_sta_link_local_v6([
             0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x00, 0x11, 0x22, 0xff, 0xfe, 0x33, 0x44, 0x55,
         ]);
@@ -1999,7 +2007,7 @@ mod native_uart_routing_tests {
     #[test]
     fn native_controls_use_udp_and_uart_while_preserving_other_backends() {
         for (target,expected) in [("lora1",true),("/dev/ttyUSB0",true),("lmesh",false),
-            ("udp://[::1]:3339",true),("tcp://host:5226",false),("http://host:18480",false)] {
+            ("udp://[::1]:3339",true),("tcp://host:5226",false),("mux://host:5229",false),("http://host:18480",false)] {
             assert_eq!(super::native_control_command(&[target.into(),"wifi.status".into()]),expected,"{target}");
         }
     }

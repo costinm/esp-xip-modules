@@ -315,8 +315,8 @@ commands, probes and NAN streams. Create/edit/list/remove routes with
 `disc.relay_list` and `disc.relay_remove`. Create takes one destination and
 returns its incoming DCID. Commands activate their module automatically; routes
 expire after 60 seconds of inactivity by default.
-Firmware/recovery updates use the existing TCP `mod_flash` protocol or the
-[serial flasher](../../scripts/flash-serial.sh).
+Firmware/recovery updates use the existing TCP `mod_flash` protocol; initial
+USB install follows `notes/docs/flash-new-devices.md`.
 
 The C runtime's `mod_rtest` probe supports `dmesh-cli probe TARGET --bytes=65536
 --direction=both --verify=true`. Targets can be UART/USB, `udp://IP:3339` for

@@ -4,11 +4,16 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let mut a = args.to_vec();
     if a.first().is_some_and(|s| s == "probe") {
         if a.get(1).is_none_or(|s| s == "--help") {
-            println!("dmesh-cli probe SERIAL|udp://IP:3339|tcp://IP:5228 --bytes=N [--direction=upload|download|both] [--verify=true] [--via FIRST_HOP:DCID] [--baud N] [--stats]");
+            println!("dmesh-cli probe SERIAL|udp://IP:3339|tcp://IP:5228|mux://IP:5229 --bytes=N [--direction=upload|download|both] [--verify=true] [--via FIRST_HOP:DCID] [--baud N] [--stats]");
             return Ok(());
         }
         a.remove(0);
         a.insert(1, "probe.start".into());
+    }
+    if a.first().is_some_and(|s| {
+        s.starts_with("mux://") || s.starts_with("mux+unix://") || s.starts_with("mux+serial://")
+    }) {
+        return crate::mux_cli::run_client_cli(&a);
     }
     let mut target = a.first().ok_or("missing probe target")?.clone();
     let (mut baud, mut via, mut timeout) = (None, None, Duration::from_secs(120));
@@ -45,9 +50,14 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let bytes =
         crate::schema::encode_stream_argv_with_id(&words, crate::client::fresh_request_id())
             .map_err(|e| e.to_string())?;
-    let (_, request) = dmesh_server::tagged::decode(&bytes)
-        .and_then(dmesh_server::probe::decode_probe_start_record)
+    let (_, request) = mesh::mesh_api::envelope::decode(&bytes)
+        .and_then(quic_tools::decode_probe_start_record)
         .ok_or("invalid probe request")?;
+    if via.is_none() {
+        if let Some(v) = request.via.as_ref().map(|s| s.as_str()) {
+            via = Some(crate::via::Via::parse(v)?);
+        }
+    }
     if via.is_none() && !target.contains("://") && !target.starts_with('/') {
         let profile = crate::device::load_device(&target)?;
         target = profile

@@ -11,10 +11,13 @@ default = []
 
 [dependencies]
 anyhow = "1.0"
+dmesh-discovery = { git = "https://github.com/costinm/dmesh", rev = "ab109bf1836bbe1be117b859f60ac90ec3cb9010", features = ["tokio"] }
 dmesh-rawnan = { git = "https://github.com/costinm/dmesh", rev = "ab109bf1836bbe1be117b859f60ac90ec3cb9010" }
-dmesh-server = { git = "https://github.com/costinm/dmesh", rev = "ab109bf1836bbe1be117b859f60ac90ec3cb9010", default-features = false, features = ["std"] }
 glob = "0.3"
-quic-lite = { git = "https://github.com/costinm/dmesh", rev = "ab109bf1836bbe1be117b859f60ac90ec3cb9010", features = ["tokio"] }
+quic-base = { git = "https://github.com/costinm/ssh-mesh" }
+quic-link = { git = "https://github.com/costinm/ssh-mesh", features = ["tokio"] }
+quic-mux = { git = "https://github.com/costinm/ssh-mesh", features = ["tokio"] }
+quic-tools = { git = "https://github.com/costinm/ssh-mesh", features = ["tokio"] }
 libc = "0.2"
 minicbor = "2.2"
 sha2 = "0.11"
@@ -28,8 +31,9 @@ serde = { version = "1.0", features = ["derive"] }
 uart-codec = { git = "https://github.com/costinm/dmesh", rev = "ab109bf1836bbe1be117b859f60ac90ec3cb9010", features = ["host"] }
 mesh = { git = "https://github.com/costinm/ssh-mesh", package = "mesh" }
 serde_json = "1.0"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
-dmesh-discovery = { path = "../../../dmesh/crates/dmesh-discovery" }
+quic-base = { git = "https://github.com/costinm/ssh-mesh" }
+xip-abi = { path = "../xip-abi" }
 tokio = { version = "1", features = ["time"] }

@@ -13,6 +13,8 @@ use std::os::unix::fs::OpenOptionsExt;
 
 /// The console port of the runtime's ports (`xip.h` `XIP_PORT_CONSOLE`): raw frames for a module that binds it; requests no longer go there.
 pub const PORT_CONSOLE: u32 = 1;
+/// Standalone `quic-mux` PPP serial port (`modules/mod_mux` `--port 245`).
+pub const PORT_MUX: u32 = 245;
 /// The QUIC port (`xip.h` `XIP_PORT_QUIC`, 0xf7): the PPP record of a QUIC link. Every request to a device goes here, as a 0x444d0002 long packet.
 pub const PORT_QUIC: u32 = 247;
 /// Local byte-triggered wake acknowledgement; payload 01 means the worker is awake.
@@ -164,6 +166,14 @@ pub struct XipPort {
     file: std::fs::File,
 }
 
+impl Drop for XipPort {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = libc::ioctl(self.file.as_raw_fd(), libc::TIOCNXCL);
+        }
+    }
+}
+
 impl XipPort {
     pub fn open(path: impl Into<String>) -> std::io::Result<Self> { Self::open_baud(path,None) }
 
@@ -220,8 +230,28 @@ impl XipPort {
         }
     }
 
-    pub fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.file.write_all(data)
+    pub fn write_all(&mut self, mut data: &[u8]) -> std::io::Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !data.is_empty() {
+            match self.file.write(data) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "serial write returned 0",
+                    ))
+                }
+                Ok(n) => data = &data[n..],
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(e);
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(250));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
     /// Request wake immediately, then retry only the idempotent wake record.

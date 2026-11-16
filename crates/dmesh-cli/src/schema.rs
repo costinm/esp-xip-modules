@@ -5,23 +5,44 @@ use std::sync::Arc;
 
 const CATALOG_SERVICE: &str = "lmesh";
 
-/// The catalog tag of a field named `to` that is the envelope's destination.
-/// Other methods use tag 15 for unrelated fields (`transport.set`'s `now`).
+/// Resolve a named service catalog dynamically from disk via `CatalogResolver`,
+/// falling back during standalone Cargo tests to this checkout's generated or
+/// checked-in schema directories when `MESH_SCHEMA_DIR` is unset.
+pub(crate) fn resolve_service_catalog(
+    service: &str,
+) -> Result<Arc<mesh::catalog::ResolvedCatalog>> {
+    #[cfg(test)]
+    {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for candidate in [
+            manifest_dir.join(format!("../../api/generated/schemas/{service}/api.cbor")),
+            manifest_dir.join(format!("../../api/generated/schemas/{service}/tools.json")),
+            manifest_dir.join(format!("schemas/{service}/api.cbor")),
+            manifest_dir.join(format!("schemas/{service}/tools.json")),
+        ] {
+            if candidate.is_file() {
+                return mesh::catalog::service_catalog_resolver().load_path(service, candidate);
+            }
+        }
+    }
+    if let Some(resolved) = mesh::catalog::service_catalog_resolver().resolve(service) {
+        return resolved;
+    }
+    mesh::catalog::service_catalog_resolver().require(service)
+}
 
 /// The installed service catalog is the source for named and tagged requests.
 pub fn load_tagged_schema() -> Arc<TaggedSchema> {
-    mesh::catalog::service_catalog_resolver()
-        .require(CATALOG_SERVICE)
-        .unwrap_or_else(|error| panic!("load {CATALOG_SERVICE} tools.json: {error}"))
+    resolve_service_catalog(CATALOG_SERVICE)
+        .unwrap_or_else(|error| panic!("load {CATALOG_SERVICE} catalog: {error}"))
         .catalog
         .clone()
 }
 
 /// Only device-advertised methods are sent across the device bearer.
 pub fn is_stream_command_name(name: &str) -> bool {
-    let resolved = mesh::catalog::service_catalog_resolver()
-        .require(CATALOG_SERVICE)
-        .unwrap_or_else(|error| panic!("load {CATALOG_SERVICE} tools.json: {error}"));
+    let resolved = resolve_service_catalog(CATALOG_SERVICE)
+        .unwrap_or_else(|error| panic!("load {CATALOG_SERVICE} catalog: {error}"));
     resolved.catalog.method(name).is_some()
         && resolved
             .tools
@@ -36,7 +57,7 @@ pub fn is_stream_command_name(name: &str) -> bool {
 }
 
 fn decode_tagged_reply(schema: &TaggedSchema, payload: &[u8]) -> Result<Value> {
-    let wire = dmesh_server::tagged::decode(payload).context("not a tagged record")?;
+    let wire = mesh::mesh_api::envelope::decode(payload).context("not a tagged record")?;
     let mut record = mesh::cbor::decode_record(payload)?;
     if let Some(component) = wire.component {
         record.component = device_name(component)?;
@@ -49,9 +70,9 @@ fn decode_tagged_reply(schema: &TaggedSchema, payload: &[u8]) -> Result<Value> {
     // shared presentation catalog currently describes only input fields, so
     // project these five stable result fields before generic rendering can
     // mislabel (for example) `status` as `bytes`.
-    if wire.component == Some(dmesh_server::tagged::Name::Tag(
-        dmesh_server::probe::PROBE_COMPONENT,
-    )) && wire.method == Some(dmesh_server::tagged::Name::Tag(dmesh_server::probe::PROBE_START))
+    if wire.component == Some(mesh::mesh_api::envelope::Name::Tag(
+        quic_tools::PROBE_COMPONENT,
+    )) && wire.method == Some(mesh::mesh_api::envelope::Name::Tag(quic_tools::PROBE_START))
     {
         if let Some(result) = record.result.as_mut().and_then(Value::as_object_mut) {
             for (tag, name) in [
@@ -70,13 +91,13 @@ fn decode_tagged_reply(schema: &TaggedSchema, payload: &[u8]) -> Result<Value> {
     Ok(schema.to_jsonl(&record))
 }
 
-fn device_name(name: dmesh_server::tagged::Name<'_>) -> Result<NameOrTag> {
+fn device_name(name: mesh::mesh_api::envelope::Name<'_>) -> Result<NameOrTag> {
     match name {
-        dmesh_server::tagged::Name::Tag(tag) => Ok(NameOrTag::Tag(u32::try_from(tag)?)),
-        dmesh_server::tagged::Name::Text(text) => {
+        mesh::mesh_api::envelope::Name::Tag(tag) => Ok(NameOrTag::Tag(u32::try_from(tag)?)),
+        mesh::mesh_api::envelope::Name::Text(text) => {
             Ok(NameOrTag::Name(String::from_utf8(text.to_vec())?))
         }
-        dmesh_server::tagged::Name::Bytes(_) => {
+        mesh::mesh_api::envelope::Name::Bytes(_) => {
             anyhow::bail!("binary method identity is unsupported")
         }
     }
@@ -207,7 +228,7 @@ mod tests {
     fn mostly_ascii_diagnostic_cbor_is_decoded_before_text_fallback() {
         let schema = load_tagged_schema();
         let mut result = [0u8; 320];
-        let mut encoder = dmesh_server::cbor::Encoder::new(&mut result);
+        let mut encoder = mesh::mesh_api::cbor::Encoder::new(&mut result);
         encoder.map(2).unwrap();
         encoder.text_value(b"cursor").unwrap();
         encoder.uint(8).unwrap();
@@ -224,7 +245,7 @@ mod tests {
         drop(encoder);
 
         let mut wire = [0u8; 400];
-        let used = dmesh_server::tagged::encode_numeric_response(
+        let used = mesh::mesh_api::envelope::encode_numeric_response(
             208,
             2,
             8,
@@ -256,15 +277,15 @@ mod tests {
     #[test]
     fn direct_transport_control_uses_the_common_tagged_envelope() {
         let mut command = [0u8; 96];
-        let config = dmesh_server::control::TransportConfig {
+        let config = dmesh_discovery::control::TransportConfig {
             ssid: Some(b"Direct-test"),
             raw_tx_rate: Some(24),
             sta_driver_tx: Some(true),
-            ..dmesh_server::control::TransportConfig::default()
+            ..dmesh_discovery::control::TransportConfig::default()
         };
-        let used = dmesh_server::control::encode_request(
-            dmesh_server::control::Request::TransportSet {
-                kind: dmesh_server::control::TransportKind::Sta,
+        let used = dmesh_discovery::control::encode_request(
+            dmesh_discovery::control::Request::TransportSet {
+                kind: dmesh_discovery::control::TransportKind::Sta,
                 config,
             },
             Some(9),
@@ -272,9 +293,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            dmesh_server::control::decode_request(&command[..used]),
-            Some(dmesh_server::control::Request::TransportSet {
-                kind: dmesh_server::control::TransportKind::Sta,
+            dmesh_discovery::control::decode_request(&command[..used]),
+            Some(dmesh_discovery::control::Request::TransportSet {
+                kind: dmesh_discovery::control::TransportKind::Sta,
                 config,
             })
         );
@@ -283,15 +304,15 @@ mod tests {
     #[test]
     fn discovery_nodes_uses_the_correlated_empty_stream_request() {
         let wire = encode_stream_command_with_id("discovery.nodes", 22).unwrap();
-        assert!(dmesh_server::announce::is_devices_observed_request(&wire));
-        let record = dmesh_server::tagged::decode(&wire).unwrap();
+        assert!(dmesh_discovery::announce::is_devices_observed_request(&wire));
+        let record = mesh::mesh_api::envelope::decode(&wire).unwrap();
         assert_eq!(record.id, Some(22));
         assert!(record.fields.is_none());
         // The generic encoder produces exactly the bytes of the dedicated constructor it replaced.
         let mut dedicated = [0u8; 32];
-        let used = dmesh_server::tagged::encode_numeric_empty_request(
-            dmesh_server::announce::ANNOUNCE_COMPONENT,
-            dmesh_server::announce::ANNOUNCE_DEVICES_OBSERVED,
+        let used = mesh::mesh_api::envelope::encode_numeric_empty_request(
+            dmesh_discovery::announce::ANNOUNCE_COMPONENT,
+            dmesh_discovery::announce::ANNOUNCE_DEVICES_OBSERVED,
             22,
             &mut dedicated,
         )
@@ -302,9 +323,9 @@ mod tests {
     #[test]
     fn discovery_active_uses_the_common_correlated_action() {
         let wire = encode_stream_command_with_id("discovery.active", 23).unwrap();
-        let record = dmesh_server::tagged::decode(&wire).unwrap();
-        assert_eq!(record.component, Some(dmesh_server::tagged::Name::Tag(6)));
-        assert_eq!(record.method, Some(dmesh_server::tagged::Name::Tag(10)));
+        let record = mesh::mesh_api::envelope::decode(&wire).unwrap();
+        assert_eq!(record.component, Some(mesh::mesh_api::envelope::Name::Tag(6)));
+        assert_eq!(record.method, Some(mesh::mesh_api::envelope::Name::Tag(10)));
         assert_eq!(record.id, Some(23));
         assert!(record.fields.is_none());
     }
@@ -312,10 +333,10 @@ mod tests {
     #[test]
     fn nan_wakeup_encodes_the_targeted_controller_action() {
         let wire = encode_stream_command_with_id("nan.wakeup to=84:0d:8e:07:41:70", 9).unwrap();
-        let record = dmesh_server::tagged::decode(&wire).unwrap();
+        let record = mesh::mesh_api::envelope::decode(&wire).unwrap();
         assert_eq!(record.id, Some(9));
         assert_eq!(
-            dmesh_server::announce::decode_nan_wakeup_request(record),
+            dmesh_discovery::announce::decode_nan_wakeup_request(record),
             Some([0x84, 0x0d, 0x8e, 0x07, 0x41, 0x70])
         );
     }
@@ -324,14 +345,13 @@ mod tests {
     fn the_catalog_encodes_log_watch_and_the_firmware_telemetry_snapshots() {
         let command =
             encode_stream_command_with_id("log.watch since_seq=5 limit=2 level=2 source=nan", 3).unwrap();
-        let request = dmesh_server::log_watch::WatchRequest::decode(
-            dmesh_server::tagged::decode(&command).unwrap().fields,
-        )
-        .unwrap_or_else(|| panic!("log.watch fields: {command:02x?}"));
-        assert_eq!(
-            (request.since_seq, request.limit, request.level, request.source.as_deref()),
-            (5, 2, 2, Some("nan"))
-        );
+        let decoded = mesh::cbor::decode_record(&command).unwrap();
+        assert_eq!(decoded.component, NameOrTag::Tag(208));
+        assert_eq!(decoded.method, NameOrTag::Tag(2));
+        assert_eq!(decoded.env.get(&NameOrTag::Tag(1)), Some(&Value::from(5)));
+        assert_eq!(decoded.env.get(&NameOrTag::Tag(2)), Some(&Value::from(2)));
+        assert_eq!(decoded.env.get(&NameOrTag::Tag(3)), Some(&Value::from(2)));
+        assert_eq!(decoded.env.get(&NameOrTag::Tag(4)), Some(&Value::from("nan")));
         for (name, method) in [
             ("telemetry.memory", 10),
             ("telemetry.power", 11),
@@ -339,37 +359,37 @@ mod tests {
             ("telemetry.bearers", 9),
         ] {
             let command = encode_stream_command_with_id(name, 4).unwrap();
-            let envelope = dmesh_server::tagged::decode(&command).unwrap();
-            assert_eq!(envelope.component, Some(dmesh_server::tagged::Name::Tag(7)), "{name}");
-            assert_eq!(envelope.method, Some(dmesh_server::tagged::Name::Tag(method)), "{name}");
+            let envelope = mesh::mesh_api::envelope::decode(&command).unwrap();
+            assert_eq!(envelope.component, Some(mesh::mesh_api::envelope::Name::Tag(7)), "{name}");
+            assert_eq!(envelope.method, Some(mesh::mesh_api::envelope::Name::Tag(method)), "{name}");
         }
     }
 
     #[test]
     fn timeout_is_the_envelope_allowance_not_a_method_field() {
         let command = encode_stream_command_with_id("probe.start bytes=4096 timeout=2500", 5).unwrap();
-        let envelope = dmesh_server::tagged::decode(&command).expect("envelope");
+        let envelope = mesh::mesh_api::envelope::decode(&command).expect("envelope");
         assert_eq!(envelope.timeout, Some(2500));
         assert_eq!(envelope.id, Some(5));
         let without = encode_stream_command_with_id("probe.start bytes=4096", 5).unwrap();
-        assert_eq!(dmesh_server::tagged::decode(&without).unwrap().timeout, None);
+        assert_eq!(mesh::mesh_api::envelope::decode(&without).unwrap().timeout, None);
     }
 
     #[test]
     fn settings_set_is_stream_only() {
         let command = encode_stream_command_with_id("settings.set key=sta_ssid value=costin", 41)
             .expect("stream settings command");
-        let record = dmesh_server::tagged::decode(&command).expect("tagged stream command");
-        assert_eq!(record.component, Some(dmesh_server::tagged::Name::Tag(1)));
-        assert_eq!(record.method, Some(dmesh_server::tagged::Name::Tag(2)));
+        let record = mesh::mesh_api::envelope::decode(&command).expect("tagged stream command");
+        assert_eq!(record.component, Some(mesh::mesh_api::envelope::Name::Tag(1)));
+        assert_eq!(record.method, Some(mesh::mesh_api::envelope::Name::Tag(2)));
         assert_eq!(record.id, Some(41));
     }
 
     #[test]
     fn numeric_looking_settings_values_remain_cbor_text() {
         let wire = encode_stream_command_with_id("settings.set key=nan_dw_interval value=1", 42).unwrap();
-        assert_eq!(dmesh_server::control::decode_request(&wire),
-            Some(dmesh_server::control::Request::SettingsSet { key: b"nan_dw_interval", value: b"1" }));
+        assert_eq!(dmesh_discovery::control::decode_request(&wire),
+            Some(dmesh_discovery::control::Request::SettingsSet { key: b"nan_dw_interval", value: b"1" }));
     }
 
     #[test]
@@ -402,24 +422,24 @@ mod tests {
         assert!(encode_stream_command_with_id("settings.set 99=demo", 77).is_err());
         let command = encode_stream_command_with_id("probe.start bytes=4096 packet_size=512", 44)
             .expect("stream probe command");
-        let record = dmesh_server::tagged::decode(&command).expect("tagged probe request");
+        let record = mesh::mesh_api::envelope::decode(&command).expect("tagged probe request");
         assert_eq!(
-            dmesh_server::probe::decode_probe_start_record(record),
-            Some((44, dmesh_server::probe::ProbeServiceRequest::new(4096, 512)))
+            quic_tools::decode_probe_start_record(record),
+            Some((44, quic_tools::ProbeServiceRequest::new(4096, 512)))
         );
         let directed = encode_stream_command_with_id(
-            "probe.start to=mesh://fc00::a4 bytes=256 packet_size=128 peer=espnow://02:11:22:33:44:55",
+            "probe.start to=mesh://fc00::a4 bytes=256 packet_size=128 peer=espnow://02:11:22:33:44:55 link=espnow via=mesh://fc00::b5",
             45,
         )
         .expect("device-directed probe remains the probe method");
-        let record = dmesh_server::tagged::decode(&directed).expect("tagged probe request");
+        let record = mesh::mesh_api::envelope::decode(&directed).expect("tagged probe request");
         assert_eq!(
             record.to,
-            Some(dmesh_server::tagged::Name::Text(b"mesh://fc00::a4")),
+            Some(mesh::mesh_api::envelope::Name::Text(b"mesh://fc00::a4")),
             "wire={directed:02x?}"
         );
         let (id, request) =
-            dmesh_server::probe::decode_probe_start_record(record).expect("directed probe fields");
+            quic_tools::decode_probe_start_record(record).expect("directed probe fields");
         assert_eq!(id, 45);
         assert_eq!(
             request
@@ -427,17 +447,22 @@ mod tests {
                 .and_then(|destination| destination.espnow_mac()),
             Some([0x02, 0x11, 0x22, 0x33, 0x44, 0x55])
         );
+        assert_eq!(request.link.as_ref().map(|s| s.as_str()), Some("espnow"));
+        assert_eq!(
+            request.via.as_ref().map(|s| s.as_str()),
+            Some("mesh://fc00::b5")
+        );
     }
 
     #[test]
     fn directed_probe_result_uses_response_field_names() {
-        let mut request = dmesh_server::probe::ProbeServiceRequest::new(128, 128);
+        let mut request = quic_tools::ProbeServiceRequest::new(128, 128);
         request.peer = Some(
-            dmesh_server::probe::ProbeDestination::parse("espnow://02:11:22:33:44:55")
+            quic_tools::ProbeDestination::parse("espnow://02:11:22:33:44:55")
                 .unwrap(),
         );
         let mut response = [0u8; 256];
-        let used = dmesh_server::probe::encode_probe_result_response(
+        let used = quic_tools::encode_probe_result_response(
             46,
             request,
             true,
@@ -461,12 +486,12 @@ mod tests {
     fn module_stop_is_a_schema_driven_empty_stream_request() {
         let command =
             encode_stream_command_with_id("module.stop", 48).expect("module stop stream request");
-        let record = dmesh_server::tagged::decode(&command).expect("tagged module stop");
+        let record = mesh::mesh_api::envelope::decode(&command).expect("tagged module stop");
         assert_eq!(
             record.component,
-            Some(dmesh_server::tagged::Name::Tag(1000))
+            Some(mesh::mesh_api::envelope::Name::Tag(1000))
         );
-        assert_eq!(record.method, Some(dmesh_server::tagged::Name::Tag(3)));
+        assert_eq!(record.method, Some(mesh::mesh_api::envelope::Name::Tag(3)));
         assert_eq!(record.id, Some(48));
     }
 
@@ -475,9 +500,9 @@ mod tests {
         for (name, method) in [("module.status", 1), ("module.init", 2)] {
             assert!(super::is_stream_command_name(name));
             let command = encode_stream_command_with_id(name, 48).unwrap();
-            let record = dmesh_server::tagged::decode(&command).unwrap();
-            assert_eq!(record.component, Some(dmesh_server::tagged::Name::Tag(1000)));
-            assert_eq!(record.method, Some(dmesh_server::tagged::Name::Tag(method)));
+            let record = mesh::mesh_api::envelope::decode(&command).unwrap();
+            assert_eq!(record.component, Some(mesh::mesh_api::envelope::Name::Tag(1000)));
+            assert_eq!(record.method, Some(mesh::mesh_api::envelope::Name::Tag(method)));
             assert_eq!(record.id, Some(48));
         }
     }
@@ -486,17 +511,15 @@ mod tests {
     fn boot_recovery_is_an_empty_tagged_stream_request() {
         let command =
             encode_stream_command_with_id("boot.recovery", 46).expect("stream boot request");
-        let record = dmesh_server::tagged::decode(&command).expect("tagged boot request");
+        let record = mesh::mesh_api::envelope::decode(&command).expect("tagged boot request");
         assert_eq!(
             record.component,
-            Some(dmesh_server::tagged::Name::Tag(
-                dmesh_server::services::BOOT_COMPONENT,
-            ))
+            Some(mesh::mesh_api::envelope::Name::Tag(11))
         );
         assert_eq!(
             record.method,
-            Some(dmesh_server::tagged::Name::Tag(
-                dmesh_server::services::BOOT_RECOVERY_METHOD,
+            Some(mesh::mesh_api::envelope::Name::Tag(
+                1,
             ))
         );
         assert_eq!(record.id, Some(46));
@@ -512,17 +535,17 @@ mod tests {
     fn device_telemetry_is_a_read_only_tagged_stream_request() {
         let command = encode_stream_command_with_id("telemetry.device", 47)
             .expect("stream device telemetry request");
-        let record = dmesh_server::tagged::decode(&command).expect("tagged identity request");
+        let record = mesh::mesh_api::envelope::decode(&command).expect("tagged identity request");
         assert_eq!(
             record.component,
-            Some(dmesh_server::tagged::Name::Tag(
-                dmesh_server::telemetry::TELEMETRY_COMPONENT,
+            Some(mesh::mesh_api::envelope::Name::Tag(
+                7,
             ))
         );
         assert_eq!(
             record.method,
-            Some(dmesh_server::tagged::Name::Tag(
-                dmesh_server::telemetry::DEVICE_METHOD,
+            Some(mesh::mesh_api::envelope::Name::Tag(
+                13,
             ))
         );
         assert_eq!(record.id, Some(47));
@@ -533,19 +556,19 @@ mod tests {
     fn ble_control_is_a_schema_driven_tagged_stream() {
         let command =
             encode_stream_command_with_id("ble.start", 48).expect("stream BLE start request");
-        let record = dmesh_server::tagged::decode(&command).expect("tagged BLE start request");
-        assert_eq!(record.component, Some(dmesh_server::tagged::Name::Tag(104)));
-        assert_eq!(record.method, Some(dmesh_server::tagged::Name::Tag(80)));
+        let record = mesh::mesh_api::envelope::decode(&command).expect("tagged BLE start request");
+        assert_eq!(record.component, Some(mesh::mesh_api::envelope::Name::Tag(104)));
+        assert_eq!(record.method, Some(mesh::mesh_api::envelope::Name::Tag(80)));
         assert_eq!(record.id, Some(48));
         assert!(record.fields.is_none());
 
         let command = encode_stream_command_with_id("ble.scan duration_ms=2500", 49)
             .expect("stream BLE scan request");
-        let record = dmesh_server::tagged::decode(&command).expect("tagged BLE scan request");
-        assert_eq!(record.component, Some(dmesh_server::tagged::Name::Tag(104)));
-        assert_eq!(record.method, Some(dmesh_server::tagged::Name::Tag(82)));
+        let record = mesh::mesh_api::envelope::decode(&command).expect("tagged BLE scan request");
+        assert_eq!(record.component, Some(mesh::mesh_api::envelope::Name::Tag(104)));
+        assert_eq!(record.method, Some(mesh::mesh_api::envelope::Name::Tag(82)));
         let mut decoder =
-            dmesh_server::cbor::Decoder::new(record.fields.expect("scan duration field"));
+            mesh::mesh_api::cbor::Decoder::new(record.fields.expect("scan duration field"));
         let (major, count) = decoder.head().expect("CBOR map");
         assert_eq!(major, 5);
         assert_eq!(count, 1);
@@ -555,11 +578,11 @@ mod tests {
         let command =
             encode_stream_command_with_id("ble.connect addr=88664b020b6d addr_type=1 psm=129", 51)
                 .expect("stream BLE connect request");
-        let record = dmesh_server::tagged::decode(&command).expect("tagged BLE connect request");
-        assert_eq!(record.component, Some(dmesh_server::tagged::Name::Tag(104)));
-        assert_eq!(record.method, Some(dmesh_server::tagged::Name::Tag(85)));
+        let record = mesh::mesh_api::envelope::decode(&command).expect("tagged BLE connect request");
+        assert_eq!(record.component, Some(mesh::mesh_api::envelope::Name::Tag(104)));
+        assert_eq!(record.method, Some(mesh::mesh_api::envelope::Name::Tag(85)));
         let mut decoder =
-            dmesh_server::cbor::Decoder::new(record.fields.expect("BLE connect field"));
+            mesh::mesh_api::cbor::Decoder::new(record.fields.expect("BLE connect field"));
         let (major, count) = decoder.head().expect("CBOR map");
         assert_eq!(major, 5);
         assert_eq!(count, 3);
@@ -586,12 +609,12 @@ mod tests {
             53,
         )
         .expect("stream BLE colon address connect request");
-        let record = dmesh_server::tagged::decode(&command)
+        let record = mesh::mesh_api::envelope::decode(&command)
             .expect("tagged BLE colon address connect request");
-        assert_eq!(record.component, Some(dmesh_server::tagged::Name::Tag(104)));
-        assert_eq!(record.method, Some(dmesh_server::tagged::Name::Tag(85)));
+        assert_eq!(record.component, Some(mesh::mesh_api::envelope::Name::Tag(104)));
+        assert_eq!(record.method, Some(mesh::mesh_api::envelope::Name::Tag(85)));
         let mut decoder =
-            dmesh_server::cbor::Decoder::new(record.fields.expect("BLE colon connect field"));
+            mesh::mesh_api::cbor::Decoder::new(record.fields.expect("BLE colon connect field"));
         let (major, count) = decoder.head().expect("CBOR map");
         assert_eq!(major, 5);
         assert_eq!(count, 3);
@@ -615,11 +638,11 @@ mod tests {
 
         let command = encode_stream_command_with_id("ble.coc.send data=deadbeef", 52)
             .expect("stream BLE CoC send request");
-        let record = dmesh_server::tagged::decode(&command).expect("tagged BLE CoC send request");
-        assert_eq!(record.component, Some(dmesh_server::tagged::Name::Tag(104)));
-        assert_eq!(record.method, Some(dmesh_server::tagged::Name::Tag(86)));
+        let record = mesh::mesh_api::envelope::decode(&command).expect("tagged BLE CoC send request");
+        assert_eq!(record.component, Some(mesh::mesh_api::envelope::Name::Tag(104)));
+        assert_eq!(record.method, Some(mesh::mesh_api::envelope::Name::Tag(86)));
         let mut decoder =
-            dmesh_server::cbor::Decoder::new(record.fields.expect("BLE CoC send field"));
+            mesh::mesh_api::cbor::Decoder::new(record.fields.expect("BLE CoC send field"));
         let (major, count) = decoder.head().expect("CBOR map");
         assert_eq!(major, 5);
         assert_eq!(count, 1);
@@ -634,7 +657,7 @@ mod tests {
     fn ble_status_response_uses_the_schema_field_names() {
         let schema = load_tagged_schema();
         let mut result = [0u8; 16];
-        let mut encoder = dmesh_server::cbor::Encoder::new(&mut result);
+        let mut encoder = mesh::mesh_api::cbor::Encoder::new(&mut result);
         encoder.map(2).unwrap();
         encoder.uint(1).unwrap();
         encoder.boolean(true).unwrap();
@@ -642,7 +665,7 @@ mod tests {
         encoder.boolean(false).unwrap();
         let result_len = encoder.len();
         let mut wire = [0u8; 64];
-        let used = dmesh_server::tagged::encode_numeric_response(
+        let used = mesh::mesh_api::envelope::encode_numeric_response(
             104,
             83,
             50,
@@ -663,14 +686,12 @@ mod tests {
             ("services", 2),
         ] {
             let wire = encode_stream_command_with_id(name, 91).unwrap();
-            let record = dmesh_server::tagged::decode(&wire).unwrap();
+            let record = mesh::mesh_api::envelope::decode(&wire).unwrap();
             assert_eq!(
                 record.component,
-                Some(dmesh_server::tagged::Name::Tag(
-                    dmesh_server::services::DIAGNOSTIC_COMPONENT,
-                ))
+                Some(mesh::mesh_api::envelope::Name::Tag(9))
             );
-            assert_eq!(record.method, Some(dmesh_server::tagged::Name::Tag(method)));
+            assert_eq!(record.method, Some(mesh::mesh_api::envelope::Name::Tag(method)));
             assert_eq!(record.id, Some(91));
         }
     }
@@ -679,27 +700,27 @@ mod tests {
     fn radio_control_is_stream_only() {
         let telemetry = encode_stream_command_with_id("telemetry.nan", 43)
             .expect("stream telemetry command");
-        assert_eq!(
-            dmesh_server::telemetry::decode_request(&telemetry),
-            Some((dmesh_server::telemetry::NAN_METRICS_METHOD, 43))
-        );
+        let record = mesh::mesh_api::envelope::decode(&telemetry).unwrap();
+        assert_eq!(record.component, Some(mesh::mesh_api::envelope::Name::Tag(7)));
+        assert_eq!(record.method, Some(mesh::mesh_api::envelope::Name::Tag(3)));
+        assert_eq!(record.id, Some(43));
     }
 
     #[test]
     fn radio_snapshot_has_a_stream_handler_but_no_direct_encoding() {
         let stream =
             encode_stream_command_with_id("radio.snapshot", 42).expect("stream radio snapshot");
-        assert!(dmesh_server::raw_wifi::decode_raw_wifi_handler(&stream).is_ok());
+        assert!(dmesh_rawnan::raw_wifi::decode_raw_wifi_handler(&stream).is_ok());
         let mut expected = [0u8; 16];
-        let used = dmesh_server::raw_wifi::encode_raw_wifi_snapshot_request_with_id(
-            dmesh_server::raw_wifi::RAW_WIFI_METHOD_SNAPSHOT,
+        let used = dmesh_rawnan::raw_wifi::encode_raw_wifi_snapshot_request_with_id(
+            dmesh_rawnan::raw_wifi::RAW_WIFI_METHOD_SNAPSHOT,
             0,
             &mut expected,
         )
         .unwrap();
         assert_eq!(
-            dmesh_server::raw_wifi::decode_raw_wifi_handler(&expected[..used]),
-            Ok(dmesh_server::raw_wifi::RawWifiLabRequest::Snapshot)
+            dmesh_rawnan::raw_wifi::decode_raw_wifi_handler(&expected[..used]),
+            Ok(dmesh_rawnan::raw_wifi::RawWifiLabRequest::Snapshot)
         );
     }
 
@@ -710,16 +731,16 @@ mod tests {
             43,
         )
         .expect("stream radio TX");
-        let record = dmesh_server::tagged::decode(&stream).expect("tagged radio TX");
+        let record = mesh::mesh_api::envelope::decode(&stream).expect("tagged radio TX");
         assert_eq!(record.id, Some(43));
         let request =
-            dmesh_server::raw_wifi::decode_raw_wifi_tx_record(record).expect("raw TX bytes");
+            dmesh_rawnan::raw_wifi::decode_raw_wifi_tx_record(record).expect("raw TX bytes");
         assert_eq!(request.channel, 6);
         assert_eq!(
             request.interface,
-            dmesh_server::raw_wifi::RawWifiInterface::Sta
+            dmesh_rawnan::raw_wifi::RawWifiInterface::Sta
         );
-        assert_eq!(request.rate, dmesh_server::raw_wifi::RawWifiRate::Mbps6);
+        assert_eq!(request.rate, dmesh_rawnan::raw_wifi::RawWifiRate::Mbps6);
         assert_eq!(request.frame[0], 0xd0);
     }
 
@@ -728,7 +749,7 @@ mod tests {
         let schema = load_tagged_schema();
         let result = [0xa5, 1, 0x80, 2, 4, 3, 0, 4, 0, 5, 0xf5];
         let mut wire = [0u8; 64];
-        let used = dmesh_server::tagged::encode_numeric_response(4, 77, 91, &result, &mut wire)
+        let used = mesh::mesh_api::envelope::encode_numeric_response(4, 77, 91, &result, &mut wire)
             .expect("bounded scan response");
         let rendered = render_device_record(&schema, &wire[..used]);
         assert!(rendered.contains("method=wifi.scan"), "{rendered}");
@@ -741,7 +762,7 @@ mod tests {
         let schema = load_tagged_schema();
         let mut wire = [0u8; 64];
         let used =
-            dmesh_server::tagged::encode_numeric_error(1, 4, 92, b"invalid_setting", &mut wire)
+            mesh::mesh_api::envelope::encode_numeric_error(1, 4, 92, b"invalid_setting", &mut wire)
                 .expect("bounded transport error");
         let rendered = render_device_record(&schema, &wire[..used]);
         assert!(

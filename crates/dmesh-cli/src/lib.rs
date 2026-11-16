@@ -9,6 +9,7 @@ pub mod client;
 mod device;
 pub mod inventory;
 mod http;
+pub mod mux_cli;
 mod node_client;
 mod schema;
 pub mod uart;

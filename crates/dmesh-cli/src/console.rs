@@ -4,45 +4,44 @@ use mesh::tagged::TaggedSchema;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
-fn schema() -> Result<TaggedSchema, String> {
-    let mut tools = Vec::new();
-    for text in [
-        include_str!("../../../api/generated/schemas/xip-sys/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-files/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-berry/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-wasm3/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-wifi/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-transport/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-ble/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-nan/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-disc/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-quic/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-lora/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-hw/tools.json"),
-        include_str!("../../../api/generated/schemas/xip-rtest/tools.json"),
-    ] {
-        let mut entries: Vec<Value> = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        for entry in &mut entries {
-            if let Some(fields) = entry
-                .pointer_mut("/inputSchema/properties")
-                .and_then(Value::as_object_mut)
-            {
-                for field in fields.values_mut() {
-                    // Preserve declared strings even when they look numeric
-                    // (notably SSIDs, passwords and NV keys).
-                    if field.get("x-mesh-cbor-type").is_none() {
-                        match field["x-protobuf-type"].as_str() {
-                            Some("bytes") => field["x-mesh-cbor-type"] = json!("hex"),
-                            Some("string") => field["x-mesh-cbor-type"] = json!("string"),
-                            _ => {}
-                        }
-                    }
-                }
+const XIP_SCHEMA_SERVICES: &[&str] = &[
+    "xip-sys",
+    "xip-files",
+    "xip-berry",
+    "xip-wasm3",
+    "xip-wifi",
+    "xip-transport",
+    "xip-ble",
+    "xip-nan",
+    "xip-disc",
+    "xip-quic",
+    "xip-mux",
+    "xip-qlink",
+    "xip-quic2",
+    "xip-lora",
+    "xip-hw",
+    "xip-rtest",
+];
+
+fn schema_for_method(method: &str) -> Result<std::sync::Arc<TaggedSchema>, String> {
+    let prefix = method.split('.').next().unwrap_or(method);
+    let candidate = match prefix {
+        "test" => "xip-rtest".to_owned(),
+        other => format!("xip-{other}"),
+    };
+    if XIP_SCHEMA_SERVICES.contains(&candidate.as_str()) {
+        if let Ok(resolved) = crate::schema::resolve_service_catalog(&candidate) {
+            if resolved.catalog.method(method).is_some() {
+                return Ok(resolved.catalog.clone());
             }
         }
-        tools.extend(entries);
     }
-    TaggedSchema::from_tools_json(&Value::Array(tools)).map_err(|e| e.to_string())
+    let mut merged = TaggedSchema::default();
+    for service in XIP_SCHEMA_SERVICES {
+        let resolved = crate::schema::resolve_service_catalog(service).map_err(|e| e.to_string())?;
+        merged.extend_missing((*resolved.catalog).clone());
+    }
+    Ok(std::sync::Arc::new(merged))
 }
 
 struct Request {
@@ -86,21 +85,25 @@ fn request(words: &[String], id: u64) -> Result<Request, String> {
         let decoded=decode(&bytes)?;
         return Ok(Request {component:47,method:decoded["2"].as_u64().unwrap(),id,bytes});
     }
+    let schema = schema_for_method(&method)?;
     if method == "transport.set" {
         // The shared argv parser tolerates unknown fields. For transport
         // patches, dropping an old selector would acknowledge the wrong intent.
-        let tools: Value=serde_json::from_str(include_str!("../../../api/generated/schemas/xip-transport/tools.json"))
-            .map_err(|e|e.to_string())?;
-        let fields=tools[0]["inputSchema"]["properties"].as_object().ok_or("invalid transport catalog")?;
-        if words.len()<2 {return Err("transport.set needs at least one setting".into());}
+        let m = schema
+            .method("transport.set")
+            .ok_or("invalid transport catalog")?;
+        if words.len() < 2 {
+            return Err("transport.set needs at least one setting".into());
+        }
         for word in &words[1..] {
-            if let Some(option)=word.strip_prefix("--") {
-                let key=option.split('=').next().unwrap_or(option);
-                if !fields.contains_key(key) {return Err(format!("unsupported transport.set option --{key}"));}
+            if let Some(option) = word.strip_prefix("--") {
+                let key = option.split('=').next().unwrap_or(option);
+                if !m.fields.contains_key(key) {
+                    return Err(format!("unsupported transport.set option --{key}"));
+                }
             }
         }
     }
-    let schema = schema()?;
     let args = filename_args(&method, words.get(1..).unwrap_or_default());
     let mut record = schema
         .parse_argv(&method, &args)
@@ -238,7 +241,7 @@ fn response(
 
 /// Native C Main operations use the same target/method form as other CLI calls.
 pub(crate) fn is_native(method: &str) -> bool {
-    matches!(method,"wake"|"sleep"|"nv"|"watch"|"transport.set") || ["files.","berry.","wasm3.","sys.","nan.","wifi.","ble.","disc.","quic.","lora.","hw.","rtest.","test."].iter().any(|p|method.starts_with(p))
+    matches!(method,"wake"|"sleep"|"nv"|"watch"|"transport.set") || ["files.","berry.","wasm3.","sys.","nan.","wifi.","ble.","disc.","quic.","mux.","qlink.","quic2.","lora.","hw.","rtest.","test."].iter().any(|p|method.starts_with(p))
 }
 fn native_words(words: &[String]) -> Result<Vec<String>,String> {
     match words.first().map(String::as_str) {
@@ -259,24 +262,31 @@ fn native_words(words: &[String]) -> Result<Vec<String>,String> {
         _=>Ok(words.to_vec()),
     }
 }
-pub(crate) fn report(bytes: &[u8]) -> Result<Value,String> {
-    use std::sync::OnceLock;
-    static FIELDS: OnceLock<Result<Vec<(u64,String)>,String>>=OnceLock::new();
-    let fields=FIELDS.get_or_init(|| {
-        let tools:Value=serde_json::from_str(include_str!("../../../api/generated/schemas/xip-nan/tools.json")).map_err(|e|e.to_string())?;
-        let properties=tools.as_array().and_then(|tools|tools.iter().find(|t|t["name"]=="nan.report"))
-            .and_then(|t|t.pointer("/outputSchema/properties")).and_then(Value::as_object)
-            .ok_or("generated nan.report schema is missing")?;
-        Ok(properties.iter().filter_map(|(name,field)|Some((field["x-protobuf-index"].as_u64()?,name.clone()))).collect())
-    }).as_ref().map_err(Clone::clone)?;
-    let raw=decode(bytes)?;
-    let kind=raw["1"].as_u64().ok_or("report has no kind")?;
-    let event=match kind {0=>"nan.dw0",1=>"nan.pub",2=>"nan.sub",3=>"nan.followup",4=>"nan.now",_=>return Err("unknown NAN report".into())};
-    let mut out=serde_json::Map::new();
-    out.insert("event".into(),json!(event));
-    for (tag,name) in fields {
-        if name=="kind" {continue;}
-        if let Some(value)=raw.get(tag.to_string()) {out.insert(name.clone(),value.clone());}
+pub(crate) fn report(bytes: &[u8]) -> Result<Value, String> {
+    let resolved = crate::schema::resolve_service_catalog("xip-nan").map_err(|e| e.to_string())?;
+    let m = resolved
+        .catalog
+        .method("nan.report")
+        .ok_or("generated nan.report schema is missing")?;
+    let raw = decode(bytes)?;
+    let kind = raw["1"].as_u64().ok_or("report has no kind")?;
+    let event = match kind {
+        0 => "nan.dw0",
+        1 => "nan.pub",
+        2 => "nan.sub",
+        3 => "nan.followup",
+        4 => "nan.now",
+        _ => return Err("unknown NAN report".into()),
+    };
+    let mut out = serde_json::Map::new();
+    out.insert("event".into(), json!(event));
+    for (name, field) in &m.response_fields {
+        if name == "kind" {
+            continue;
+        }
+        if let Some(value) = raw.get(field.tag.to_string()) {
+            out.insert(name.clone(), value.clone());
+        }
     }
     Ok(Value::Object(out))
 }
@@ -344,7 +354,7 @@ pub(crate) fn run_native(arguments: &[String]) -> Result<(),String> {
 }
 fn run_udp(target:&str,request:&Request)->Result<(),String>{
     let peer=crate::client::parse_udp_peer(target)?;
-    let socket=std::net::UdpSocket::bind(quic_lite::bearer_udp::wildcard_bind(peer,0)).map_err(|e|e.to_string())?;
+    let socket=std::net::UdpSocket::bind(quic_link::wildcard_bind(peer,0)).map_err(|e|e.to_string())?;
     socket.connect(peer).map_err(|e|e.to_string())?;
     socket.set_read_timeout(Some(Duration::from_secs(6))).map_err(|e|e.to_string())?;
     let packet=wrap_request(&request.bytes);let mut reader=Reader::default();let mut buf=[0u8;1704];

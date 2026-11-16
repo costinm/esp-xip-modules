@@ -1,8 +1,8 @@
-//! The CLI's view of the device records (`dmesh_server::device_record`): the same files lmesh and
+//! The CLI's view of the device records (`dmesh_discovery::device_record`): the same files lmesh and
 //! Android write when they pair or discover a device. Reading, merging and writing them is
 //! `DeviceStore`; this file only turns a record into what the CLI connects to.
 
-use dmesh_server::device_record::{DeviceRecord, DeviceStore};
+use dmesh_discovery::device_record::{DeviceRecord, DeviceStore};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},

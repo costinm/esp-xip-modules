@@ -3,7 +3,7 @@
 mod files;
 pub use files::{FileSpec, FileStatus, ManagedFile};
 
-use dmesh_server::{
+use dmesh_discovery::{
     announce,
     device_record::{DeviceRecord, DeviceStore},
 };
@@ -1423,7 +1423,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 fn provision_usb(inventory: &Inventory, c: &Intended, serial: &str) -> Result<(), String> {
-    use dmesh_server::{provision, tagged};
+    use dmesh_discovery::provision;
+    use mesh::mesh_api::envelope as tagged;
     use std::time::Duration;
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let mut request = [0; 256];

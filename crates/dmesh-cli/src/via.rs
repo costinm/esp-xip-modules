@@ -1,20 +1,15 @@
 //! Explicit circuit transport. This never creates forwarding rules.
-use crate::node_client::{ClientPath, Node, Pool};
 use crate::xip_wire::{encode_record, Event, Reader, XipPort};
-use quic_lite::{
-    BearerContext, BearerInfo, BearerName, EgressSubmission, OwnedPacket, PacketBearer,
-    PacketEgress, PacketMeta, PacketPool, PacketSendOutcome, PacketSubmitError, PacketWriter,
-    PeerL2Address,
+use quic_base::{PacketPool, PoolPacket, XipLazyPacket, XipLazyPool};
+use quic_link::{
+    ConnectionId, LinkId, LinkInfo, LinkIngress, LinkMeta, LinkName, LinkProfile, LinkTxOutcome,
+    PacketLink, PeerL2Address, TokioAssocDriver,
 };
 use std::{
     os::fd::AsRawFd,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
-type Buffer = <Pool as PacketPool>::Buffer;
 #[derive(Clone, Debug)]
 pub(crate) struct Via {
     pub target: String,
@@ -103,19 +98,47 @@ impl Via {
             Ok(Io::Uart(port, Reader::default()))
         }
     }
-    pub fn attach(&self, node: &mut Node, baud: Option<u32>) -> Result<ClientPath, String> {
+    pub fn attach(
+        &self,
+        driver: &mut TokioAssocDriver,
+        id: LinkId,
+        peer_cid: ConnectionId,
+        baud: Option<u32>,
+    ) -> Result<(), String> {
         let io = Arc::new(Mutex::new(self.open(baud)?));
-        let bearer = node
-            .add_bearer(Circuit {
+        let via = self.clone();
+        let profile = LinkProfile::udp_datagram(1, 1100, peer_cid);
+        driver.add_link_with(id, PeerL2Address::new(1).unwrap(), profile, |pool, ingress| {
+            let task_io = io.clone();
+            let task_via = via.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let received = task_io
+                        .lock()
+                        .unwrap()
+                        .receive_packet(&task_via, &pool, ingress.as_ref());
+                    match received {
+                        Err(_) => break,
+                        Ok(false) => tokio::time::sleep(Duration::from_millis(1)).await,
+                        Ok(true) => tokio::task::yield_now().await,
+                    }
+                }
+            });
+            Ok::<_, String>(Circuit {
                 io,
-                via: self.clone(),
-                task: None,
-                blocked: Arc::new(AtomicBool::new(false)),
+                via,
+                info: LinkInfo {
+                    name: LinkName::new("circuit").unwrap(),
+                    max_packet_size: 1100,
+                    prefix_required: 0,
+                    suffix_required: 0,
+                    requires_packet_encryption: false,
+                    secure_link: false,
+                    nominal_bitrate_bps: 0,
+                    local_mac: None,
+                },
+                task: Some(task),
             })
-            .map_err(|e| format!("circuit bearer: {e:?}"))?;
-        Ok(ClientPath {
-            bearer,
-            peer_l2_address: PeerL2Address::new(1).unwrap(),
         })
     }
     pub fn exchange(&self, baud: Option<u32>, request: &[u8]) -> Result<Vec<u8>, String> {
@@ -177,37 +200,29 @@ impl Io {
     fn receive_packet(
         &mut self,
         via: &Via,
-        context: &BearerContext<Pool>,
+        pool: &XipLazyPool,
+        ingress: &dyn LinkIngress<XipLazyPacket>,
     ) -> std::io::Result<bool> {
         match self {
             Self::Udp(socket) => {
-                let Some(mut writer) = context.pool().acquire_writer(144, 0) else {
-                    return Ok(false);
-                };
-                let n = match socket.recv(writer.payload_mut()) {
+                let mut buf = [0u8; 1500];
+                let n = match socket.recv(&mut buf) {
                     Ok(n) => n,
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
                     Err(e) => return Err(e),
                 };
-                let prefix = if n > 1 {
-                    cid_len(writer.payload_mut()[1]) + 2
-                } else {
-                    0
-                };
-                if via.unwrap(&writer.payload_mut()[..n]).is_some() {
-                    if let Some(packet) = writer.commit(n) {
-                        let (buffer, range) = packet.into_parts();
-                        let packet =
-                            OwnedPacket::new(buffer, range.start + prefix..range.end).unwrap();
-                        context.enqueue_packet(
-                            PacketMeta {
-                                bearer: context.bearer(),
-                                peer_l2_address: PeerL2Address::new(1).unwrap(),
-                                received_at_us: 0,
-                            },
-                            packet,
-                        );
-                    }
+                if let Some(inner) = via.unwrap(&buf[..n])
+                    && let Ok(mut pkt) = pool.alloc()
+                    && pkt.append(inner).is_ok()
+                {
+                    ingress.on_packet(
+                        LinkMeta {
+                            peer: PeerL2Address::new(1).unwrap(),
+                            received_at_us: 0,
+                            rssi_dbm: None,
+                        },
+                        pkt,
+                    );
                 }
                 Ok(true)
             }
@@ -215,26 +230,19 @@ impl Io {
                 let bytes = port.read()?;
                 let progress = !bytes.is_empty();
                 for event in r.feed(&bytes) {
-                    if let Event::Record(247 | 244, bytes) = event {
-                        if let Some(inner) = via.unwrap(&bytes) {
-                            let Some(mut writer) = context.pool().acquire_writer(144, 0) else {
-                                continue;
-                            };
-                            if inner.len() > writer.payload_mut().len() {
-                                continue;
-                            }
-                            writer.payload_mut()[..inner.len()].copy_from_slice(inner);
-                            if let Some(packet) = writer.commit(inner.len()) {
-                                context.enqueue_packet(
-                                    PacketMeta {
-                                        bearer: context.bearer(),
-                                        peer_l2_address: PeerL2Address::new(1).unwrap(),
-                                        received_at_us: 0,
-                                    },
-                                    packet,
-                                );
-                            }
-                        }
+                    if let Event::Record(247 | 244, bytes) = event
+                        && let Some(inner) = via.unwrap(&bytes)
+                        && let Ok(mut pkt) = pool.alloc()
+                        && pkt.append(inner).is_ok()
+                    {
+                        ingress.on_packet(
+                            LinkMeta {
+                                peer: PeerL2Address::new(1).unwrap(),
+                                received_at_us: 0,
+                                rssi_dbm: None,
+                            },
+                            pkt,
+                        );
                     }
                 }
                 r.take_text();
@@ -270,8 +278,8 @@ impl Io {
 struct Circuit {
     io: Arc<Mutex<Io>>,
     via: Via,
+    info: LinkInfo,
     task: Option<tokio::task::JoinHandle<()>>,
-    blocked: Arc<AtomicBool>,
 }
 impl Drop for Circuit {
     fn drop(&mut self) {
@@ -280,18 +288,21 @@ impl Drop for Circuit {
         }
     }
 }
-impl PacketEgress<Buffer> for Circuit {
-    fn submit(
+impl PacketLink<XipLazyPacket> for Circuit {
+    fn info(&self) -> &LinkInfo {
+        &self.info
+    }
+
+    fn send_packet(
         &mut self,
         _: PeerL2Address,
-        submission: EgressSubmission<Buffer>,
-    ) -> Result<(), PacketSubmitError<Buffer>> {
-        // Do not return a possibly partially written UART frame for another path.
+        packet: XipLazyPacket,
+    ) -> Result<LinkTxOutcome, XipLazyPacket> {
         let (udp, result) = {
             let mut io = self.io.lock().unwrap();
             (
                 matches!(&*io, Io::Udp(_)),
-                io.send(&self.via.prefix(), submission.packet().bytes()),
+                io.send(&self.via.prefix(), packet.bytes()),
             )
         };
         if udp
@@ -299,52 +310,13 @@ impl PacketEgress<Buffer> for Circuit {
                 .as_ref()
                 .is_err_and(|e| e.kind() == std::io::ErrorKind::WouldBlock)
         {
-            self.blocked.store(true, Ordering::Release);
-            return Err(PacketSubmitError::WouldBlock(submission));
+            return Err(packet);
         }
-        submission.complete(
-            if result.is_ok() {
-                PacketSendOutcome::Sent
-            } else {
-                PacketSendOutcome::Failed
-            },
-            0,
-        );
-        Ok(())
-    }
-}
-impl PacketBearer<Pool> for Circuit {
-    type AttachError = ();
-    fn info(&self) -> BearerInfo {
-        BearerInfo {
-            name: BearerName::new("circuit").unwrap(),
-            max_packet_size: 1100,
-            prefix_required: 0,
-            suffix_required: 0,
-            requires_packet_encryption: false,
-            secure_link: false,
-            nominal_bitrate_bps: 0,
-            local_mac: None,
-        }
-    }
-    fn attach(&mut self, context: BearerContext<Pool>) -> Result<(), ()> {
-        let io = self.io.clone();
-        let via = self.via.clone();
-        let blocked = self.blocked.clone();
-        self.task = Some(tokio::spawn(async move {
-            loop {
-                if blocked.swap(false, Ordering::AcqRel) {
-                    context.send_ready();
-                }
-                let received = io.lock().unwrap().receive_packet(&via, &context);
-                match received {
-                    Err(_) => break,
-                    Ok(false) => tokio::time::sleep(Duration::from_millis(1)).await,
-                    Ok(true) => tokio::task::yield_now().await,
-                }
-            }
-        }));
-        Ok(())
+        Ok(if result.is_ok() {
+            LinkTxOutcome::Sent
+        } else {
+            LinkTxOutcome::Failed
+        })
     }
 }
 #[cfg(test)]
