@@ -74,7 +74,7 @@ fn first_command_activates_initializes_and_delivers_to_primary_and_alias() {
         count.set(count.get() + 1);
         let owner = loader.add_handler("disc", entry, 8);
         owner.set_component(47);
-        owner.serve_envelope_component(52).unwrap();
+        owner.serve_envelope_component(52, 1).unwrap();
         owner.start(&[]);
         Ok(owner)
     });

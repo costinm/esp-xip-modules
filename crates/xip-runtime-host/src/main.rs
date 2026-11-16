@@ -36,7 +36,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(dir) = std::env::var_os("XIP_STATE_DIR") {
         xip_runtime_host::set_identity_dir(dir)?;
     }
-    let rt = Runtime::default();
+    let mut cfg = if std::env::var("XIP_SMALL_LIMITS").is_ok_and(|v| v == "1" || v == "true") {
+        xip_runtime_host::Config::embedded()
+    } else {
+        xip_runtime_host::Config::host()
+    };
+    if let Some(slots) = std::env::var("XIP_POOL_SLOTS").ok().and_then(|v| v.parse().ok()) {
+        cfg.pool_slots = slots;
+    }
+    if let Some(quota) = std::env::var("XIP_MEM_QUOTA").ok().and_then(|v| v.parse().ok()) {
+        cfg.mem_quota = quota;
+    }
+    if let Some(table_max) = std::env::var("XIP_QUIC_TABLE_MAX").ok().and_then(|v| v.parse().ok()) {
+        cfg.quic_table_max = table_max;
+    }
+    if let Some(reply_max) = std::env::var("XIP_QUIC_REPLY_MAX").ok().and_then(|v| v.parse().ok()) {
+        cfg.quic_reply_max = reply_max;
+    }
+    let rt = Runtime::new(cfg);
     if let Some(path)=std::env::var_os("XIP_FLASH_FILE") {
         rt.attach_flash(xip_runtime_host::flash::FlashFile::open(path, 4*1024*1024)?)
             .map_err(|e|std::io::Error::other(format!("attach flash: {e}")))?;

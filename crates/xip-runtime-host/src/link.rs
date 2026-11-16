@@ -74,6 +74,18 @@ pub(crate) struct Links {
 pub type QuicRx = std::rc::Rc<std::cell::RefCell<dyn FnMut(&str, u64, i32, &[u8]) -> bool>>;
 
 impl Links {
+    pub(crate) fn with_quic_limits(
+        max_entries: usize,
+        max_replies: usize,
+        reply_timeout_ms: u64,
+    ) -> Self {
+        Self {
+            list: Vec::new(),
+            quic_rx: None,
+            quic: crate::quic::QuicState::with_limits(max_entries, max_replies, reply_timeout_ms),
+        }
+    }
+
     fn find(&self, name: &str) -> Option<usize> {
         self.list.iter().position(|e| e.name == name)
     }
@@ -138,7 +150,7 @@ unsafe extern "C" fn open(user: *mut c_void, name: *const c_char, component: c_i
 ///
 /// The port of a manifest (key 9) for a module: subscribe it to the link of that port, as the C runtime does when it creates the instance.
 pub(crate) fn bind_port(sh: &Shared, me: &Rc<Inst>, port: u32) -> c_int {
-    if port != PORT_CONSOLE {
+    if port == 0 {
         return ERR_UNSUPPORTED;
     }
     let owner = component_of(me);
@@ -823,7 +835,7 @@ pub(crate) fn release(sh: &Shared, component: i32) {
     let mut down = Vec::new();
     {
         let mut links = sh.links.borrow_mut();
-        links.quic.table.retain(|_,e| !e.managed.as_ref().is_some_and(|(owner,_,_)| *owner==component as usize));
+        links.quic.table.relay_release_owner(component as usize);
         relay_gc(&mut links);
         for (i, l) in links.list.iter_mut().enumerate() {
             l.subs.retain(|s| s.0 != component);
@@ -962,37 +974,34 @@ impl Runtime {
     }
     /// The relay table (runtime-issued IDs): `cid` is 1 to 20 bytes as they appear in a short header (quic-lite: with the class tag).
     pub fn quic_table_add(&self, cid: &[u8], kind: QuicKind, egress: u32, token: u64, out_cid: &[u8]) -> i32 {
-        let mut links = self.sh.links.borrow_mut();
-        let t = &mut links.quic.table;
-        if cid.is_empty() || cid.len() > quic::CID_MAX {
-            return ERR_ARG;
-        }
-        if !t.contains_key(cid) && t.len() >= quic::TABLE_MAX {
-            return ERR_NOMEM;
-        }
-        if kind == QuicKind::Relay && (out_cid.is_empty() || out_cid.len() > quic::CID_MAX) {
-            return ERR_ARG;
-        }
-        t.insert(cid.to_vec(), quic::QuicEntry { last_used_us:0,idle_ms:0,address: Vec::new(), managed: None, kind, egress, token, out_cid: out_cid.to_vec() });
-        0
+        self.sh.links.borrow_mut().quic.table.table_add(cid, kind, egress, token, out_cid)
     }
     /// The runtime issues the IDs: the lowest free quic-lite connection ID (1 byte for the first 127 entries), added and returned. Freed IDs are reused.
     pub fn quic_table_alloc(&self, kind: QuicKind, egress: u32, token: u64, out_cid: &[u8]) -> Result<Vec<u8>, i32> {
-        let mut v = 1u64;
-        loop {
-            let cid = quic::cid_encode(v).ok_or(ERR_NOMEM)?;
-            if !self.sh.links.borrow().quic.table.contains_key(&cid) {
-                let rc = self.quic_table_add(&cid, kind, egress, token, out_cid);
-                return if rc == 0 { Ok(cid) } else { Err(rc) };
-            }
-            v += 1;
-        }
+        self.sh.links.borrow_mut().quic.table.table_alloc(kind, egress, token, out_cid)
     }
     pub fn quic_table_remove(&self, cid: &[u8]) -> i32 {
-        if self.sh.links.borrow_mut().quic.table.remove(cid).is_some() { 0 } else { ERR_NOTFOUND }
+        self.sh.links.borrow_mut().quic.table.table_remove(cid)
     }
     pub fn quic_table_len(&self) -> usize {
         self.sh.links.borrow().quic.table.len()
+    }
+    /// Configured maximum number of entries in the runtime QUIC DCID / relay table.
+    pub fn quic_table_max(&self) -> usize {
+        self.sh.links.borrow().quic.table.max_entries()
+    }
+    /// Update the maximum number of entries admitted into the runtime QUIC DCID / relay table.
+    pub fn set_quic_table_max(&self, max_entries: usize) {
+        self.sh.links.borrow_mut().quic.table.set_max_entries(max_entries);
+    }
+    /// Update the CBOR datagram reply correlation table capacity and retention timeout (milliseconds).
+    pub fn set_quic_reply_limits(&self, max_replies: usize, reply_timeout_ms: u64) {
+        self.sh
+            .links
+            .borrow_mut()
+            .quic
+            .replies
+            .set_limits(max_replies, reply_timeout_ms);
     }
     pub fn quic_stats(&self) -> quic::QuicStats {
         self.sh.links.borrow().quic.stats
@@ -1066,47 +1075,39 @@ pub(crate) fn remove_datagram_link(sh: &Shared, addr: u32) {
 
 unsafe extern "C" fn relay_set(user:*mut c_void,r:*const RelayRoute,mode:u32)->i32 {
     let (sh,me)=ctx(user);
-    if r.is_null() || mode>1 {return ERR_ARG;}
-    let r=*r;
-    if r.dcid_len==0 || r.dcid_len>20 || r.hop_count==0 || r.hop_count>4 || r.reserved!=0 || r.endpoint>1 {return ERR_ARG;}
-    let mut total=0u32;
-    for h in &r.hops[..r.hop_count as usize] {
-        if h.link==0 || h.cid_len==0 || h.cid_len>20 || (h.address_len!=0 && h.address_len!=22) || h.padding!=[0;4] {return ERR_ARG;}
-        if h.address_len==22 && ((h.address[16]==0 && h.address[17]==0) || h.address[22..]!=[0,0]) {return ERR_ARG;}
-        total+=h.weight as u32;
+    if r.is_null() {return ERR_ARG;}
+    let qr = quic::to_relay_route(&*r);
+    let owner = component_of(&me) as usize;
+    let mut links=sh.links.borrow_mut();
+    if let Err(rc) = links.quic.table.relay_can_set(owner, &qr, mode) {
+        return rc;
     }
-    if total==0 {return ERR_ARG;}
-    if r.endpoint!=0 && (r.dcid_len>8 || (r.dcid_len==1 && r.dcid[0]==0) || quic::cid_class_len(r.dcid[0])!=r.dcid_len as usize) {return ERR_ARG;}
-    let mut links=sh.links.borrow_mut();let cid=&r.dcid[..r.dcid_len as usize];
-    let t=&mut links.quic.table;
-    if let Some(old)=t.get(cid) {
-        if mode==0 || !old.managed.as_ref().is_some_and(|(owner,_,_)|*owner==component_of(&me) as usize) {return ERR_BUSY;}
-    } else if mode==1 {return ERR_NOTFOUND;} else if t.len()>=quic::TABLE_MAX {return ERR_NOMEM;}
-    if r.endpoint!=0 {
+    if qr.endpoint!=0 {
         let Some(at)=links.named("relay") else {return ERR_NOMEM;};
         if links.list[at].provider==LINK_MODULE {return ERR_BUSY;}
         let link=&mut links.list[at];link.provider=LINK_NATIVE;link.state=LINK_UP;link.mtu=(quic::MAX_PACKET-22) as u32;
     }
-    let t=&mut links.quic.table;
-    let h=&r.hops[0];
-    let (last_used_us,idle_ms)=t.get(cid).map_or((0,0),|e|(e.last_used_us,e.idle_ms));
-    t.insert(cid.to_vec(),quic::QuicEntry {last_used_us,idle_ms,address:Vec::new(),managed:Some((component_of(&me) as usize,r,0)),kind:QuicKind::Relay,
-        egress:h.link,token:h.token,out_cid:h.rewritten_dcid[..h.cid_len as usize].to_vec()});
-    links.quic.classifier=true;relay_gc(&mut links);0
+    let rc = links.quic.table.relay_set(owner, &qr, mode);
+    if rc == 0 {
+        links.quic.classifier=true;
+        relay_gc(&mut links);
+    }
+    rc
 }
 unsafe extern "C" fn relay_get(user:*mut c_void,index:u32,out:*mut RelayRoute)->i32 {
     let (sh,me)=ctx(user);if out.is_null(){return ERR_ARG;}
     let links=sh.links.borrow();
-    let route=links.quic.table.values().filter_map(|e| e.managed.as_ref())
-        .filter(|(owner,_,_)|*owner==component_of(&me) as usize).nth(index as usize);
-    if let Some((_,r,_))=route {*out=*r;0} else {ERR_NOTFOUND}
+    match links.quic.table.relay_get(component_of(&me) as usize, index) {
+        Ok(r) => { *out = quic::from_relay_route(&r); 0 }
+        Err(rc) => rc,
+    }
 }
 unsafe extern "C" fn relay_remove(user:*mut c_void,cid:*const u8,len:usize)->i32 {
     let (sh,me)=ctx(user);if cid.is_null() || len==0 || len>20 {return ERR_ARG;}
     let cid=std::slice::from_raw_parts(cid,len);let mut links=sh.links.borrow_mut();
-    let Some(e)=links.quic.table.get(cid) else {return ERR_NOTFOUND;};
-    if !e.managed.as_ref().is_some_and(|(owner,_,_)|*owner==component_of(&me) as usize) {return ERR_BUSY;}
-    links.quic.table.remove(cid);relay_gc(&mut links);0
+    let rc = links.quic.table.relay_remove(component_of(&me) as usize, cid);
+    if rc == 0 { relay_gc(&mut links); }
+    rc
 }
 static QUIC_COMPONENT:Quic=Quic {version:QUIC_VERSION,size:std::mem::size_of::<Quic>() as u32,
     attach:Some(quic_attach),detach:Some(quic_detach),relay_set:Some(relay_set),relay_get:Some(relay_get),relay_remove:Some(relay_remove),
@@ -1114,24 +1115,11 @@ static QUIC_COMPONENT:Quic=Quic {version:QUIC_VERSION,size:std::mem::size_of::<Q
 pub(crate) fn quic_component()->*const Quic {&QUIC_COMPONENT}
 
 fn relay_select(links:&mut Links,cid:&[u8],now:u64)->Option<quic::QuicEntry> {
-    links.quic.table.get_mut(cid).filter(|e|e.managed.is_none() || e.idle_ms==0 || now.saturating_sub(e.last_used_us)<e.idle_ms as u64*1000).map(|entry| {
-        if entry.managed.is_some(){entry.last_used_us=now;}
-        if let Some((_,route,cursor))=&mut entry.managed {
-            let total:u32=route.hops[..route.hop_count as usize].iter().map(|h|h.weight as u32).sum();
-            let mut at=*cursor%total;*cursor=cursor.wrapping_add(1);
-            for hop in &route.hops[..route.hop_count as usize] {
-                if at<hop.weight as u32 {entry.egress=hop.link;entry.token=hop.token;
-                    entry.out_cid=hop.rewritten_dcid[..hop.cid_len as usize].to_vec();
-                    entry.address=hop.address[..hop.address_len as usize].to_vec();break;}
-                at-=hop.weight as u32;
-            }
-        }
-        entry.clone()
-    })
+    links.quic.table.select(cid, now)
 }
 
 fn relay_gc(links:&mut Links) {
-    if !links.quic.table.values().any(|e|e.managed.as_ref().is_some_and(|(_,r,_)|r.endpoint!=0)) {
+    if !links.quic.table.has_terminal_endpoint() {
         if let Some(at)=links.find("relay") {
             let l=&mut links.list[at];l.provider=LINK_NONE;l.state=LINK_DOWN;
             if l.subs.is_empty(){*l=Entry::default();}
@@ -1141,43 +1129,47 @@ fn relay_gc(links:&mut Links) {
 
 unsafe extern "C" fn relay_create(user:*mut c_void,out:*mut RelayRoute,idle_ms:u32,reuse:u32)->i32 {
     let (sh,me)=ctx(user);if out.is_null() || reuse>1 {return ERR_ARG;}
-    let mut r=*out;if r.dcid_len!=0 || r.hop_count!=1 {return ERR_ARG;}
-    relay_expire(user);let now=sh.st.borrow().now*1000;let owner=component_of(&me) as usize;
-    if reuse!=0 {
-        let mut links=sh.links.borrow_mut();
-        for e in links.quic.table.values_mut(){
-            if let Some((old_owner,old,_))=&e.managed {
-                if *old_owner==owner && e.idle_ms==idle_ms && old.endpoint==r.endpoint && old.hop_count==1 && old.hops[0]==r.hops[0] {
-                    *out=*old;e.last_used_us=now;return 1;
-                }
+    let mut qr = quic::to_relay_route(&*out);
+    if qr.dcid_len!=0 || qr.hop_count!=1 {return ERR_ARG;}
+    let now=sh.st.borrow().now*1000;let owner=component_of(&me) as usize;
+    let mut links=sh.links.borrow_mut();
+    if qr.endpoint!=0 {
+        let Some(at)=links.named("relay") else {return ERR_NOMEM;};
+        if links.list[at].provider==LINK_MODULE {return ERR_BUSY;}
+    }
+    match links.quic.table.relay_create(owner, &mut qr, idle_ms, reuse != 0, now) {
+        Ok(rc) => {
+            if qr.endpoint!=0 {
+                let at=links.named("relay").unwrap();
+                let link=&mut links.list[at];link.provider=LINK_NATIVE;link.state=LINK_UP;link.mtu=(quic::MAX_PACKET-22) as u32;
             }
+            links.quic.classifier=true;
+            relay_gc(&mut links);
+            *out = quic::from_relay_route(&qr);
+            rc
+        }
+        Err(rc) => {
+            relay_gc(&mut links);
+            rc
         }
     }
-    for _ in 0..=quic::TABLE_MAX {
-        let cid={let mut links=sh.links.borrow_mut();let state=&mut links.quic;
-            if state.next_relay_cid>=(1u64<<60)-1 {return ERR_NOMEM;}
-            state.next_relay_cid+=1;quic::cid_encode((1u64<<60)|state.next_relay_cid).unwrap()};
-        if sh.links.borrow().quic.table.contains_key(&cid){continue;}
-        r.dcid[..cid.len()].copy_from_slice(&cid);r.dcid_len=cid.len() as u8;
-        let rc=relay_set(user,&r,0);if rc<0{return rc;}
-        let mut links=sh.links.borrow_mut();let e=links.quic.table.get_mut(&cid).unwrap();e.last_used_us=now;e.idle_ms=idle_ms;*out=r;return 0;
-    }
-    ERR_NOMEM
 }
 unsafe extern "C" fn relay_stats(user:*mut c_void,cid:*const u8,len:usize,out:*mut RelayStats)->i32 {
     let (sh,me)=ctx(user);if cid.is_null() || len==0 || len>20 || out.is_null(){return ERR_ARG;}
-    let links=sh.links.borrow();let Some(e)=links.quic.table.get(std::slice::from_raw_parts(cid,len)) else{return ERR_NOTFOUND;};
-    if !e.managed.as_ref().is_some_and(|(owner,_,_)|*owner==component_of(&me) as usize){return ERR_NOTFOUND;}
-    *out=RelayStats {last_used_us:e.last_used_us,idle_ms:e.idle_ms,reserved:0};0
+    let links=sh.links.borrow();
+    match links.quic.table.relay_stats(component_of(&me) as usize, std::slice::from_raw_parts(cid,len)) {
+        Ok(s) => { *out = RelayStats { last_used_us: s.last_used_us, idle_ms: s.idle_ms, reserved: s.reserved }; 0 }
+        Err(rc) => rc,
+    }
 }
 unsafe extern "C" fn relay_expire(user:*mut c_void)->i32 {
-    let (sh,me)=ctx(user);let now=sh.st.borrow().now*1000;let mut links=sh.links.borrow_mut();let before=links.quic.table.len();
-    links.quic.table.retain(|_,e| !e.managed.as_ref().is_some_and(|(owner,_,_)|*owner==component_of(&me) as usize && e.idle_ms!=0 && now.saturating_sub(e.last_used_us)>=e.idle_ms as u64*1000));
-    let removed=before-links.quic.table.len();relay_gc(&mut links);removed as i32
+    let (sh,me)=ctx(user);let now=sh.st.borrow().now*1000;let mut links=sh.links.borrow_mut();
+    let removed = links.quic.table.relay_expire(Some(component_of(&me) as usize), now);
+    relay_gc(&mut links);
+    removed as i32
 }
 unsafe extern "C" fn relay_idle(user:*mut c_void,cid:*const u8,len:usize,idle_ms:u32)->i32 {
     let (sh,me)=ctx(user);if cid.is_null() || len==0 || len>20 {return ERR_ARG;}
-    let mut links=sh.links.borrow_mut();let Some(e)=links.quic.table.get_mut(std::slice::from_raw_parts(cid,len)) else{return ERR_NOTFOUND;};
-    if !e.managed.as_ref().is_some_and(|(owner,_,_)|*owner==component_of(&me) as usize){return ERR_NOTFOUND;}
-    e.idle_ms=idle_ms;0
+    let mut links=sh.links.borrow_mut();
+    links.quic.table.relay_idle(component_of(&me) as usize, std::slice::from_raw_parts(cid,len), idle_ms)
 }

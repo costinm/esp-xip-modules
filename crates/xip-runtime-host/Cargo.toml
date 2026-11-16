@@ -11,6 +11,7 @@ publish = false
 xip-abi = { path = "../xip-abi" }
 xip-wasm = { path = "../xip-wasm" }
 xip-psa = { path = "../xip-psa" }
+quic-relay = { git = "https://github.com/costinm/ssh-mesh" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", "net", "io-util", "sync", "signal"] }
@@ -21,8 +22,14 @@ path = "src/main.rs"
 
 [dev-dependencies]
 dmesh-cli = { path = "../dmesh-cli" }
+quic-base = { git = "https://github.com/costinm/ssh-mesh" }
+quic-link = { git = "https://github.com/costinm/ssh-mesh" }
+quic-mux = { git = "https://github.com/costinm/ssh-mesh", features = ["tokio"] }
+quic-tools = { git = "https://github.com/costinm/ssh-mesh", features = ["tokio"] }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util", "process"] }
 berry-c = { path = "../berry-c" }
 wasm3-c = { path = "../wasm3-c" }
 wat = "1"
+mod-cel = { path = "../../modules/mod_cel" }
+ucel = { path = "../uCEL", features = ["parser"] }

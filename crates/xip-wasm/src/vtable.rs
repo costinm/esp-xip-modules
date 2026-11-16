@@ -46,7 +46,14 @@ fn word(c: &Ctx, arg: Arg, a: &[u64; 6], i: usize) -> R<usize> {
             p
         }
         Arg::Str => cstr(c, a[i])? as usize,
-        Arg::Bytes(len) | Arg::OutBytes(len) => pn::<u8>(c, a[i], a[len as usize] as usize)? as usize,
+        Arg::Bytes(len) | Arg::OutBytes(len) => {
+            let n = a[len as usize] as usize;
+            if a[i] == 0 && n == 0 {
+                0
+            } else {
+                pn::<u8>(c, a[i], n)? as usize
+            }
+        }
         Arg::OutArr(size, count) => pn::<u8>(c, a[i], size.checked_mul(a[count as usize] as usize).ok_or(ERR_ARG)?)? as usize,
     })
 }

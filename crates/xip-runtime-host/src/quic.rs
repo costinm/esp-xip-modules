@@ -1,101 +1,64 @@
-//! The common QUIC receive function of the host-runtime: the same classification, relay table, envelope fields and reply bookkeeping as
-//! `components/xip_runtime/src/xip_quic.c` (see `include/xip_quic.h` for the formats). Pure: no pool, no links; the glue is in `link.rs`.
-//! C does no QUIC termination: it reads the first byte, the version and the connection IDs and decides who gets the packet.
-use std::collections::BTreeMap;
+//! The common QUIC receive function of the host-runtime: delegates classification, the sorted relay table,
+//! weighted multi-hop selection, high-range relay CID allocation, in-place DCID rewriting, and reply
+//! bookkeeping to [`quic_relay::xip`] (matching `components/xip_runtime/src/xip_quic.c` and
+//! `include/xip_quic.h`).
 
-/// 1500 - 48 (IPv6 + UDP) - 4.
-pub const MAX_PACKET: usize = 1448;
-pub const CID_MAX: usize = 20;
-pub const TABLE_MAX: usize = 64;
-pub const VERSION_DMESH: u32 = 0x444d_0001;
-pub const VERSION_CBOR: u32 = 0x444d_0002;
-pub const REPLY_MS: u64 = 5000;
-pub const REPLIES: usize = 8;
+pub use quic_relay::xip::{
+    CID_MAX, HOST_REPLIES, HOST_REPLY_MS, HOST_TABLE_MAX, MAX_PACKET, QuicClass, QuicEntry,
+    QuicHeader, QuicKind, QuicStats, REPLIES, REPLY_MS, ReplyNote, ReplyTable, TABLE_MAX,
+    VERSION_CBOR, VERSION_DMESH, XipRelayConfig, XipRelayTable, cid_class_len, cid_encode,
+    classify, long_build, short_rewrite, validate_relay_route,
+};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QuicClass {
-    /// Empty, or the fixed bit (0x40) is clear.
-    NotQuic,
-    /// Truncated or invalid header.
-    Malformed,
-    Short,
-    Long,
-}
-
-/// What the first bytes of a packet say. `body`: for a long packet the offset after the SCID, for a short one after the DCID.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct QuicHeader {
-    pub first: u8,
-    pub is_long: bool,
-    pub version: u32,
-    pub dcid: Vec<u8>,
-    pub scid: Vec<u8>,
-    pub body: usize,
-}
-
-/// The length of a quic-lite connection ID from its first byte (bit 7 clear: 1; 100, 101, 110 in bits 7..5: 2, 4, 8), 0 for the reserved class.
-pub fn cid_class_len(first: u8) -> usize {
-    if first & 0x80 == 0 {
-        return 1;
+/// Convert an [`xip_abi::RelayRoute`] into a [`quic_relay::xip::RelayRoute`].
+pub(crate) fn to_relay_route(r: &xip_abi::RelayRoute) -> quic_relay::xip::RelayRoute {
+    // Both types are `#[repr(C)]` with identical 280-byte layout verified by compile-time assertions.
+    let mut hops = [quic_relay::xip::RelayHop::default(); 4];
+    for (dst, src) in hops.iter_mut().zip(r.hops.iter()) {
+        *dst = quic_relay::xip::RelayHop {
+            link: src.link,
+            token: src.token,
+            weight: src.weight,
+            cid_len: src.cid_len,
+            rewritten_dcid: src.rewritten_dcid,
+            address_len: src.address_len,
+            address: src.address,
+            padding: src.padding,
+        };
     }
-    match (first >> 5) & 3 {
-        0 => 2,
-        1 => 4,
-        2 => 8,
-        _ => 0,
+    quic_relay::xip::RelayRoute {
+        dcid: r.dcid,
+        dcid_len: r.dcid_len,
+        hop_count: r.hop_count,
+        endpoint: r.endpoint,
+        reserved: r.reserved,
+        hops,
     }
 }
 
-/// `short_cid_len`: 0 = the quic-lite class rule, else the fixed DCID length of short headers.
-pub fn classify(p: &[u8], short_cid_len: usize) -> (QuicClass, QuicHeader) {
-    let mut h = QuicHeader::default();
-    if p.is_empty() || p[0] & 0x40 == 0 {
-        return (QuicClass::NotQuic, h);
+/// Convert a [`quic_relay::xip::RelayRoute`] into an [`xip_abi::RelayRoute`].
+pub(crate) fn from_relay_route(r: &quic_relay::xip::RelayRoute) -> xip_abi::RelayRoute {
+    let mut hops = [xip_abi::RelayHop::default(); 4];
+    for (dst, src) in hops.iter_mut().zip(r.hops.iter()) {
+        *dst = xip_abi::RelayHop {
+            link: src.link,
+            token: src.token,
+            weight: src.weight,
+            cid_len: src.cid_len,
+            rewritten_dcid: src.rewritten_dcid,
+            address_len: src.address_len,
+            address: src.address,
+            padding: src.padding,
+        };
     }
-    h.first = p[0];
-    if p[0] & 0x80 == 0 {
-        let n = if short_cid_len != 0 { short_cid_len } else if p.len() > 1 { cid_class_len(p[1]) } else { 0 };
-        let pn = (p[0] & 3) as usize + 1;
-        if n == 0 || n > CID_MAX || p.len() < 1 + n + pn {
-            return (QuicClass::Malformed, h);
-        }
-        h.dcid = p[1..1 + n].to_vec();
-        h.body = 1 + n;
-        return (QuicClass::Short, h);
+    xip_abi::RelayRoute {
+        dcid: r.dcid,
+        dcid_len: r.dcid_len,
+        hop_count: r.hop_count,
+        endpoint: r.endpoint,
+        reserved: r.reserved,
+        hops,
     }
-    // RFC 8999 invariants: first byte, version, DCID length + DCID, SCID length + SCID
-    if p.len() < 7 {
-        return (QuicClass::Malformed, h);
-    }
-    h.is_long = true;
-    h.version = u32::from_be_bytes([p[1], p[2], p[3], p[4]]);
-    let dl = p[5] as usize;
-    if dl > CID_MAX || p.len() < 6 + dl + 1 {
-        return (QuicClass::Malformed, h);
-    }
-    h.dcid = p[6..6 + dl].to_vec();
-    let sl = p[6 + dl] as usize;
-    let at = 7 + dl;
-    if sl > CID_MAX || p.len() < at + sl {
-        return (QuicClass::Malformed, h);
-    }
-    h.scid = p[at..at + sl].to_vec();
-    h.body = at + sl;
-    (QuicClass::Long, h)
-}
-
-/// A long header (first byte 0xc0, version, DCID, SCID).
-pub fn long_build(version: u32, dcid: &[u8], scid: &[u8]) -> Option<Vec<u8>> {
-    if dcid.len() > CID_MAX || scid.len() > CID_MAX {
-        return None;
-    }
-    let mut v = vec![0xc0];
-    v.extend_from_slice(&version.to_be_bytes());
-    v.push(dcid.len() as u8);
-    v.extend_from_slice(dcid);
-    v.push(scid.len() as u8);
-    v.extend_from_slice(scid);
-    Some(v)
 }
 
 /// The routing fields of the CBOR envelope `{1: component, 2: method, 3: id, 5: fields}`: component and method are required positive
@@ -117,77 +80,6 @@ pub fn envelope(cbor: &[u8]) -> Option<(i32, i32, Option<u64>, bool)> {
     Some((c as i32, m as i32, id, response))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QuicKind {
-    /// Terminated here: short packets go to the callback of the QUIC stack (`Runtime::set_quic_local`).
-    Local,
-    /// Forwarded: short packets go to the link `egress` and the peer address `token` with the DCID replaced by `out_cid`.
-    Relay,
-}
-#[derive(Clone, Debug)]
-pub struct QuicEntry {
-    pub last_used_us: u64,
-    pub idle_ms: u32,
-    pub managed: Option<(usize, xip_abi::RelayRoute, u32)>,
-    pub kind: QuicKind,
-    pub egress: u32,
-    pub token: u64,
-    pub out_cid: Vec<u8>,
-    pub address: Vec<u8>,
-}
-
-/// quic-lite's connection ID for `value`: 1 byte up to 0x7f, 2 bytes (tag 100, 13 bits) up to 0x1fff, 4 bytes (tag 101, 29 bits), 8 bytes (tag 110).
-pub fn cid_encode(value: u64) -> Option<Vec<u8>> {
-    if value == 0 || value >= 1 << 61 {
-        return None;
-    }
-    let n = if value <= 0x7f { 1 } else if value <= 0x1fff { 2 } else if value <= 0x1fff_ffff { 4 } else { 8 };
-    let mut v: Vec<u8> = (0..n).map(|i| (value >> (8 * (n - i - 1))) as u8).collect();
-    let tag = match n { 1 => 0, 2 => 0b100, 4 => 0b101, _ => 0b110 } << 5;
-    v[0] = (v[0] & if n == 1 { 0x7f } else { 0x1f }) | tag;
-    Some(v)
-}
-
-/// Replace the DCID of the short packet `p` (classified as `h`) by `ncid`, as quic-lite's `rewrite_dcid_in_place`: the flags and the new CID are
-/// written right before the packet number, so the packet starts `shift` bytes later (negative: earlier, into `room` bytes of headroom).
-/// Writes through `p` (pointer to the packet start inside its slot). Err when it does not fit.
-///
-/// # Safety
-/// `p` points to `len` readable and writable bytes with `room` writable bytes in front.
-pub unsafe fn short_rewrite(p: *mut u8, len: usize, h: &QuicHeader, ncid: &[u8], room: usize) -> Result<isize, i32> {
-    if h.is_long || ncid.is_empty() || ncid.len() > CID_MAX {
-        return Err(xip_abi::ERR_ARG);
-    }
-    let d = h.dcid.len() as isize - ncid.len() as isize;
-    if (d < 0 && (-d) as usize > room) || (len as isize - d) as usize > MAX_PACKET {
-        return Err(xip_abi::ERR_SIZE);
-    }
-    let q = p.offset(d);
-    *q = h.first;
-    std::ptr::copy(ncid.as_ptr(), q.add(1), ncid.len());
-    Ok(d)
-}
-
-/// One counter per way a packet can end (`xip_quic_stats` of the C runtime).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct QuicStats {
-    pub rx: u32,
-    pub declined: u32,
-    pub malformed: u32,
-    pub oversize: u32,
-    pub short_local: u32,
-    pub short_relay: u32,
-    pub short_relay_failed: u32,
-    pub short_unknown: u32,
-    pub short_no_handler: u32,
-    pub long_cbor: u32,
-    pub long_cbor_bad: u32,
-    pub long_cbor_no_target: u32,
-    pub long_cbor_response: u32,
-    pub long_other: u32,
-    pub long_other_dropped: u32,
-}
-
 /// Who sent the packet and where it came from, for the local callback.
 #[derive(Clone, Debug)]
 pub struct QuicInfo {
@@ -206,54 +98,56 @@ pub struct QuicPacket {
     pub(crate) len: u16,
 }
 
-pub(crate) struct Reply {
-    pub link: u32,
-    pub source: u64,
-    pub id: u64,
-    pub at_ms: u64,
-    pub dcid: Vec<u8>,
-    pub scid: Vec<u8>,
-}
-
 pub(crate) type QuicLocal = std::rc::Rc<std::cell::RefCell<dyn FnMut(&QuicInfo, QuicPacket)>>;
 
 #[derive(Default)]
 pub(crate) struct QuicState {
-    pub next_relay_cid: u64,
     pub classifier: bool,
     pub local: Option<QuicLocal>,
-    pub table: BTreeMap<Vec<u8>, QuicEntry>,
+    pub table: XipRelayTable,
     pub stats: QuicStats,
     pub short_cid_len: usize,
     /// The module that took the endpoint with `Quic::attach`: instance, its component and the method of its received packets.
     pub module: Option<(std::rc::Rc<crate::runtime::Inst>, i32, i32)>,
     pub names: Vec<String>,
-    pub replies: Vec<Reply>,
-    next_reply: usize,
+    pub replies: ReplyTable,
 }
 
 impl QuicState {
-    pub fn is_quic_link(&self, name: &str) -> bool {
-        name == "relay" || name == "ble" || name == "udp" || name == "espnow" || self.names.iter().any(|n| n == name)
-    }
-    pub fn note_reply(&mut self, link: u32, source: u64, id: u64, request: &QuicHeader, now_ms: u64) {
-        let r = Reply { link, source, id, at_ms: now_ms, dcid: request.scid.clone(), scid: request.dcid.clone() };
-        let live = |x: &Reply| now_ms.saturating_sub(x.at_ms) <= REPLY_MS;
-        if let Some(at) = self.replies.iter().position(|x| x.link == link && x.source == source && x.id == id) {
-            self.replies[at] = r;
-        } else if self.replies.len() < REPLIES {
-            self.replies.push(r);
-        } else if let Some(at) = self.replies.iter().position(|x| !live(x)) {
-            self.replies[at] = r;
-        } else {
-            self.replies[self.next_reply] = r;
-            self.next_reply = (self.next_reply + 1) % REPLIES;
+    pub fn with_limits(max_entries: usize, max_replies: usize, reply_timeout_ms: u64) -> Self {
+        Self {
+            classifier: false,
+            local: None,
+            table: XipRelayTable::with_max_entries(max_entries),
+            stats: QuicStats::default(),
+            short_cid_len: 0,
+            module: None,
+            names: Vec::new(),
+            replies: ReplyTable::with_limits(max_replies, reply_timeout_ms),
         }
     }
-    pub fn find_reply(&self, link: u32, source: u64, id: u64, now_ms: u64) -> Option<&Reply> {
-        self.replies.iter().find(|r| r.link == link && r.source == source && r.id == id && now_ms.saturating_sub(r.at_ms) <= REPLY_MS)
+
+    pub fn is_quic_link(&self, name: &str) -> bool {
+        name == "relay"
+            || name == "ble"
+            || name == "udp"
+            || name == "espnow"
+            || self.names.iter().any(|n| n == name)
+    }
+    pub fn note_reply(
+        &mut self,
+        link: u32,
+        source: u64,
+        id: u64,
+        request: &QuicHeader,
+        now_ms: u64,
+    ) {
+        self.replies.note(link, source, id, request, now_ms);
+    }
+    pub fn find_reply(&self, link: u32, source: u64, id: u64, now_ms: u64) -> Option<&ReplyNote> {
+        self.replies.find(link, source, id, now_ms)
     }
     pub fn done_reply(&mut self, link: u32, source: u64, id: u64) {
-        self.replies.retain(|r| !(r.link == link && r.source == source && r.id == id));
+        self.replies.done(link, source, id);
     }
 }

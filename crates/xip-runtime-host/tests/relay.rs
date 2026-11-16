@@ -191,3 +191,75 @@ fn allocated_relays_reuse_live_rules_track_data_use_and_expire_without_recycling
     assert_eq!(rt.quic_table_len(), 0);
     assert_eq!(rt.packets_in_use(), 0);
 }
+
+#[test]
+fn host_config_scales_relay_routes_beyond_small_c_runtime_limit() {
+    // 1. Default runtime enforces small 64-entry C-runtime limit.
+    let small_rt = Runtime::default();
+    assert_eq!(small_rt.quic_table_max(), 64);
+    let ble_small = small_rt.add_native_link("ble", 1448, NativeTx::Done);
+    for i in 0..64u64 {
+        assert!(
+            small_rt
+                .quic_table_alloc(xip_runtime_host::quic::QuicKind::Relay, ble_small, i + 1, &[0x33])
+                .is_ok()
+        );
+    }
+    assert_eq!(
+        small_rt.quic_table_alloc(xip_runtime_host::quic::QuicKind::Relay, ble_small, 99, &[0x33]),
+        Err(ERR_NOMEM)
+    );
+
+    // 2. Host runtime (`Runtime::host()`) scales to thousands of concurrent routes with zero leaks.
+    let host_rt = Runtime::host();
+    assert_eq!(host_rt.quic_table_max(), xip_runtime_host::quic::HOST_TABLE_MAX);
+    host_rt.add_native_link("udp", 1500, NativeTx::Done);
+    host_rt.add_native_link("ble", 1500, NativeTx::Done);
+    let ble = host_rt.link_addr("ble");
+    let owner = host_rt.add_handler("disc", idle, 0);
+    owner.set_component(47);
+    owner.start(&[]);
+    host_rt.run(0);
+    let h = owner.host();
+    let t = table(h);
+
+    let mut created_cids = Vec::with_capacity(512);
+    for i in 0..512u64 {
+        let mut request = RelayRoute {
+            hop_count: 1,
+            ..Default::default()
+        };
+        request.hops[0] = RelayHop {
+            link: ble,
+            token: 10_000 + i,
+            weight: 1,
+            cid_len: 2,
+            ..Default::default()
+        };
+        request.hops[0].rewritten_dcid[0] = 0x44;
+        request.hops[0].rewritten_dcid[1] = (i & 0xff) as u8;
+        unsafe {
+            assert_eq!(t.relay_create.unwrap()(h.user, &mut request, 30_000, 0), 0);
+        }
+        assert_eq!(request.dcid_len, 8);
+        created_cids.push(request.dcid);
+    }
+    assert_eq!(host_rt.quic_table_len(), 512);
+
+    // Forward packets across multiple routes across the 512-route table and verify zero packet leaks.
+    for idx in [0usize, 63, 64, 255, 511] {
+        let mut packet = vec![0x40];
+        packet.extend_from_slice(&created_cids[idx][..8]);
+        packet.extend([0x01, 0xaa, 0xbb]);
+        assert_eq!(host_rt.inject_frame("udp", 0, 0, &packet), 0);
+        let out = host_rt.take_link_tx("ble");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 10_000 + idx as u64);
+        assert_eq!(out[0].1, vec![0x40, 0x44, (idx & 0xff) as u8, 0x01, 0xaa, 0xbb]);
+    }
+
+    owner.stop();
+    host_rt.run(0);
+    assert_eq!(host_rt.quic_table_len(), 0);
+    assert_eq!(host_rt.packets_in_use(), 0);
+}

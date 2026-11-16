@@ -16,7 +16,9 @@ pub(crate) const ALARMS: usize = 8;
 pub(crate) const QUEUE: usize = 64;
 pub(crate) const INBOX_DATA: usize = 1024;
 
-/// Limits of the runtime. The defaults are the small numbers of the C simulator, so that the limit cases are easy to hit.
+/// Limits of the runtime. The defaults (`Config::default()` / `Config::embedded()`) are the small numbers
+/// of the C simulator so that limit cases are easy to hit in unit tests. Use [`Config::host()`] on mesh
+/// hosts with gigabytes of RAM running untrusted WASM modules and large relay tables.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Slots of the shared packet pool.
@@ -29,10 +31,48 @@ pub struct Config {
     pub udp_peer_capacity: usize,
     /// Drop a UDP peer token after this many monotonic milliseconds without traffic.
     pub udp_peer_idle_ms: u64,
+    /// Maximum entries in the runtime QUIC DCID / relay table (`64` on embedded, `16,384` on host).
+    pub quic_table_max: usize,
+    /// Maximum concurrent CBOR datagram reply notes (`8` on embedded, `2,048` on host).
+    pub quic_reply_max: usize,
+    /// Retention timeout in milliseconds for CBOR datagram reply notes (`5,000` on embedded, `15,000` on host).
+    pub quic_reply_timeout_ms: u64,
 }
+
+impl Config {
+    /// Small C-simulator defaults (`pool_slots = 8`, `quic_table_max = 64`, `quic_reply_max = 8`).
+    pub const fn embedded() -> Self {
+        Config {
+            pool_slots: 8,
+            inbox: 4,
+            mem_quota: 8192,
+            udp_peer_capacity: 64,
+            udp_peer_idle_ms: 60_000,
+            quic_table_max: crate::quic::TABLE_MAX,
+            quic_reply_max: crate::quic::REPLIES,
+            quic_reply_timeout_ms: crate::quic::REPLY_MS,
+        }
+    }
+
+    /// High-capacity host defaults for mesh hosts with gigabytes of RAM (`pool_slots = 4096`,
+    /// `quic_table_max = 16,384`, `quic_reply_max = 2,048`, `mem_quota = 16 MiB` per WASM module).
+    pub const fn host() -> Self {
+        Config {
+            pool_slots: 4096,
+            inbox: 512,
+            mem_quota: 16 * 1024 * 1024,
+            udp_peer_capacity: 4096,
+            udp_peer_idle_ms: 300_000,
+            quic_table_max: crate::quic::HOST_TABLE_MAX,
+            quic_reply_max: crate::quic::HOST_REPLIES,
+            quic_reply_timeout_ms: crate::quic::HOST_REPLY_MS,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
-        Config { pool_slots: 8, inbox: 4, mem_quota: 8192, udp_peer_capacity: 64, udp_peer_idle_ms: 60000 }
+        Self::embedded()
     }
 }
 
@@ -278,6 +318,11 @@ impl Default for Runtime {
 }
 
 impl Runtime {
+    /// Create a runtime with high-capacity mesh host limits ([`Config::host()`]).
+    pub fn host() -> Runtime {
+        Runtime::new(Config::host())
+    }
+
     pub fn new(cfg: Config) -> Runtime {
         let st = RtState {
             now: 0,
@@ -305,7 +350,12 @@ impl Runtime {
         crate::wifi::FIX.with(|f| *f.borrow_mut() = crate::wifi::Fixture::new());
         crate::wifi::TUNING.with(|t| *t.borrow_mut() = xip_abi::WifiTuning::default());
         crate::power::FIX.with(|f| f.borrow_mut().requests.clear());
-        let sh = Rc::new(Shared { streams: RefCell::new(Default::default()), flash: RefCell::new(None), flash_job: RefCell::new(None), pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(Default::default()), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None), thunk_tables: RefCell::new(Vec::new()), starter: RefCell::new(None), request_starter: RefCell::new(None), hashes: RefCell::new(HashMap::new()), wasm: RefCell::new(None), wasm_slots: RefCell::new(vec![None; SLOTS + 1]), retained: RefCell::new(Default::default()) });
+        let links = crate::link::Links::with_quic_limits(
+            cfg.quic_table_max,
+            cfg.quic_reply_max,
+            cfg.quic_reply_timeout_ms,
+        );
+        let sh = Rc::new(Shared { streams: RefCell::new(Default::default()), flash: RefCell::new(None), flash_job: RefCell::new(None), pool: Pool::new(cfg.pool_slots), cfg, st: RefCell::new(st), insts: RefCell::new(Vec::new()), links: RefCell::new(links), network: RefCell::new(Default::default()), notify: Rc::new(tokio::sync::Notify::new()), realtime: Cell::new(None), thunk_tables: RefCell::new(Vec::new()), starter: RefCell::new(None), request_starter: RefCell::new(None), hashes: RefCell::new(HashMap::new()), wasm: RefCell::new(None), wasm_slots: RefCell::new(vec![None; SLOTS + 1]), retained: RefCell::new(Default::default()) });
         Runtime { sh }
     }
 

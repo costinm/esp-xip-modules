@@ -3,12 +3,21 @@
 # Nothing that needs the ESP toolchain or esp-idf-sys unconditionally belongs here: firmware (partitions, startup, transport glue) is
 # under fw/, the no_std modules under modules/ (each its own project with its own target); they depend on these crates by path.
 [workspace]
-members = ["berry-c", "hw", "sys", "wasm3-c", "xip-abi", "xip-psa", "xip-runtime-esp", "xip-runtime-host", "xip-wasm", "dmesh-cli"]
+members = ["uCEL", "berry-c", "hw", "sys", "wasm3-c", "xip-abi", "xip-psa", "xip-runtime-esp", "xip-runtime-host", "xip-wasm", "dmesh-cli"]
 resolver = "2"
 
 # Local cross-repository protocol development; refresh Git pins after publication.
 [patch."https://github.com/costinm/dmesh"]
-dmesh-server = { path = "../../dmesh/crates/dmesh-server" }
-quic-lite = { path = "../../dmesh/crates/quic-lite" }
-uart-codec = { path = "../../dmesh/crates/uart-codec" }
+dmesh-discovery = { path = "../../dmesh/crates/dmesh-discovery" }
 dmesh-rawnan = { path = "../../dmesh/crates/rawnan" }
+uart-codec = { path = "../../dmesh/crates/uart-codec" }
+lmesh = { path = "../../dmesh/crates/lmesh" }
+
+[patch."https://github.com/costinm/ssh-mesh"]
+mesh-api = { path = "../../rust/ssh-mesh/crates/mesh-api" }
+mesh = { path = "../../rust/ssh-mesh/crates/mesh" }
+quic-base = { path = "../../rust/ssh-mesh/crates/quic-base" }
+quic-link = { path = "../../rust/ssh-mesh/crates/quic-link" }
+quic-mux = { path = "../../rust/ssh-mesh/crates/quic-mux" }
+quic-relay = { path = "../../rust/ssh-mesh/crates/quic-relay" }
+quic-tools = { path = "../../rust/ssh-mesh/crates/quic-tools" }

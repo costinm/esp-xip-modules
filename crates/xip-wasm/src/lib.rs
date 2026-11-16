@@ -180,6 +180,7 @@ impl WasmSpace {
             }
         });
         imp!(linker, "now_ms", |c| -> u64 { c.host().now_ms() });
+        imp!(linker, "now_us", |c| -> u64 { c.host().now_us().unwrap_or(0) });
         imp!(linker, "mem_alloc", |c, size: u32| -> u32 { c.addr(c.host().mem_alloc(size as usize)) });
         imp!(linker, "mem_free", |c, ptr: u32| -> i32 {
             match c.ptr(ptr, 0) {
@@ -205,11 +206,24 @@ impl WasmSpace {
                 Err(e) => e,
             }
         });
+        imp!(linker, "pkt_pool_info", |c, out: u32| -> i32 {
+            let n = std::mem::size_of::<xip_abi::PacketPoolInfo>();
+            let Some(p) = c.ptr(out, n) else { return ERR_ARG };
+            tfn(c, |t| Some(unsafe { (t.pkt_pool_info?)(t.user, p as *mut xip_abi::PacketPoolInfo) }))
+        });
         imp!(linker, "pkt_alloc", |c, out: u32| -> i32 {
             match c.host().pkt_alloc() {
                 Ok(h) => if c.put32(out, h) { 0 } else { ERR_ARG },
                 Err(e) => { c.put32(out, 0); e }
             }
+        });
+        imp!(linker, "pkt_acquire", |c, reserve: u32, out: u32| -> i32 {
+            let mut h = 0u32;
+            let rc = tfn(c, |t| Some(unsafe { (t.pkt_acquire?)(t.user, reserve, &mut h) }));
+            if rc < 0 { c.put32(out, 0); rc } else if c.put32(out, h) { 0 } else { ERR_ARG }
+        });
+        imp!(linker, "pkt_tx", |c, packet: u32, start: u32, len: u32, link: u32, peer: u64| -> i32 {
+            tfn(c, |t| Some(unsafe { (t.pkt_tx?)(t.user, packet, start, len, link, peer) }))
         });
         imp!(linker, "pkt_buf", |c, pkt: u32, ptr: u32, max: u32| -> i32 {
             match c.host().pkt_buf(pkt) {

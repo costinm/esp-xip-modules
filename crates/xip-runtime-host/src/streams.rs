@@ -96,21 +96,41 @@ fn bind(sh: &Shared, id: u32, data: &[u8]) -> i32 {
     if kind != crate::envelope::Kind::Request {
         return ERR_ARG;
     }
+    bind_decoded(
+        sh,
+        id,
+        e.component,
+        e.method,
+        e.has_id.then_some(e.id),
+        e.fields,
+    )
+}
+
+fn bind_decoded(
+    sh: &Shared,
+    id: u32,
+    component: i32,
+    method: i32,
+    request: Option<u64>,
+    fields: &[u8],
+) -> i32 {
     let t = {
         let mut s = sh.streams.borrow_mut();
         let consumer = s
             .services
             .iter()
-            .find(|(_, c, m)| *c == e.component && *m == e.method)
+            .find(|(_, c, m)| *c == component && *m == method)
             .map(|v| v.0)
             .or_else(|| {
                 sh.insts
                     .borrow()
                     .iter()
                     .find(|m| {
+                        let st = m.st.borrow();
                         m.registered.get()
-                            && m.st.borrow().component == Some(e.component)
-                            && !m.st.borrow().ended
+                            && !st.ended
+                            && (st.component == Some(component)
+                                || st.envelope_components.iter().any(|&(c, _)| c == component))
                     })
                     .map(|m| m.id)
             });
@@ -124,12 +144,12 @@ fn bind(sh: &Shared, id: u32, data: &[u8]) -> i32 {
             return ERR_ARG;
         }
         slot.consumer = Some(consumer);
-        slot.component = e.component;
-        slot.method = e.method;
-        slot.request = e.has_id.then_some(e.id);
+        slot.component = component;
+        slot.method = method;
+        slot.request = request;
         target(slot).unwrap()
     };
-    invoke(sh, t, STREAM_OPEN, e.fields)
+    invoke(sh, t, STREAM_OPEN, fields)
 }
 unsafe extern "C" fn open(u: *mut c_void, p: *const u8, n: usize) -> i32 {
     let (sh, me) = crate::hostcalls::ctx(u);
@@ -219,23 +239,66 @@ unsafe extern "C" fn feed(u: *mut c_void, id: u32, p: *const u8, n: usize, fin: 
         if consumed == n {
             return if fin != 0 { ERR_ARG } else { consumed as i32 };
         }
-        let ready = {
+        let env_ready = {
             let mut s = sh.streams.borrow_mut();
             let e = s.entries.iter_mut().find(|e| e.id == id).unwrap();
-            if e.header.len() == 512 {
-                return ERR_SIZE;
-            }
-            e.header.push(*p.add(consumed));
-            consumed += 1;
-            let mut r = cbor::Reader::new(&e.header);
-            if r.skip() && r.rest().is_empty() {
-                Some(e.header.clone())
+            if e.header.is_empty() {
+                match cbor::decode_envelope_prefix(
+                    core::slice::from_raw_parts(p.add(consumed), n - consumed),
+                    512,
+                ) {
+                    cbor::DevicePrefix::Complete {
+                        envelope,
+                        body_offset,
+                    } => {
+                        consumed += body_offset;
+                        Some((
+                            envelope.component,
+                            envelope.method,
+                            envelope.id,
+                            envelope.fields.to_vec(),
+                        ))
+                    }
+                    cbor::DevicePrefix::Incomplete => {
+                        let rem = n - consumed;
+                        if rem > 512 {
+                            return ERR_SIZE;
+                        }
+                        e.header.extend_from_slice(core::slice::from_raw_parts(
+                            p.add(consumed),
+                            rem,
+                        ));
+                        consumed = n;
+                        None
+                    }
+                    cbor::DevicePrefix::Invalid => {
+                        return if e.header.len() + (n - consumed) > 512 {
+                            ERR_SIZE
+                        } else {
+                            ERR_ARG
+                        };
+                    }
+                }
             } else {
-                None
+                if e.header.len() == 512 {
+                    return ERR_SIZE;
+                }
+                e.header.push(*p.add(consumed));
+                consumed += 1;
+                match cbor::decode_envelope_prefix(&e.header, 512) {
+                    cbor::DevicePrefix::Complete { envelope, .. } => Some((
+                        envelope.component,
+                        envelope.method,
+                        envelope.id,
+                        envelope.fields.to_vec(),
+                    )),
+                    cbor::DevicePrefix::Incomplete => None,
+                    cbor::DevicePrefix::Invalid => return ERR_ARG,
+                }
             }
         };
-        if let Some(h) = ready {
-            let rc = bind(sh, id, &h);
+        if let Some((component, method, req_id, fields)) = env_ready {
+            let rc = bind_decoded(sh, id, component, method, req_id, &fields);
             if rc < 0 {
                 return rc;
             }
