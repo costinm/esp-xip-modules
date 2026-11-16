@@ -120,10 +120,14 @@ mod wasm {
         fn note_unsupported(name: *const u8, len: usize);
         pub fn log(data: *const u8, len: usize) -> i32;
         pub fn now_ms() -> u64;
+        pub fn now_us() -> u64;
         pub fn mem_alloc(size: usize) -> *mut u8;
         pub fn mem_free(ptr: *mut u8) -> i32;
         pub fn pkt_info(headroom: *mut u32, max: *mut u32) -> i32;
+        pub fn pkt_pool_info(out: *mut crate::PacketPoolInfo) -> i32;
         pub fn pkt_alloc(out: *mut u32) -> i32;
+        pub fn pkt_acquire(reserve: u32, out: *mut u32) -> i32;
+        pub fn pkt_tx(packet: u32, start: u32, len: u32, link: u32, peer: u64) -> i32;
         pub fn pkt_buf(pkt: u32, ptr: *mut *mut u8, max: *mut usize) -> i32;
         pub fn pkt_keep(pkt: u32) -> i32;
         pub fn pkt_free(pkt: u32) -> i32;
@@ -180,7 +184,10 @@ pub struct Hw {
 #[cfg(target_arch = "wasm32")]
 macro_rules! wasm_imp {
     (pkt_info ( $($a:expr),* )) => { unsafe { wasm::pkt_info($($a),*) } };
+    (pkt_pool_info ( $($a:expr),* )) => { unsafe { wasm::pkt_pool_info($($a),*) } };
     (pkt_alloc ( $($a:expr),* )) => { unsafe { wasm::pkt_alloc($($a),*) } };
+    (pkt_acquire ( $($a:expr),* )) => { unsafe { wasm::pkt_acquire($($a),*) } };
+    (pkt_tx ( $($a:expr),* )) => { unsafe { wasm::pkt_tx($($a),*) } };
     (pkt_buf ( $($a:expr),* )) => { unsafe { wasm::pkt_buf($($a),*) } };
     (pkt_keep ( $($a:expr),* )) => { unsafe { wasm::pkt_keep($($a),*) } };
     (pkt_free ( $($a:expr),* )) => { unsafe { wasm::pkt_free($($a),*) } };
@@ -330,9 +337,14 @@ impl Hw {
 
     /// Monotonic clock for radio synchronization; None on older runtimes.
     pub fn now_us(&self) -> Option<u64> {
-        let h = self.table();
-        if (h.size as usize) < core::mem::offset_of!(Host, now_us) + core::mem::size_of::<usize>() { return None; }
-        h.now_us.map(|f| unsafe { f(h.user) })
+        #[cfg(target_arch = "wasm32")]
+        return Some(unsafe { wasm::now_us() });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let h = self.table();
+            if (h.size as usize) < core::mem::offset_of!(Host, now_us) + core::mem::size_of::<usize>() { return None; }
+            h.now_us.map(|f| unsafe { f(h.user) })
+        }
     }
 
     /// `(headroom, max payload)` of this host's packets.
@@ -340,6 +352,28 @@ impl Hw {
         let (mut headroom, mut max) = (0u32, 0u32);
         let rc = call!(self, PKT_INFO, pkt_info(&mut headroom, &mut max));
         if rc == 0 { Ok((headroom, max)) } else { Err(rc) }
+    }
+
+    /// Shared physical packet pool geometry and current availability.
+    pub fn pkt_pool_info(&self) -> Result<PacketPoolInfo, i32> {
+        let mut out = PacketPoolInfo {
+            size: core::mem::size_of::<PacketPoolInfo>() as u32,
+            ..Default::default()
+        };
+        let rc = call!(self, PKT_POOL_INFO, pkt_pool_info(&mut out));
+        if rc < 0 { Err(rc) } else { Ok(out) }
+    }
+
+    /// Allocate an owned packet, leaving `reserve` physical slots available.
+    pub fn pkt_acquire(&self, reserve: u32) -> Result<u32, i32> {
+        let mut pkt = 0u32;
+        let rc = call!(self, PKT_ACQUIRE, pkt_acquire(reserve, &mut pkt));
+        if rc < 0 { Err(rc) } else { Ok(pkt) }
+    }
+
+    /// Transmit a slot range. BUSY retains the exact reference; all other outcomes consume it.
+    pub fn pkt_tx(&self, packet: u32, start: u32, len: u32, link: u32, peer: u64) -> i32 {
+        call!(self, PKT_TX, pkt_tx(packet, start, len, link, peer))
     }
 
     /// Memory that outlives a call, recorded by the host: free it before the module stops (`ERR_LEAK` otherwise). Null when

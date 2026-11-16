@@ -912,6 +912,9 @@ pub mod slot {
     pub const INFO_PUBLISH: usize = core::mem::offset_of!(Host, info_publish);
     pub const GET_COMPONENT: usize = core::mem::offset_of!(Host, get_component);
     pub const MODULE_RESCAN: usize = core::mem::offset_of!(Host, module_rescan);
+    pub const PKT_POOL_INFO: usize = core::mem::offset_of!(Host, pkt_pool_info);
+    pub const PKT_ACQUIRE: usize = core::mem::offset_of!(Host, pkt_acquire);
+    pub const PKT_TX: usize = core::mem::offset_of!(Host, pkt_tx);
     pub const STATE_RESIZE: usize = core::mem::offset_of!(Host, state_resize);
     pub const STATE_GET: usize = core::mem::offset_of!(Host, state_get);
 }

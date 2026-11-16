@@ -236,6 +236,190 @@ pub fn get_text(data: &[u8], key: u64) -> Result<Option<&[u8]>, ()> {
     }
 }
 
+static EMPTY_MAP: [u8; 1] = [0xa0];
+
+/// Decoded numeric-only device request envelope (`{1: component, 2: method, 3: id, 5: fields}`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceEnvelope<'a> {
+    pub component: i32,
+    pub method: i32,
+    pub id: Option<u64>,
+    /// Borrowed map under field 5, or `{}` (`&[0xa0]`) when absent.
+    pub fields: &'a [u8],
+}
+
+/// Result of attempting to decode a definite-length numeric request envelope prefix at the start of a stream buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevicePrefix<'a> {
+    /// Complete root envelope decoded in one pass; `body_offset` is the first byte of the raw stream body.
+    Complete {
+        envelope: DeviceEnvelope<'a>,
+        body_offset: usize,
+    },
+    /// Valid prefix so far, but more bytes are needed from the stream.
+    Incomplete,
+    /// Malformed CBOR, non-map root, non-numeric key/component/method, or exceeds `max_bytes`.
+    Invalid,
+}
+
+fn step_head(data: &[u8], pos: &mut usize) -> Result<(u8, u64), Option<()>> {
+    let b = *data.get(*pos).ok_or(None)?;
+    *pos += 1;
+    let (major, info) = (b >> 5, b & 31);
+    if major == 7 {
+        return match info {
+            20..=23 => Ok((major, info as u64)),
+            _ => Err(Some(())),
+        };
+    }
+    if major == 6 || info >= 28 {
+        return Err(Some(()));
+    }
+    if info < 24 {
+        return Ok((major, info as u64));
+    }
+    let n = 1usize << (info - 24);
+    let end = pos.checked_add(n).ok_or(Some(()))?;
+    let s = data.get(*pos..end).ok_or(None)?;
+    *pos = end;
+    Ok((major, s.iter().fold(0u64, |a, &x| (a << 8) | x as u64)))
+}
+
+fn step_skip(data: &[u8], pos: &mut usize, max_bytes: usize) -> Result<(), Option<()>> {
+    let mut pending = 1usize;
+    while pending > 0 {
+        let (major, arg) = step_head(data, pos)?;
+        pending -= 1;
+        match major {
+            0 | 1 | 7 => {}
+            2 | 3 => {
+                let len = usize::try_from(arg).map_err(|_| Some(()))?;
+                if len > max_bytes {
+                    return Err(Some(()));
+                }
+                let end = pos.checked_add(len).ok_or(Some(()))?;
+                if end > data.len() {
+                    return Err(None);
+                }
+                *pos = end;
+            }
+            4 => {
+                let n = usize::try_from(arg).map_err(|_| Some(()))?;
+                if n > max_bytes.saturating_sub(pending) {
+                    return Err(Some(()));
+                }
+                pending += n;
+            }
+            5 => {
+                let n = usize::try_from(arg).map_err(|_| Some(()))?;
+                if n > max_bytes.saturating_sub(pending) / 2 {
+                    return Err(Some(()));
+                }
+                pending += 2 * n;
+            }
+            _ => return Err(Some(())),
+        }
+        if *pos > max_bytes {
+            return Err(Some(()));
+        }
+    }
+    Ok(())
+}
+
+/// Decode a definite-length numeric request envelope prefix (`{1: component, 2: method, 3: id, 5: fields}`)
+/// at the start of `data` in a single pass, up to `max_bytes` (e.g. `512`).
+///
+/// Replaces multi-pass `Reader::skip` + `get_int` loops: `body_offset` is the exact byte index
+/// where the root envelope map ends and the raw stream body begins.
+pub fn decode_envelope_prefix(data: &[u8], max_bytes: usize) -> DevicePrefix<'_> {
+    let mut pos = 0usize;
+    let res = (|| -> Result<DeviceEnvelope<'_>, Option<()>> {
+        let (major, pairs_u64) = step_head(data, &mut pos)?;
+        if major != 5 {
+            return Err(Some(()));
+        }
+        let pairs = usize::try_from(pairs_u64).map_err(|_| Some(()))?;
+        if pairs > max_bytes / 2 {
+            return Err(Some(()));
+        }
+        let mut component: Option<i32> = None;
+        let mut method: Option<i32> = None;
+        let mut id: Option<u64> = None;
+        let mut fields: &'_[u8] = &EMPTY_MAP;
+        for _ in 0..pairs {
+            let (km, key) = step_head(data, &mut pos)?;
+            if km == 4 || km == 5 {
+                return Err(Some(()));
+            }
+            if km != 0 {
+                step_skip(data, &mut pos, max_bytes)?;
+                continue;
+            }
+            match key {
+                1 => {
+                    let (vm, v) = step_head(data, &mut pos)?;
+                    if vm != 0 || v == 0 || v > i32::MAX as u64 {
+                        return Err(Some(()));
+                    }
+                    component = Some(v as i32);
+                }
+                2 => {
+                    let (vm, v) = step_head(data, &mut pos)?;
+                    if vm != 0 || v == 0 || v > i32::MAX as u64 {
+                        return Err(Some(()));
+                    }
+                    method = Some(v as i32);
+                }
+                3 => {
+                    let (vm, v) = step_head(data, &mut pos)?;
+                    if vm != 0 || v > i64::MAX as u64 {
+                        return Err(Some(()));
+                    }
+                    id = Some(v);
+                }
+                5 => {
+                    let start = pos;
+                    let (fm, _) = step_head(data, &mut pos)?;
+                    if fm != 5 {
+                        return Err(Some(()));
+                    }
+                    pos = start;
+                    step_skip(data, &mut pos, max_bytes)?;
+                    fields = &data[start..pos];
+                }
+                6 | 7 => {
+                    // Response/error envelopes are not request envelopes.
+                    return Err(Some(()));
+                }
+                _ => {
+                    step_skip(data, &mut pos, max_bytes)?;
+                }
+            }
+            if pos > max_bytes {
+                return Err(Some(()));
+            }
+        }
+        let (Some(component), Some(method)) = (component, method) else {
+            return Err(Some(()));
+        };
+        Ok(DeviceEnvelope {
+            component,
+            method,
+            id,
+            fields,
+        })
+    })();
+    match res {
+        Ok(envelope) if pos <= max_bytes => DevicePrefix::Complete {
+            envelope,
+            body_offset: pos,
+        },
+        Ok(_) => DevicePrefix::Invalid,
+        Err(None) if data.len() < max_bytes => DevicePrefix::Incomplete,
+        Err(None | Some(())) => DevicePrefix::Invalid,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +475,47 @@ mod tests {
         let mut w = Writer::new(&mut buf);
         w.uint(24).uint(256).uint(65536).int(-1);
         assert_eq!(w.finish().unwrap(), &[0x18, 24, 0x19, 1, 0, 0x1a, 0, 1, 0, 0, 0x20]);
+    }
+
+    #[test]
+    fn decode_envelope_prefix_single_pass_and_partial_stream() {
+        let mut buf = [0u8; 48];
+        let mut w = Writer::new(&mut buf);
+        w.map(4)
+            .uint(1)
+            .uint(44)
+            .uint(2)
+            .uint(4)
+            .uint(3)
+            .uint(19)
+            .uint(5)
+            .map(1)
+            .uint(2)
+            .uint(1024);
+        let h_len = w.finish().unwrap().len();
+        buf[h_len..h_len + 4].copy_from_slice(b"body");
+        let wire = &buf[..h_len + 4];
+
+        for prefix in 0..h_len {
+            assert_eq!(
+                decode_envelope_prefix(&wire[..prefix], 512),
+                DevicePrefix::Incomplete,
+                "prefix {prefix}"
+            );
+        }
+        match decode_envelope_prefix(wire, 512) {
+            DevicePrefix::Complete {
+                envelope,
+                body_offset,
+            } => {
+                assert_eq!(body_offset, h_len);
+                assert_eq!(envelope.component, 44);
+                assert_eq!(envelope.method, 4);
+                assert_eq!(envelope.id, Some(19));
+                assert_eq!(get_int(envelope.fields, 2), Ok(Some(1024)));
+                assert_eq!(&wire[body_offset..], b"body");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }
