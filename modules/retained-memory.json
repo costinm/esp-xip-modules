@@ -19,13 +19,21 @@
     "state_bytes": 768,
     "stack_bytes": 6144
   },
+  "mod_mux": {
+    "state_bytes": 8,
+    "stack_bytes": 8192
+  },
+  "mod_qlink": {
+    "state_bytes": 8,
+    "stack_bytes": 8192
+  },
+  "mod_quic2": {
+    "state_bytes": 8,
+    "stack_bytes": 8192
+  },
   "mod_nan": {
     "state_bytes": 128,
     "stack_bytes": 12288
-  },
-  "mod_quic": {
-    "state_bytes": 8,
-    "stack_bytes": 32768
   },
   "mod_rtest": {
     "state_bytes": 512,

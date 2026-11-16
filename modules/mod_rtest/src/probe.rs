@@ -1,10 +1,7 @@
 //! Canonical DMesh probe service over either native TCP or module streams.
 use super::*;
-use dmesh_server::{
-    probe as service,
-    tagged::{self, Name, Record},
-};
-use quic_lite::probe::ProbePayload;
+use mesh_api::envelope::{self as tagged, Name, Record};
+use quic_tools::{self as service, DEFAULT_PROBE_MAX_STREAM_PAYLOAD, ProbePayload};
 const TICK: i32 = 90;
 const MAX_HEADER: usize = service::PROBE_REQUEST_MAX;
 struct Connection {
@@ -59,7 +56,7 @@ impl Connection {
         // Same supported workload as the canonical responder: duplex is two
         // independent streams. Remote probe orchestration remains host policy.
         if request.direction == service::ProbeDirection::Both
-            || request.bytes > service::PROBE_MAX_BYTES
+            || request.bytes > service::MAX_BYTES
             || request.peer.is_some()
             || request.parallel_streams.is_some_and(|v| v != 1)
             || request.high_priority_bytes.is_some_and(|v| v != 0)
@@ -69,9 +66,9 @@ impl Connection {
         {
             return Err(ERR_UNSUPPORTED);
         }
-        let packet_size = service::ProbeServicePlan::from_request(
+        let packet_size = service::ProbePlan::from_request(
             request.workload(),
-            quic_lite::DEFAULT_MAX_STREAM_PAYLOAD,
+            DEFAULT_PROBE_MAX_STREAM_PAYLOAD,
         )
         .packet_size;
         self.upload = if request.upload_bytes() == 0 {
@@ -117,18 +114,55 @@ impl Connection {
         }
         let mut at = 0;
         while self.request.is_none() && at < bytes.len() {
+            if self.header.is_empty() {
+                match cbor::decode_envelope_prefix(&bytes[at..], MAX_HEADER) {
+                    cbor::DevicePrefix::Complete {
+                        envelope,
+                        body_offset,
+                    } => {
+                        at += body_offset;
+                        let record = Record {
+                            component: Some(Name::Tag(envelope.component as u64)),
+                            method: Some(Name::Tag(envelope.method as u64)),
+                            id: envelope.id,
+                            fields: Some(envelope.fields),
+                            ..Record::default()
+                        };
+                        self.open(record, now)?;
+                        break;
+                    }
+                    cbor::DevicePrefix::Incomplete => {}
+                    cbor::DevicePrefix::Invalid => {
+                        return Err(if bytes[at..].len() > MAX_HEADER {
+                            ERR_SIZE
+                        } else {
+                            ERR_ARG
+                        });
+                    }
+                }
+            }
             if self.header.len() >= MAX_HEADER {
                 return Err(ERR_SIZE);
             }
             self.header.try_reserve(1).map_err(|_| ERR_NOMEM)?;
             self.header.push(bytes[at]);
             at += 1;
-            if tagged::decode(&self.header).is_some() {
-                // Move only the small bounded header so decoded fields can be
-                // borrowed while replacing the connection's parser state.
-                let header = core::mem::take(&mut self.header);
-                let record = tagged::decode(&header).ok_or(ERR_ARG)?;
-                self.open(record, now)?;
+            let header = core::mem::take(&mut self.header);
+            match cbor::decode_envelope_prefix(&header, MAX_HEADER) {
+                cbor::DevicePrefix::Complete { envelope, .. } => {
+                    let record = Record {
+                        component: Some(Name::Tag(envelope.component as u64)),
+                        method: Some(Name::Tag(envelope.method as u64)),
+                        id: envelope.id,
+                        fields: Some(envelope.fields),
+                        ..Record::default()
+                    };
+                    self.open(record, now)?;
+                }
+                cbor::DevicePrefix::Incomplete => {
+                    self.header = header;
+                }
+                cbor::DevicePrefix::Invalid => return Err(ERR_ARG),
             }
         }
         if self.request.is_some() && at < bytes.len() {
@@ -431,54 +465,82 @@ mod tests {
     // not a second expected response assembled by this test.
     #[test]
     fn responder_matches_portable_probe_handler_headers_and_payloads() {
-        use core::future::Future;
-        use core::task::{Context, Poll, Waker};
-        use dmesh_server::stream::{Outcome, Request, StreamHandler};
-        for direction in [service::ProbeDirection::Upload, service::ProbeDirection::Download] {
-            for packet_size in [8, 511, 1036] {
-                for verify in [false,true] {
-                    let mut request=service::ProbeServiceRequest::new(8193,packet_size);
-                    request.direction=direction;request.verify=verify;
-                    let h=header(request);
-                    let record=tagged::decode(&h).unwrap();
-                    let handler=service::ProbeHandler;
-                    let mut future=handler.open(Request {record,header:&h,context:Default::default()});
-                    let Poll::Ready(Some(outcome))=future.as_mut().poll(&mut Context::from_waker(Waker::noop())) else {panic!("portable responder did not accept standard probe")};
-                    let mut embedded=Connection::new(1,true,0);
-                    embedded.open(record,0).unwrap();
-                    let reference=match outcome {
-                        Outcome::Respond(r)=>r,
-                        Outcome::Receive(mut sink)=>{
-                            let mut source=ProbePayload::new(request.upload_bytes(),packet_size as usize).unwrap();
-                            let mut bytes=[0;389];
-                            while !source.is_complete(){
-                                let n=source.fill(&mut bytes);
-                                assert_eq!(sink.write(&bytes[..n],source.is_complete()).unwrap(),n);
-                                assert_eq!(embedded.feed(&bytes[..n],0).unwrap(),n);
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            for direction in [service::ProbeDirection::Upload, service::ProbeDirection::Download] {
+                for packet_size in [8, 511, 1036] {
+                    for verify in [false, true] {
+                        let mut request = service::ProbeServiceRequest::new(8193, packet_size);
+                        request.direction = direction;
+                        request.verify = verify;
+                        let h = header(request);
+                        let record = tagged::decode(&h).unwrap();
+                        let mut embedded = Connection::new(1, true, 0);
+                        embedded.open(record, 0).unwrap();
+
+                        let (mut client, mut server) = tokio::io::duplex(32 * 1024);
+                        let responder = tokio::spawn(async move {
+                            service::serve_probe_stream(&mut server).await.unwrap();
+                        });
+
+                        client.write_all(&h).await.unwrap();
+                        if request.upload_bytes() > 0 {
+                            let mut source =
+                                ProbePayload::new(request.upload_bytes(), packet_size as usize)
+                                    .unwrap();
+                            let mut bytes = [0; 389];
+                            while !source.is_complete() {
+                                let n = source.fill(&mut bytes);
+                                client.write_all(&bytes[..n]).await.unwrap();
+                                assert_eq!(embedded.feed(&bytes[..n], 0).unwrap(), n);
                             }
-                            sink.finish()
-                        },
-                        Outcome::Defer(_)=>panic!("probe unexpectedly deferred"),
-                    };
-                    embedded.end().unwrap();
-                    // CBOR integer widths may differ between encoders; compare
-                    // decoded envelope/results and require identical body bytes.
-                    let actual=&embedded.response[..embedded.response_len];
-                    for tag in [1,2,3] {assert_eq!(cbor::get_int(actual,tag),cbor::get_int(&reference.header,tag));}
-                    let a=tagged::decode(actual).unwrap();let b=tagged::decode(&reference.header).unwrap();
-                    for tag in [1,2,3] {assert_eq!(cbor::get_int(a.result.unwrap(),tag),cbor::get_int(b.result.unwrap(),tag));}
-                    if let Some(mut body)=reference.body {
-                        let mut expected=[0;1493];let mut actual=[0;1493];
-                        loop {
-                            let (n,done)=body.read(&mut expected);
-                            let count=embedded.download.as_mut().unwrap().fill(&mut actual);
-                            assert_eq!(n,count);assert_eq!(&expected[..n],&actual[..count]);
-                            if done {assert!(embedded.download.as_ref().unwrap().is_complete());break}
                         }
-                    }else{assert!(embedded.download.is_none());}
+                        client.shutdown().await.unwrap();
+                        embedded.end().unwrap();
+
+                        let mut ref_wire = Vec::new();
+                        client.read_to_end(&mut ref_wire).await.unwrap();
+                        responder.await.unwrap();
+
+                        let mut dec = mesh_api::cbor::Decoder::new(&ref_wire);
+                        dec.skip().unwrap();
+                        let ref_hdr_len = dec.position();
+                        let ref_header = &ref_wire[..ref_hdr_len];
+                        let ref_body = &ref_wire[ref_hdr_len..];
+
+                        // CBOR integer widths may differ between encoders; compare
+                        // decoded envelope/results and require identical body bytes.
+                        let actual = &embedded.response[..embedded.response_len];
+                        for tag in [1, 2, 3] {
+                            assert_eq!(cbor::get_int(actual, tag), cbor::get_int(ref_header, tag));
+                        }
+                        let a = tagged::decode(actual).unwrap();
+                        let b = tagged::decode(ref_header).unwrap();
+                        for tag in [1, 2, 3] {
+                            assert_eq!(
+                                cbor::get_int(a.result.unwrap(), tag),
+                                cbor::get_int(b.result.unwrap(), tag)
+                            );
+                        }
+                        if request.download_bytes() > 0 {
+                            let mut actual_body = Vec::new();
+                            let mut chunk = [0; 1493];
+                            while !embedded.download.as_ref().unwrap().is_complete() {
+                                let count = embedded.download.as_mut().unwrap().fill(&mut chunk);
+                                actual_body.extend_from_slice(&chunk[..count]);
+                            }
+                            assert_eq!(ref_body, actual_body.as_slice());
+                        } else {
+                            assert!(ref_body.is_empty());
+                            assert!(embedded.download.is_none());
+                        }
+                    }
                 }
             }
-        }
+        });
     }
 
     #[test]

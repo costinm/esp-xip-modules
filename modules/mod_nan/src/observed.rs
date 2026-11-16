@@ -1,6 +1,6 @@
 //! A bounded live discovery stream. No peer inventory or retained payloads.
 use xip_abi::*;
-use dmesh_server::discovery_nodes::{self as wire, Observation, Options};
+use dmesh_discovery::discovery_nodes::{self as wire, Observation, Options};
 
 #[cfg(test)]
 const WINDOW_US: u64 = 5_000_000;
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!((f.allocations, f.next), (0, 0));
         for _ in 0..3 {
             observed.open(&hw, 77, 10, 42, Options::default()).unwrap();
-            let header=dmesh_server::tagged::decode(&f.accepted.last().unwrap().1).unwrap();
+            let header=mesh_api::envelope::decode(&f.accepted.last().unwrap().1).unwrap();
             assert!(wire::is_header(header));assert_eq!(header.id,Some(42),"wire request ID is distinct from stream handle");
             assert_eq!(f.live_bytes, core::mem::size_of::<Session>());
             assert_eq!(observed.open(&hw, 78, 11, 42, Options::default()), Err(ERR_BUSY));

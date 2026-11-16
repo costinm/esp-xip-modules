@@ -1,6 +1,6 @@
 //! Optional local announcement policy; private keys and crypto remain native.
 use alloc::vec::Vec;
-use dmesh_server::announce as a;
+use dmesh_discovery::announce as a;
 use xip_abi::*;
 pub const INFO_MAX: usize = 255;
 
@@ -58,10 +58,7 @@ fn make_announce_with(
     };
     own.set_probe_descriptor(
         class,
-        dmesh_server::probe::PROBE_CAP_NAN
-            | dmesh_server::probe::PROBE_CAP_NOW
-            | dmesh_server::probe::PROBE_CAP_STA
-            | dmesh_server::probe::PROBE_CAP_AP,
+        a::PROBE_CAP_NAN | a::PROBE_CAP_NOW | a::PROBE_CAP_STA | a::PROBE_CAP_AP,
     );
     drop(info);
     let mut text = [0; 32];
@@ -107,7 +104,7 @@ fn make_announce_with(
 mod tests {
     use super::*;
     use core::ffi::c_void;
-    use dmesh_server::tagged;
+    use mesh_api::envelope as tagged;
     pub fn verify_announce(
         announce: a::Announce,
         digest: impl FnOnce(&[u8]) -> Result<[u8; 32], i32>,

@@ -11,8 +11,9 @@ publish = false
 
 [dependencies]
 xip-abi = { path = "../../crates/xip-abi" }
-dmesh-server = { optional = true, git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+dmesh-discovery = { optional = true, git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
 dmesh-rawnan = { optional = true, git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+mesh-api = { optional = true, git = "https://github.com/costinm/ssh-mesh", default-features = false }
 
 [dev-dependencies]
 sha2 = "0.10"
@@ -24,7 +25,7 @@ mkmod = "--name nan --tag 46 --stack 12288 --state 128 --port 246 --autostart --
 
 [features]
 default = ["runtime"]
-runtime = ["dep:dmesh-server", "dep:dmesh-rawnan"]
+runtime = ["dep:dmesh-discovery", "dep:dmesh-rawnan", "dep:mesh-api"]
 # Select with default-features = false; excludes implementation and radio dependencies.
 api-only = []
 flat-image = ["runtime", "xip-abi/global-alloc"]
@@ -46,5 +47,11 @@ panic = "abort"
 strip = "none"
 
 [patch."https://github.com/costinm/dmesh"]
-dmesh-server = { path = "../../../dmesh/crates/dmesh-server" }
+dmesh-discovery = { path = "../../../dmesh/crates/dmesh-discovery" }
 dmesh-rawnan = { path = "../../../dmesh/crates/rawnan" }
+
+[patch."https://github.com/costinm/ssh-mesh"]
+mesh-api = { path = "../../../rust/ssh-mesh/crates/mesh-api" }
+quic-base = { path = "../../../rust/ssh-mesh/crates/quic-base" }
+quic-link = { path = "../../../rust/ssh-mesh/crates/quic-link" }
+quic-tools = { path = "../../../rust/ssh-mesh/crates/quic-tools" }

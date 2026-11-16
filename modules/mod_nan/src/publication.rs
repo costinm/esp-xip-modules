@@ -1,5 +1,6 @@
 //! Opaque publication transport. No signing, certificate or identity policy.
-use dmesh_server::{announce, tagged};
+use dmesh_discovery::announce;
+use mesh_api::envelope as tagged;
 use xip_abi::{
     cbor::{self, Item, Reader, Writer},
     ERR_ARG,

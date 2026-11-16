@@ -212,7 +212,7 @@ impl Context {
     fn owns_mac(&self, mac: [u8; 6]) -> bool {
         mac == self.engine.local || mac == self.sta_mac || (self.ap_mac != [0;6] && mac == self.ap_mac)
     }
-    fn wake_request<'a>(&self, record: &'a [u8]) -> Result<Option<(dmesh_server::control::TransportKind, dmesh_server::control::TransportConfig<'a>)>, i32> {
+    fn wake_request<'a>(&self, record: &'a [u8]) -> Result<Option<(dmesh_discovery::control::TransportKind, dmesh_discovery::control::TransportConfig<'a>)>, i32> {
         let result = wake::request(record, self.engine.local);
         if result != Err(ERR_ARG) { return result; }
         for mac in [self.sta_mac, self.ap_mac] {
@@ -400,8 +400,8 @@ impl Context {
             }
         }
     }
-    fn activate_radio(&mut self, hw: &Hw, kind: dmesh_server::control::TransportKind,
-        config: dmesh_server::control::TransportConfig<'_>, path: discovery::ReturnPath, now: u64) -> Result<(), i32> {
+    fn activate_radio(&mut self, hw: &Hw, kind: dmesh_discovery::control::TransportKind,
+        config: dmesh_discovery::control::TransportConfig<'_>, path: discovery::ReturnPath, now: u64) -> Result<(), i32> {
         let request=wake::selection(kind,config)?;
         let trace=self.sleep.enabled && self.sleep.tracing();
         self.transport(hw,&request)?;
@@ -459,8 +459,8 @@ impl Context {
     fn remote_wake_peer(&mut self, hw: &Hw, path: discovery::ReturnPath, payload: &[u8], now: u64) {
         let Some(w)=self.remote_wake.as_ref() else {return};
         if path.peer!=w.target || path.now!=w.now {return;}
-        if dmesh_server::tagged::decode(payload).is_some_and(|r|r.id==Some(w.id)&&(r.result.is_some()||r.error.is_some())
-            && r.component==Some(dmesh_server::tagged::Name::Tag(1)) && r.method==Some(dmesh_server::tagged::Name::Tag(4))) {
+        if mesh_api::envelope::decode(payload).is_some_and(|r|r.id==Some(w.id)&&(r.result.is_some()||r.error.is_some())
+            && r.component==Some(mesh_api::envelope::Name::Tag(1)) && r.method==Some(mesh_api::envelope::Name::Tag(4))) {
             self.clear_remote_wake(hw);return;
         }
         if path.now {return;}
@@ -485,12 +485,12 @@ impl Context {
             let result = self.activate_radio(hw, kind, config, path, now);
             // Android's basic wake is one-way. Replying would trigger its
             // pending directed-message callback to transmit the wake again.
-            if let Some(id) = dmesh_server::tagged::decode(record).and_then(|r| r.id) {
+            if let Some(id) = mesh_api::envelope::decode(record).and_then(|r| r.id) {
                 let mut out = [0; 128];
                 let n = if result.is_ok() {
-                    dmesh_server::tagged::encode_numeric_response(1, 4, id, &[0xa0], &mut out)
+                    mesh_api::envelope::encode_numeric_response(1, 4, id, &[0xa0], &mut out)
                 } else {
-                    dmesh_server::tagged::encode_numeric_error(1, 4, id, b"unsupported or invalid activation", &mut out)
+                    mesh_api::envelope::encode_numeric_error(1, 4, id, b"unsupported or invalid activation", &mut out)
                 }.ok_or(ERR_SIZE)?;
                 self.enqueue(hw, path, &out[..n], now)?;
             }
@@ -500,7 +500,7 @@ impl Context {
         // to the consumer. Signed announcements are data, never handler calls.
         if publication::is_announcement(record) { return Ok(()); }
         // A reply is received transport data, never another handler request.
-        if dmesh_server::tagged::decode(record)
+        if mesh_api::envelope::decode(record)
             .is_some_and(|r| r.result.is_some() || r.error.is_some())
         {
             return Ok(());
@@ -508,7 +508,7 @@ impl Context {
         if !self.discovery.admit_request(path, record, now) {
             return Ok(());
         }
-        if let Some(id) = dmesh_server::announce::discovery_request_id(record) {
+        if let Some(id) = dmesh_discovery::announce::discovery_request_id(record) {
             let mut response = [0; 255];
             let n = publication::response(&self.engine.info, id, &mut response)
                 .ok_or(ERR_UNSUPPORTED)?;
@@ -516,7 +516,7 @@ impl Context {
         }
         // Shared connectionless admission policy. Application
         // handlers still enforce target/owner checks. Discovery is owned here.
-        if !dmesh_server::connectionless::allowed(record) {
+        if !dmesh_discovery::connectionless::allowed(record) {
             return Err(ERR_ARG);
         }
         let token = self.discovery.reserve(path, now)?;
@@ -544,7 +544,7 @@ impl Context {
         // Type 2 cannot be used to smuggle an unrelated handler request.
         if wake_only && !matches!(self.wake_request(payload), Ok(Some(_))) { return; }
         self.discovery_datagram(hw,path,payload,now,rssi);
-        if self.solicitor.is_some() && dmesh_server::tagged::decode(payload).is_none() {return;}
+        if self.solicitor.is_some() && mesh_api::envelope::decode(payload).is_none() {return;}
         if wrapped {directed_activity(hw,payload);}
         self.remote_wake_peer(hw,path,payload,now);
         self.observation(hw, path, payload, now, rssi);
@@ -635,7 +635,7 @@ impl Context {
                 // Android obtains its PeerHandle through an empty Subscribe;
                 // answer with the cached signed discovery record, as FW does.
                 let mut request = [0; 32];
-                if let Some(n) = dmesh_server::announce::encode_discovery_request(0, &mut request) {
+                if let Some(n) = dmesh_discovery::announce::encode_discovery_request(0, &mut request) {
                     self.receive_message(
                         hw,
                         discovery::ReturnPath {
@@ -655,7 +655,7 @@ impl Context {
         let bssid = self.cluster_bssid()?;
         let mut request = [0; 32];
         let n =
-            dmesh_server::announce::encode_discovery_request(now, &mut request).ok_or(ERR_SIZE)?;
+            dmesh_discovery::announce::encode_discovery_request(now, &mut request).ok_or(ERR_SIZE)?;
         let pkt = hw.pkt_alloc()?;
         let len = hw.pkt_buf(pkt).ok().and_then(|(ptr, cap)| {
             frames::sdf(
@@ -1352,13 +1352,13 @@ impl State {
                     return cx.observed.event(hw,call.id as u32,call.value,call.data.is_empty());
                 }
                 let now=hw.now_us().unwrap_or(0);
-                let Some(options)=dmesh_server::discovery_nodes::Options::decode(Some(call.data)) else {return ERR_ARG;};
+                let Some(options)=dmesh_discovery::discovery_nodes::Options::decode(Some(call.data)) else {return ERR_ARG;};
                 if let Err(rc)=cx.observed.open(hw,call.id as u32,now,call.request_id.unwrap_or(call.id),options) {return rc;}
                 // Subscribe before triggering the pass so no response is missed.
                 if options.active && options.duration_ms != 0 {
                     if let Err(rc)=cx.active_discovery(hw,now) {cx.observed.stop(hw);return rc;}
                     let mut request=[0;96];
-                    if let Some(n)=dmesh_server::announce::encode_discovery_request(now,&mut request) {
+                    if let Some(n)=dmesh_discovery::announce::encode_discovery_request(now,&mut request) {
                         let _=cx.post_discovery(hw,&request[..n],true,true,now);
                     }
                 }
@@ -2403,7 +2403,7 @@ mod packet_lifetime_tests {
     #[test]
     fn transport_request_uses_common_connectionless_policy() {
         let request=[0xa4,1,1,2,4,3,0x18,45,5,0xa1,1,1];
-        assert!(dmesh_server::connectionless::allowed(&request));
+        assert!(dmesh_discovery::connectionless::allowed(&request));
     }
     #[test]
     fn ordinary_handler_responses_are_not_redispatched_as_requests() {
@@ -2434,7 +2434,7 @@ mod packet_lifetime_tests {
         let mut cx = context();
         let mut frame = [0; 512];
         let mut request = [0; 32];
-        let n = dmesh_server::announce::encode_discovery_request(42, &mut request).unwrap();
+        let n = dmesh_discovery::announce::encode_discovery_request(42, &mut request).unwrap();
         let len = frames::followup(
             &mut frame,
             [2; 6],
@@ -2451,11 +2451,11 @@ mod packet_lifetime_tests {
         cx.receive_radio_messages(&hw, [2; 6], &frame[..len], 101,-43);
         assert_eq!(f.next, 0);
     }
-    fn android_wake(target: [u8; 6], id: Option<u64>, kind: dmesh_server::control::TransportKind,
-        config: dmesh_server::control::TransportConfig<'_>) -> Vec<u8> {
+    fn android_wake(target: [u8; 6], id: Option<u64>, kind: dmesh_discovery::control::TransportKind,
+        config: dmesh_discovery::control::TransportConfig<'_>) -> Vec<u8> {
         let mut record = [0; 256];
-        let n = dmesh_server::control::encode_request(dmesh_server::control::Request::TransportSet {
-            kind, config: dmesh_server::control::TransportConfig { wake_target: Some(target), ..config },
+        let n = dmesh_discovery::control::encode_request(dmesh_discovery::control::Request::TransportSet {
+            kind, config: dmesh_discovery::control::TransportConfig { wake_target: Some(target), ..config },
         }, id, &mut record).unwrap();
         dmesh_rawnan::build_dmesh_followup_payload(2, 1, [9; 6], target, &record[..n]).unwrap()
     }
@@ -2466,7 +2466,7 @@ mod packet_lifetime_tests {
     }
     #[test]
     fn android_type_two_with_logical_id_wakes_over_nan_and_now_without_uart() {
-        use dmesh_server::control::*;
+        use dmesh_discovery::control::*;
         for now in [false, true] {
             let mut f = Fixture::default(); let h = host(&mut f); let hw = unsafe { Hw::new(&h) }.unwrap();
             let mut cx = context(); sleepy(&mut cx);
@@ -2488,7 +2488,7 @@ mod packet_lifetime_tests {
     }
     #[test]
     fn android_extended_nan_activation_has_correlated_response_to_rf_peer() {
-        use dmesh_server::control::*;
+        use dmesh_discovery::control::*;
         let mut f=Fixture::default(); let h=host(&mut f); let hw=unsafe { Hw::new(&h) }.unwrap();
         let mut cx=context(); sleepy(&mut cx);
         let body=android_wake(cx.engine.local,Some(77),TransportKind::Nan,TransportConfig {
@@ -2499,13 +2499,13 @@ mod packet_lifetime_tests {
         let tx=cx.tx[0].unwrap(); assert_eq!(tx.destination,mac_token([2;6]));
         let frame=&f.packets[&tx.pkt];
         let wrapper=dmesh_rawnan::parse_dmesh_nan_followup(dmesh_rawnan::followup_service_info(&frame[..tx.len],dmesh_rawnan::DMESH_SERVICE_ID).unwrap()).unwrap();
-        assert_eq!(dmesh_server::tagged::decode(wrapper.payload).unwrap().id,Some(77));
+        assert_eq!(mesh_api::envelope::decode(wrapper.payload).unwrap().id,Some(77));
         assert_eq!(item(wrapper.payload,6),Some(&[0xa0][..]));
         hw.pkt_free(tx.pkt);
     }
     #[test]
     fn wrong_target_corruption_discovery_and_failed_set_cannot_wake() {
-        use dmesh_server::control::*;
+        use dmesh_discovery::control::*;
         let mut f=Fixture::default(); let h=host(&mut f); let hw=unsafe { Hw::new(&h) }.unwrap();
         let mut cx=context(); sleepy(&mut cx);
         let path=discovery::ReturnPath { peer:[2;6],instance:9,now:true };
@@ -2515,7 +2515,7 @@ mod packet_lifetime_tests {
         cx.receive_message(&hw,path,&inner_other,100,-43); assert!(cx.sleep.enabled);
         let mut body=android_wake(cx.engine.local,None,TransportKind::Sta,TransportConfig::default());
         body[20]^=1; cx.receive_message(&hw,path,&body,101,-43); assert!(cx.sleep.enabled);
-        let mut discovery=[0;32]; let n=dmesh_server::announce::encode_discovery_request(42,&mut discovery).unwrap();
+        let mut discovery=[0;32]; let n=dmesh_discovery::announce::encode_discovery_request(42,&mut discovery).unwrap();
         cx.receive_message(&hw,path,&discovery[..n],102,-43); assert!(cx.sleep.enabled);
         let body=android_wake(cx.engine.local,None,TransportKind::Sta,TransportConfig::default());
         f.reject_wifi=ERR_BUSY; cx.receive_message(&hw,path,&body,103,-43);
@@ -2538,7 +2538,7 @@ mod packet_lifetime_tests {
     }
     #[test]
     fn both_owned_mac_aliases_accept_targeted_activation() {
-        use dmesh_server::control::*;
+        use dmesh_discovery::control::*;
         for target in [[1;6],[3;6]] {
             let mut f=Fixture::default();let h=host(&mut f);let hw=unsafe {Hw::new(&h)}.unwrap();let mut cx=context();
             cx.ap_mac=[3;6];sleepy(&mut cx);
@@ -2559,7 +2559,7 @@ mod packet_lifetime_tests {
         cx.remote_wake_peer(&hw,discovery::ReturnPath {peer:[2;6],instance:9,now:false},&[0xa0],101);
         let tx=cx.tx[0].unwrap();let frame=&f.packets[&tx.pkt];
         let p=dmesh_rawnan::parse_dmesh_nan_followup(dmesh_rawnan::followup_service_info(&frame[..tx.len],dmesh_rawnan::DMESH_SERVICE_ID).unwrap()).unwrap();
-        assert_eq!(p.msg_type,2);assert_eq!(p.target_id,[2;6]);assert_eq!(dmesh_server::tagged::decode(p.payload).unwrap().id,Some(id));
+        assert_eq!(p.msg_type,2);assert_eq!(p.target_id,[2;6]);assert_eq!(mesh_api::envelope::decode(p.payload).unwrap().id,Some(id));
         assert_eq!(tx.owner,id);
         cx.remote_wake_tick(&hw,20_000_100);assert!(cx.remote_wake.is_none());assert!(f.packets.is_empty());
     }

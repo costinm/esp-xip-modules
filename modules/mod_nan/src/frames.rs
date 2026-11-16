@@ -91,7 +91,7 @@ mod tests {
     fn pooled_subscribe_matches_portable_and_keeps_request_correlation() {
         let mut out = [0; 512];
         let mut request = [0; 32];
-        let len = dmesh_server::announce::encode_discovery_request(42, &mut request).unwrap();
+        let len = dmesh_discovery::announce::encode_discovery_request(42, &mut request).unwrap();
         let n = sdf(
             &mut out,
             [1; 6],
@@ -117,7 +117,7 @@ mod tests {
         );
         let got = wire::active_subscribe_service_info(&out[..n], wire::DMESH_SERVICE_ID).unwrap();
         assert_eq!(
-            dmesh_server::announce::discovery_request_id(got.service_info),
+            dmesh_discovery::announce::discovery_request_id(got.service_info),
             Some(42)
         );
     }

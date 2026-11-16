@@ -430,7 +430,7 @@ reports passively and does not send a wake request.
 
 ## Discovery observation stream (component 6, method 9)
 
-`discovery.nodes` uses the shared DMesh contract in `dmesh-server::discovery_nodes`
+`discovery.nodes` uses the shared DMesh contract in `dmesh_discovery::nodes`
 and DMesh's root API.md. Request fields are `{1: duration_ms, 2: retained,
 3: active}`, defaulting to 5000 ms, true, true. Duration is 0..300000 ms.
 The response is a correlated `{1:6,2:9,3:id,6:{1:1}}` header, followed by the

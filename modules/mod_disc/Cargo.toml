@@ -11,7 +11,8 @@ publish = false
 [dependencies]
 esp-mod-nan = { optional = true, path = "../mod_nan", default-features = false, features = ["api-only"] }
 xip-abi = { path = "../../crates/xip-abi" }
-dmesh-server = { optional = true, git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+dmesh-discovery = { optional = true, git = "https://github.com/costinm/dmesh", rev = "0b3e629444b072d65799baab73a8868c476498b0", default-features = false }
+mesh-api = { optional = true, git = "https://github.com/costinm/ssh-mesh", default-features = false }
 
 [dev-dependencies]
 sha2 = "0.10"
@@ -22,7 +23,7 @@ mkmod = "--name disc --tag 47 --stack 8192 --state 8 --port 250 --autostart"
 
 [features]
 default = ["runtime"]
-runtime = ["dep:esp-mod-nan", "dep:dmesh-server"]
+runtime = ["dep:esp-mod-nan", "dep:dmesh-discovery", "dep:mesh-api"]
 # Select with default-features = false to compile only the route record contract.
 api-only = []
 flat-image = ["runtime", "xip-abi/global-alloc"]
@@ -43,3 +44,9 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = "none"
+
+[patch."https://github.com/costinm/dmesh"]
+dmesh-discovery = { path = "../../../dmesh/crates/dmesh-discovery" }
+
+[patch."https://github.com/costinm/ssh-mesh"]
+mesh-api = { path = "../../../rust/ssh-mesh/crates/mesh-api" }

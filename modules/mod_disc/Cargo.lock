@@ -3,12 +3,6 @@
 version = 4
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -133,21 +127,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dmesh-rawnan"
+name = "dmesh-discovery"
 version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=0b3e629444b072d65799baab73a8868c476498b0#0b3e629444b072d65799baab73a8868c476498b0"
 dependencies = [
- "anyhow",
-]
-
-[[package]]
-name = "dmesh-server"
-version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=0b3e629444b072d65799baab73a8868c476498b0#0b3e629444b072d65799baab73a8868c476498b0"
-dependencies = [
- "dmesh-rawnan",
  "mesh-api",
- "quic-lite",
  "sha2 0.11.1",
 ]
 
@@ -189,8 +172,9 @@ dependencies = [
 name = "esp-mod-disc"
 version = "0.1.0"
 dependencies = [
- "dmesh-server",
+ "dmesh-discovery",
  "esp-mod-nan",
+ "mesh-api",
  "p256",
  "sha2 0.10.9",
  "xip-abi",
@@ -273,7 +257,6 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 [[package]]
 name = "mesh-api"
 version = "0.1.0"
-source = "git+https://github.com/costinm/ssh-mesh#c210c3af8687d101fe99bcce5611b705ea08e2e3"
 
 [[package]]
 name = "p256"
@@ -313,15 +296,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
 dependencies = [
  "elliptic-curve",
-]
-
-[[package]]
-name = "quic-lite"
-version = "0.1.0"
-source = "git+https://github.com/costinm/dmesh?rev=0b3e629444b072d65799baab73a8868c476498b0#0b3e629444b072d65799baab73a8868c476498b0"
-dependencies = [
- "smallvec",
- "spin",
 ]
 
 [[package]]
@@ -388,18 +362,6 @@ dependencies = [
  "digest 0.10.7",
  "rand_core",
 ]
-
-[[package]]
-name = "smallvec"
-version = "1.16.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
-
-[[package]]
-name = "spin"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
 name = "spki"

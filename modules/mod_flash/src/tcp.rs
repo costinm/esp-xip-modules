@@ -113,23 +113,19 @@ impl Tcp {
             self.used += 1;
             self.at += 1;
             let h = &self.header[..self.used];
-            let mut r = cbor::Reader::new(h);
-            if !r.skip() || !r.rest().is_empty() {
+            let cbor::DevicePrefix::Complete { envelope, .. } =
+                cbor::decode_envelope_prefix(h, self.header.len())
+            else {
                 continue;
-            }
-            if cbor::get_int(h, 1) != Ok(Some(44)) {
+            };
+            if envelope.component != 44 {
                 return Err(ERR_ARG);
             }
-            let m = cbor::get_int(h, 2).map_err(|_| ERR_ARG)?.ok_or(ERR_ARG)?;
+            let m = envelope.method;
             if !matches!(m, 2..=15 | 23) {
                 return Err(ERR_ARG);
             }
-            let fields = cbor::get(h, 5).map_err(|_| ERR_ARG)?;
-            let data = fields.as_ref().map_or(&[0xa0][..], |r| r.rest());
-            let mut r = cbor::Reader::new(data);
-            if !matches!(r.next(), Some(cbor::Item::Map(_))) {
-                return Err(ERR_ARG);
-            }
+            let data = envelope.fields;
             self.remaining = if matches!(m, 4 | 10 | 13 | 14) {
                 u32::try_from(
                     cbor::get_int(data, 2)
@@ -140,8 +136,8 @@ impl Tcp {
             } else {
                 0
             };
-            let rc = files.handle_tcp(hw, &call(self.socket, m as i32, STREAM_OPEN, data));
-            self.method = m as i32;
+            let rc = files.handle_tcp(hw, &call(self.socket, m, STREAM_OPEN, data));
+            self.method = m;
             if rc < 0 {
                 self.error = rc;
             }

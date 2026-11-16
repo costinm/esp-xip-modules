@@ -11,8 +11,18 @@ publish = false
 
 [dependencies]
 xip-abi = { path = "../../crates/xip-abi", features = ["allocator-api"] }
-dmesh-server = { git = "https://github.com/costinm/dmesh", rev = "ab109bf1836bbe1be117b859f60ac90ec3cb9010", default-features = false }
-quic-lite = { git = "https://github.com/costinm/dmesh", rev = "ab109bf1836bbe1be117b859f60ac90ec3cb9010", default-features = false }
+mesh-api = { git = "https://github.com/costinm/ssh-mesh", default-features = false }
+quic-tools = { git = "https://github.com/costinm/ssh-mesh", default-features = false }
+
+[dev-dependencies]
+quic-tools = { git = "https://github.com/costinm/ssh-mesh", default-features = false, features = ["tokio"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "rt"] }
+
+[patch."https://github.com/costinm/ssh-mesh"]
+mesh-api = { path = "../../../rust/ssh-mesh/crates/mesh-api" }
+quic-base = { path = "../../../rust/ssh-mesh/crates/quic-base" }
+quic-mux = { path = "../../../rust/ssh-mesh/crates/quic-mux" }
+quic-tools = { path = "../../../rust/ssh-mesh/crates/quic-tools" }
 
 [package.metadata]
 # Options for tools/mkmod.py (scripts/build.sh). 

@@ -4,7 +4,7 @@ Bluetooth LE companion link of the device, served by the module `mod_ble`, which
 UUIDs, the advertisement and its intervals, the device name, the default PSM 0x0080, the scan filter and the size of the CoC pool. The mechanics are the
 runtime's `nimble` component (`xip_nimble` in `include/xip.h`, `crates/xip-abi/src/nimble.rs`, implemented by `components/xip_ble`). Other modules reach
 this API as a table too, `get_component("ble")` (`xip_ble` in `include/xip.h`, generated from this file by `tools/gen_vtables.py`). The module starts at boot and has no port of its own; direct requests are answered with the result map and an error as `{99: code}` (a negative `ERR_*` of the ABI); an envelope (a 0x444d0002 datagram, on PPP port 0xf7 for dmesh-cli) is answered as `{1, 2, 3, 6: result}` or `{.., 7: error}` by the runtime. The component number and methods 80 to 86 are the DMesh firmware's
-(`dmesh-server` `ble` component 104: `start`, `stop`, `scan`, `status`, `scan_stop`, `connect`) with their field tags
+(`ble` component 104: `start`, `stop`, `scan`, `status`, `scan_stop`, `connect`) with their field tags
 unchanged; 87 and later are additions. The component advertises the DMesh service, scans, holds one LE CoC channel
 (listen or connect; each SDU is one packet, so it serves as a bearer) and the bond store, and offers wake/sleep modes. What travels on the channel and
 when to pair are decided by the caller.

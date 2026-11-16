@@ -1,5 +1,5 @@
 //! Android's discovery/Follow-up contract. Logical IDs are not radio MACs.
-use dmesh_server::control::{self, Request, TransportConfig, TransportKind};
+use dmesh_discovery::control::{self, Request, TransportConfig, TransportKind};
 use xip_abi::*;
 
 /// Radio ingress validates and unwraps a follow-up addressed to this device.
@@ -36,7 +36,7 @@ pub fn request<'a>(
     record: &'a [u8],
     local: [u8; 6],
 ) -> Result<Option<(TransportKind, TransportConfig<'a>)>, i32> {
-    if dmesh_server::tagged::decode(record).is_some_and(|r| r.result.is_some() || r.error.is_some())
+    if mesh_api::envelope::decode(record).is_some_and(|r| r.result.is_some() || r.error.is_some())
     {
         return Ok(None);
     }

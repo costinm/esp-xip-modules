@@ -180,11 +180,11 @@ impl State {
     /// The signed bytes are reused; only the correlation id and the (cheap)
     /// outer record change, so a sweep costs no re-signing.
     fn discovery_reply(hw: &Hw, cx: &Context, call: &CallView) {
-        use dmesh_server::announce as a;
-        let record = match dmesh_server::tagged::decode(call.data) {
+        use dmesh_discovery::announce as a;
+        let record = match mesh_api::envelope::decode(call.data) {
             Some(r)
-                if r.component == Some(dmesh_server::tagged::Name::Tag(6))
-                    && r.method == Some(dmesh_server::tagged::Name::Tag(2)) =>
+                if r.component == Some(mesh_api::envelope::Name::Tag(6))
+                    && r.method == Some(mesh_api::envelope::Name::Tag(2)) =>
             {
                 r
             }
@@ -628,11 +628,11 @@ mod tests {
         let hw = unsafe { Hw::new(&h) }.unwrap();
         // A structurally valid cached announce (the signature is a dummy: the reply
         // reuses the signed bytes; it does not re-sign or re-verify here).
-        let mut own = dmesh_server::announce::Announce::discovery([7u8; 16], 8, 0);
+        let mut own = dmesh_discovery::announce::Announce::discovery([7u8; 16], 8, 0);
         assert!(own.set_public_key(&[2u8; 33]));
         assert!(own.set_signature(&[9u8; 64]));
         let mut record = [0u8; announce::INFO_MAX];
-        let n = dmesh_server::announce::encode(own, &mut record).unwrap();
+        let n = dmesh_discovery::announce::encode(own, &mut record).unwrap();
         let mut s = state();
         {
             let cx = unsafe { &mut *(s.context as *mut Context) };
@@ -642,7 +642,7 @@ mod tests {
         // A discovery request {1:6, 2:2, 3:id, 5:{}} as a raw datagram of the runtime's
         // discovery UDP port: `from` its socket handle, `src` the sweep's source.
         let mut req = [0u8; 96];
-        let req_len = dmesh_server::announce::encode_discovery_request(42, &mut req).unwrap();
+        let req_len = dmesh_discovery::announce::encode_discovery_request(42, &mut req).unwrap();
         let mut request = call(0, &req[..req_len]);
         request.flags = CALL_LINK;
         request.from = 77; // the discovery port's socket handle
@@ -653,10 +653,10 @@ mod tests {
         let (handle, ip, port, scope, data) = &f.udp[0];
         assert_eq!((*handle, *port, *scope), (77, 3339, 2), "from the handle to the source");
         assert_eq!(*ip, [9u8; 16]);
-        let decoded = dmesh_server::tagged::decode(data).unwrap();
+        let decoded = mesh_api::envelope::decode(data).unwrap();
         assert_eq!(decoded.id, Some(42), "correlated to the request's id");
-        assert_eq!(decoded.component, Some(dmesh_server::tagged::Name::Tag(6)));
-        assert_eq!(decoded.method, Some(dmesh_server::tagged::Name::Tag(2)));
+        assert_eq!(decoded.component, Some(mesh_api::envelope::Name::Tag(6)));
+        assert_eq!(decoded.method, Some(mesh_api::envelope::Name::Tag(2)));
         s.stop(&hw);
         assert!(f.packets.is_empty());
     }
