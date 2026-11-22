@@ -520,7 +520,7 @@ static int wifi_up(const xip_wifi_intent *p, const xip_wifi_tuning *tuning)
 {
     if (started || scan_only) return -5;
     const bool sta = p->sta, ap = p->ap, now = p->now;
-    xip_quic_udp_raw_mode(tuning->raw_rx == XIP_TUNE_ON);
+    xip_quic_udp_raw_mode(tuning->raw_rx != XIP_TUNE_OFF);
     /* DMesh's defaults: AMPDU on, 11b rates off, BSSID check off (frames of other BSSIDs reach unassociated NOW receive) */
     const bool ampdu = tuning->ampdu != XIP_TUNE_OFF;
     const bool rates_11b_disabled = tuning->rates_11b != XIP_TUNE_ON;

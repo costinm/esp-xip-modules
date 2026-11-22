@@ -431,6 +431,27 @@
 // ECDSA over P-256 with SHA-256: `verify` checks a message against a raw 64-byte r||s signature.
 #define XIP_ALG_ECDSA_SHA_256 100664841
 
+// AES-GCM AEAD (12-byte nonce, 16-byte tag).
+#define XIP_ALG_GCM 89129472
+
+// AES-CCM AEAD (12-byte nonce, 16-byte tag; `PSA_ALG_CCM`).
+#define XIP_ALG_CCM 89129216
+
+// Nonce length in bytes for [`ALG_GCM`] and [`ALG_CCM`].
+#define XIP_GCM_NONCE_LEN 12
+
+// Tag length in bytes for [`ALG_GCM`] and [`ALG_CCM`].
+#define XIP_GCM_TAG_LEN 16
+
+// Nonce length in bytes for [`ALG_CCM`].
+#define XIP_CCM_NONCE_LEN 12
+
+// Tag length in bytes for [`ALG_CCM`].
+#define XIP_CCM_TAG_LEN 16
+
+// Open/decrypt bit in packed `spec` for [`Crypto::aead_pkt`].
+#define XIP_AEAD_PKT_FLAG_OPEN (1 << 24)
+
 #define XIP_IDENTITY_VERSION 1
 
 #define XIP_NATIVE_VERSION 1
@@ -755,7 +776,7 @@ typedef struct {
 } xip_identity;
 
 // `get_component("crypto")`. Every packet argument is a handle the caller holds; ranges outside the payload window answer `ERR_ARG`.
-// A signature that does not verify answers `ERR_AUTH`.
+// A signature or AEAD tag that does not verify answers `ERR_AUTH`.
 typedef struct {
   // 1.
   uint32_t version;
@@ -789,6 +810,39 @@ typedef struct {
                 uint32_t signature_len);
   // Fill `len` bytes of `packet` at `offset` with random bytes.
   int (*random)(void *ctx, uint32_t packet, uint32_t offset, uint32_t len);
+  // Authenticated encryption in-place (`alg`: [`ALG_GCM`]): the range at `offset` holds `key` (`key_len`: 16 or 32 bytes),
+  // then `nonce` (12 bytes), then `aad` (`aad_len`), then `plaintext` (`text_len`) with 16 writable tag bytes following it.
+  // Encrypts `plaintext` in-place and appends the 16-byte tag; returns `text_len + 16`.
+  int (*aead_seal)(void *ctx,
+                   uint32_t alg,
+                   uint32_t packet,
+                   uint32_t offset,
+                   uint32_t key_len,
+                   uint32_t aad_len,
+                   uint32_t text_len);
+  // Authenticated decryption in-place (`alg`: [`ALG_GCM`] or [`ALG_CCM`]): the range at `offset` holds `key` (`key_len`: 16 or 32 bytes),
+  // then `nonce` (12 bytes), then `aad` (`aad_len`), then `ciphertext || tag` (`text_len >= 16` bytes).
+  // Verifies the tag and decrypts ciphertext in-place; returns `text_len - 16`, or `ERR_AUTH`.
+  int (*aead_open)(void *ctx,
+                   uint32_t alg,
+                   uint32_t packet,
+                   uint32_t offset,
+                   uint32_t key_len,
+                   uint32_t aad_len,
+                   uint32_t text_len);
+  // Borrowed-packet AEAD transform across `src_pkt` -> `dst_pkt` at slot-relative offsets `src_off` / `dst_off`.
+  // `spec` packs `(aad_len | (key_len << 8) | (alg_code << 16) | open_flag)`. `dst_pkt` slot `[0 .. key_len + 12 + aad_len]`
+  // supplies `key || nonce || aad` (wiped by the callee). On seal, reads `text_len` plaintext bytes at `src_pkt[src_off..]`
+  // and writes ciphertext || 16-byte tag to `dst_pkt[dst_off..]`, returning `text_len + 16`.
+  // On open, reads `text_len` (`>= 16`) `ciphertext || tag` bytes at `src_pkt[src_off..]` and writes `text_len - 16`
+  // plaintext bytes to `dst_pkt[dst_off..]`, returning `text_len - 16` or `ERR_AUTH`.
+  int (*aead_pkt)(void *ctx,
+                  uint32_t spec,
+                  uint32_t src_pkt,
+                  uint32_t src_off,
+                  uint32_t dst_pkt,
+                  uint32_t dst_off,
+                  uint32_t text_len);
 } xip_crypto;
 
 // `get_component("native")`. Fields are in the order of the C library headers they come from.
@@ -2472,7 +2526,7 @@ _Static_assert(sizeof(xip_quic) == 44, "xip_quic layout");
 _Static_assert(sizeof(xip_stream_packet) == 12, "xip_stream_packet layout");
 _Static_assert(sizeof(xip_call) == 88, "xip_call layout");
 _Static_assert(sizeof(xip_identity) == 16, "xip_identity layout");
-_Static_assert(sizeof(xip_crypto) == 36, "xip_crypto layout");
+_Static_assert(sizeof(xip_crypto) == 48, "xip_crypto layout");
 _Static_assert(sizeof(xip_native) == 132, "xip_native layout");
 _Static_assert(sizeof(xip_power) == 44, "xip_power layout");
 _Static_assert(sizeof(xip_host) == 180, "xip_host layout");

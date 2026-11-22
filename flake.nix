@@ -49,9 +49,60 @@
                 --set XIP_TOOL_ROOT $out/share/esp-xip-modules
             '';
           };
+          # ESP-IDF v6.0.2, Python environment, Espressif GCC/GDB toolchains, and the `esp` Rust toolchain as a
+          # fixed-output derivation: shared via `nix build .#esp-idf --out-link $HOME/opt/esp-idf` rather than under target/.
+          esp-idf = pkgs.stdenvNoCC.mkDerivation {
+            name = "esp-idf-6.0.2";
+            outputHashMode = "recursive";
+            outputHashAlgo = "sha256";
+            outputHash = "sha256-lyf0Coyf+U8TPiW5Tv9XY+GujEI/EwsiA1UxfZtGJG8=";
+            nativeBuildInputs = [
+              pkgs.bashInteractive
+              pkgs.cmake
+              pkgs.coreutils
+              pkgs.curl
+              pkgs.espup
+              pkgs.findutils
+              pkgs.git
+              pkgs.gnused
+              pkgs.ninja
+              pkgs.python3
+              pkgs.which
+              pkgs.xz
+            ];
+            dontUnpack = true;
+            buildPhase = ''
+              runHook preBuild
+              export HOME="$TMPDIR/home"
+              export IDF_TOOLS_PATH="$out/espressif"
+              export RUSTUP_HOME="$out/rustup"
+              export CARGO_HOME="$TMPDIR/cargo"
+              mkdir -p "$HOME" "$out" "$IDF_TOOLS_PATH" "$RUSTUP_HOME" "$CARGO_HOME"
+              git clone --branch v6.0.2 --depth 1 --recursive --jobs 8 \
+                https://github.com/espressif/esp-idf.git "$out/esp-idf"
+              printf 'v6.0.2\n' > "$out/esp-idf/version.txt"
+              find "$out/esp-idf" -name ".git" -exec rm -rf {} +
+              "$out/esp-idf/install.sh" esp32,esp32s3,esp32c6
+              espup install --targets esp32,esp32s3,esp32c6 --export-file "$out/export-esp.sh"
+              cat > "$out/export-esp.sh" <<'EOF'
+              export LIBCLANG_PATH="''${XIP_ESP_ROOT:-$HOME/opt/esp-idf}/rustup/toolchains/esp/xtensa-esp32-elf-clang/esp-20.1.1_20250829/esp-clang/lib"
+              export PATH="''${XIP_ESP_ROOT:-$HOME/opt/esp-idf}/rustup/toolchains/esp/xtensa-esp-elf/esp-15.2.0_20250920/xtensa-esp-elf/bin:$PATH"
+              EOF
+              for venv in "$out"/espressif/python_env/idf*_env; do
+                real_py="$(readlink -f "$venv/bin/python3")"
+                ln -sfn "$real_py" "$venv/bin/python3"
+                find "$venv" -name "__pycache__" -exec rm -rf {} +
+                sed -i "1s|^#!$out/espressif/python_env/[^/]*/bin/python.*|#!/usr/bin/env python3|" "$venv"/bin/* 2>/dev/null || true
+                sed -i "s|$out|\$HOME/opt/esp-idf|g" "$venv/pyvenv.cfg" "$venv"/bin/activate* 2>/dev/null || true
+              done
+              rm -rf "$out/espressif/dist"
+              runHook postBuild
+            '';
+            dontInstall = true;
+          };
           # The C and ESP tools: the host side of building firmware (cmake, ninja, python, cc, cbindgen, espup, espflash, mesh-api-gen,
-          # ...). ESP-IDF and its cross toolchains (and the esp Rust toolchain) are not nix packages: scripts/esp-deps.sh installs them under
-          # XIP_ESP_ROOT. The Rust/wasm tools are the separate `wasm-dev`.
+          # ...). ESP-IDF and its cross toolchains (and the esp Rust toolchain) live in the `.#esp-idf` package (`$HOME/opt/esp-idf`).
+          # The Rust/wasm tools are the separate `wasm-dev`.
           #   nix build .#esp-dev --out-link ${ESP_DEV:-$HOME/opt/esp-dev}      (scripts/esp-deps.sh does this; env.sh puts its bin/ on PATH)
           esp-dev = pkgs.symlinkJoin {
             name = "esp-xip-modules-esp-dev";

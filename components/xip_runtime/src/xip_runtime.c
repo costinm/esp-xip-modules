@@ -406,17 +406,34 @@ static bool port_bound(uint32_t port)
     return bound;
 }
 
+#define PKT_TAIL (XIP_PKT_SLOT_MIN - XIP_PKT_HEADROOM - XIP_PKT_MAX)
+#define XIP_PKT_ALIGNED_BODY ((XIP_PKT_HEADROOM + 63u) & ~63u)            /* 192 */
+#define XIP_PKT_QUIC_SHORT_HDR 3u                                        /* flags(1) + dcid(1) + pn(1) */
+#define XIP_PKT_RX_START (XIP_PKT_ALIGNED_BODY - XIP_PKT_QUIC_SHORT_HDR) /* 189 */
+#define XIP_PKT_POOL_SLOT_BYTES ((XIP_PKT_ALIGNED_BODY + XIP_PKT_MAX + PKT_TAIL + 63u) & ~63u) /* 1792 */
+
+static inline uint16_t rx_pool_start(const xip_pool *p)
+{
+    return p && xip_pool_slot_size(p) >= XIP_PKT_POOL_SLOT_BYTES ? XIP_PKT_RX_START : XIP_PKT_HEADROOM;
+}
+static inline uint16_t rx_buf_start(const xip_link_rx_buf *buf)
+{
+    xip_pool *p = __atomic_load_n(&pool, __ATOMIC_ACQUIRE);
+    const uint8_t *base = p && buf && buf->slot >= 0 ? xip_pool_slot(p, buf->slot) : NULL;
+    return base && buf->data >= base ? (uint16_t)(buf->data - base) : rx_pool_start(p);
+}
+
 /* A frame for `port` without a copy: begin returns 0 and a pool packet to fill (capacity XIP_PKT_MAX, with the headroom in front, as every
  * packet), 1 when no module has the port (skip the frame), or an error (XIP_ERR_NOMEM: the pool is empty). Then commit or abort. */
 static int port_rx_begin(uint32_t port, xip_link_rx_buf *buf, bool cached)
 {
-    xip_pool *p = cached ? pool : pool_get();
+    xip_pool *p = cached ? __atomic_load_n(&pool, __ATOMIC_ACQUIRE) : pool_get();
     if (!p || !buf) return XIP_ERR_ARG;
     if (!port_bound(port) && !(port == XIP_PORT_QUIC && quic_active()) && !hooks.request_start) return 1;
     int slot = cached ? xip_pool_acquire_cached(p, 0) : xip_pool_acquire(p, 0);
     if (slot < 0) { packet_rx_storage_shortage(); return XIP_ERR_NOMEM; }
     buf->slot = slot;
-    buf->data = xip_pool_slot(p, slot) + XIP_PKT_HEADROOM;
+    buf->data = xip_pool_slot(p, slot) + rx_pool_start(p);
     buf->capacity = XIP_PKT_MAX;
     return XIP_OK;
 }
@@ -428,13 +445,13 @@ void xip_port_rx_commit_radio(int link, uint32_t port, const xip_link_rx_buf *bu
     size_t len, uint64_t token, int32_t signal, uint32_t time_us)
 {
     if (len > XIP_PKT_MAX || link < 0) { drop_slot(buf->slot); return; }
-    link_fanout((uint32_t)link, port, buf->slot, XIP_PKT_HEADROOM, (uint16_t)len, token, signal, time_us, NULL);
+    link_fanout((uint32_t)link, port, buf->slot, rx_buf_start(buf), (uint16_t)len, token, signal, time_us, NULL);
 }
 
 void xip_port_rx_commit(int link, uint32_t port, const xip_link_rx_buf *buf, size_t len, uint64_t token)
 {
     if (len > XIP_PKT_MAX || link < 0) { drop_slot(buf->slot); return; }
-    link_fanout((uint32_t)link, port, buf->slot, XIP_PKT_HEADROOM, (uint16_t)len, token, 0, now_us32(), NULL);
+    link_fanout((uint32_t)link, port, buf->slot, rx_buf_start(buf), (uint16_t)len, token, 0, now_us32(), NULL);
 }
 
 /* A datagram of a runtime-owned UDP port: not a link, so `link` is the socket handle
@@ -443,7 +460,7 @@ void xip_port_rx_commit(int link, uint32_t port, const xip_link_rx_buf *buf, siz
 void xip_port_rx_commit_udp(uint32_t link, uint32_t port, const xip_link_rx_buf *buf, size_t len, const xip_udp_address *src)
 {
     if (len > XIP_PKT_MAX) { drop_slot(buf->slot); return; }
-    link_fanout(link, port, buf->slot, XIP_PKT_HEADROOM, (uint16_t)len, 0, 0, now_us32(), src);
+    link_fanout(link, port, buf->slot, rx_buf_start(buf), (uint16_t)len, 0, 0, now_us32(), src);
 }
 
 void xip_port_rx_abort(const xip_link_rx_buf *buf) { drop_slot(buf->slot); }
@@ -599,14 +616,21 @@ static struct xip_instance *request_target(int component,uint32_t port,int *erro
     else{
         portENTER_CRITICAL(&registry_lock);
         for(unsigned i=0;i<XIP_MAX_INSTANCES && !in;i++)if(registry[i] && registry[i]->port==port)in=registry[i];
+        if(!in && component<0 && port==XIP_PORT_QUIC_ENDPOINT)
+            for(unsigned i=0;i<XIP_MAX_INSTANCES && !in;i++)if(registry[i] && registry[i]->port==243)in=registry[i];
         portEXIT_CRITICAL(&registry_lock);
     }
     int rc=in?0:XIP_ERR_NOTFOUND;
     if(!in && hooks.request_start){
-        rc=hooks.request_start(component,port);
+        uint32_t resolved_port=port;
+        rc=hooks.request_start(component,resolved_port);
+        if(rc==XIP_ERR_NOTFOUND && component<0 && port==XIP_PORT_QUIC_ENDPOINT){
+            resolved_port=243;
+            rc=hooks.request_start(component,resolved_port);
+        }
         if(!rc){
             if(component>0)in=envelope_target(component);
-            else{portENTER_CRITICAL(&registry_lock);for(unsigned i=0;i<XIP_MAX_INSTANCES && !in;i++)if(registry[i] && registry[i]->port==port)in=registry[i];portEXIT_CRITICAL(&registry_lock);}
+            else{portENTER_CRITICAL(&registry_lock);for(unsigned i=0;i<XIP_MAX_INSTANCES && !in;i++)if(registry[i] && registry[i]->port==resolved_port)in=registry[i];portEXIT_CRITICAL(&registry_lock);}
             if(!in)rc=XIP_ERR_NOTFOUND;
         }
     }
@@ -843,6 +867,8 @@ static size_t pool_free_heap(void) { return heap_caps_get_free_size(MALLOC_CAP_I
 /* The pool is allocated when the first packet is wanted: a device whose modules never use one pays nothing. */
 static xip_pool *pool_get(void)
 {
+    xip_pool *existing = __atomic_load_n(&pool, __ATOMIC_ACQUIRE);
+    if (existing) return existing;
     if (!pool_lock) {
         SemaphoreHandle_t m = xSemaphoreCreateMutex();
         portENTER_CRITICAL(&registry_lock);
@@ -852,19 +878,19 @@ static xip_pool *pool_get(void)
     }
     xSemaphoreTake(pool_lock, portMAX_DELAY);
     if (!pool) {
+        xip_pool *created = NULL;
         if (hooks.pool) {                       /* the application's pool: DMesh's QUIC pool */
-            if (hooks.pool->slot_size(hooks.pool->ctx) >= XIP_PKT_SLOT_MIN) pool = xip_pool_external(hooks.pool);
+            if (hooks.pool->slot_size(hooks.pool->ctx) >= XIP_PKT_SLOT_MIN) created = xip_pool_external(hooks.pool);
             else ESP_LOGE(TAG, "application pool slots are too small (%u < %u)", (unsigned)hooks.pool->slot_size(hooks.pool->ctx), (unsigned)XIP_PKT_SLOT_MIN);
         } else {
-            pool = xip_pool_create(CONFIG_XIP_PKT_SLOTS, XIP_PKT_SLOT_MIN);
-            xip_pool_set_policy(pool, CONFIG_XIP_PKT_KEEP, pool_free_heap, XIP_PACKET_HEAP_RESERVE);
+            created = xip_pool_create(CONFIG_XIP_PKT_SLOTS, XIP_PKT_POOL_SLOT_BYTES);
+            xip_pool_set_policy(created, CONFIG_XIP_PKT_KEEP, pool_free_heap, XIP_PACKET_HEAP_RESERVE);
         }
+        __atomic_store_n(&pool, created, __ATOMIC_RELEASE);
     }
     xSemaphoreGive(pool_lock);
     return pool;
 }
-
-#define PKT_TAIL (XIP_PKT_SLOT_MIN - XIP_PKT_HEADROOM - XIP_PKT_MAX)
 
 static void drop_slot(int slot) { xip_pool_release(pool,slot); }
 static xip_packet_ref packet_take(uint32_t packet) {
@@ -910,6 +936,16 @@ uint8_t *xip_runtime_packet_range(uint32_t pkt, uint32_t offset, uint32_t len, b
     if (max > XIP_PKT_MAX) max = XIP_PKT_MAX;
     if ((uint64_t)offset + len > max) return NULL;
     return xip_pool_slot(pool, e->slot) + e->start + offset;
+}
+
+uint8_t *xip_runtime_packet_slot(uint32_t pkt, uint32_t slot_off, uint32_t len, bool write)
+{
+    xip_packet_ref *e = xip_packet_get(pool, pkt);
+    if (!e) return NULL;
+    if (write && xip_pool_refs(pool, e->slot) != 1) return NULL;
+    size_t cap = xip_pool_slot_size(pool);
+    if ((uint64_t)slot_off + len > cap) return NULL;
+    return xip_pool_slot(pool, e->slot) + slot_off;
 }
 
 static int h_pkt_span(void *user, uint32_t pkt, uint8_t **base, size_t *capacity)
@@ -2013,7 +2049,7 @@ static void packet_rx_storage_shortage(void)
  * the pool is empty, counted). Then commit (the frame is `len` bytes; stamped now) or abort. */
 static int native_rx_begin(int addr, xip_link_rx_buf *buf, bool cached)
 {
-    xip_pool *p = cached ? pool : pool_get();
+    xip_pool *p = cached ? __atomic_load_n(&pool, __ATOMIC_ACQUIRE) : pool_get();
     unsigned subs = 0;
     bool routed = false;
     portENTER_CRITICAL(&registry_lock);
@@ -2032,7 +2068,7 @@ static int native_rx_begin(int addr, xip_link_rx_buf *buf, bool cached)
         return XIP_ERR_NOMEM;
     }
     buf->slot = slot;
-    buf->data = xip_pool_slot(p, slot) + XIP_PKT_HEADROOM;
+    buf->data = xip_pool_slot(p, slot) + rx_pool_start(p);
     buf->capacity = XIP_PKT_MAX;
     return XIP_OK;
 }
@@ -2048,7 +2084,7 @@ int xip_link_native_rx_begin_cached(int addr, xip_link_rx_buf *buf) { return nat
 void xip_link_native_rx_commit(int addr, const xip_link_rx_buf *buf, size_t len, uint64_t source, int32_t signal)
 {
     if (len > XIP_PKT_MAX) { drop_slot(buf->slot); return; }
-    link_fanout((uint32_t)addr, 0, buf->slot, XIP_PKT_HEADROOM, (uint16_t)len, source, signal, now_us32(), NULL);
+    link_fanout((uint32_t)addr, 0, buf->slot, rx_buf_start(buf), (uint16_t)len, source, signal, now_us32(), NULL);
 }
 
 void xip_link_native_rx_abort(const xip_link_rx_buf *buf) { drop_slot(buf->slot); }
@@ -2075,8 +2111,9 @@ int xip_link_native_rx(int addr, uint64_t source, int32_t signal, const uint8_t 
         portEXIT_CRITICAL(&registry_lock);
         return XIP_ERR_NOMEM;
     }
-    if (len) memcpy(xip_pool_slot(p, slot) + XIP_PKT_HEADROOM, data, len);
-    link_fanout((uint32_t)addr, 0, slot, XIP_PKT_HEADROOM, (uint16_t)len, source, signal, time_us, NULL);
+    const uint16_t start = rx_pool_start(p);
+    if (len) memcpy(xip_pool_slot(p, slot) + start, data, len);
+    link_fanout((uint32_t)addr, 0, slot, start, (uint16_t)len, source, signal, time_us, NULL);
     return XIP_OK;
 }
 

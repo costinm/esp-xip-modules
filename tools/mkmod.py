@@ -335,6 +335,9 @@ def cargo_link(cfg, cargo, window, link_script, tmp, static_addr):
     def link(data_vma):
         extra = ["-C", "relocation-model=static", "-C", "llvm-args=--jump-table-density=1000000",
                  "-C", "llvm-args=--min-jump-table-entries=1000000"] if cfg["fixed"] else ["-C", "relocation-model=pic"]
+        if target.startswith("riscv32"):
+            # LLVM's RISC-V machine outliner can clobber `t1` via `auipc t1; jr` when `t1` is live in fastcc calls.
+            extra.extend(["-C", "llvm-args=-enable-machine-outliner=never"])
         # -Zlocation-detail=none: a panic location is a static with a pointer to the file name, which a module image (no relocations) cannot hold
         rustflags = ["-C", "opt-level=s", "-C", "lto=fat", "-C", "codegen-units=1", "-Zlocation-detail=none", *extra,
                      "-C", f"link-arg=-Wl,--defsym=MODULE_VMA={window + dmod.HEADER_SIZE}",

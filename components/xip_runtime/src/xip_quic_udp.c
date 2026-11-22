@@ -68,7 +68,36 @@ static inline void udp6_prefix(uint8_t *f,size_t n,const uint8_t src_mac[6],cons
     uint16_t sum=udp6_checksum(src_ip,dst_ip,f+54,n+8);udp6_put16(f+60,sum?sum:65535);
 }
 /* END UDP6 CODEC */
-struct raw_peer {uint64_t token; uint8_t mac[6],local_mac[6],local_ip[16]; wifi_interface_t interface; bool valid;};
+#define XIP_UDP4_PREFIX 42u
+#define XIP_UDP4_PAYLOAD_MAX 1472u
+static inline bool udp4_selected(const uint8_t *f,size_t n,const uint8_t local_mac[6],uint16_t port)
+{
+    return n>=XIP_UDP4_PREFIX && udp6_get16(f+12)==0x0800 && f[14]==0x45
+        && (udp6_get16(f+20)&0x3fff)==0 && f[23]==17
+        && !memcmp(f,local_mac,6) && udp6_get16(f+36)==port;
+}
+static inline bool udp4_valid(const uint8_t *f,size_t n)
+{
+    if(n<XIP_UDP4_PREFIX)return false;
+    size_t ip_len=udp6_get16(f+16),udp_len=udp6_get16(f+38);
+    if(ip_len<28 || ip_len>n-14)return false;
+    if(udp_len<8 || udp_len>8+XIP_UDP4_PAYLOAD_MAX || udp_len!=ip_len-20 || udp6_get16(f+34)==0)return false;
+    uint32_t sum=udp6_sum(0,f+14,20);
+    while(sum>>16)sum=(sum&65535)+(sum>>16);
+    return (uint16_t)~sum==0;
+}
+static inline void udp4_prefix(uint8_t *f,size_t n,const uint8_t src_mac[6],const uint8_t dst_mac[6],
+                               const uint8_t src_ip4[4],const uint8_t dst_ip4[4],uint16_t src_port,uint16_t dst_port,uint16_t id)
+{
+    memcpy(f,dst_mac,6);memcpy(f+6,src_mac,6);udp6_put16(f+12,0x0800);
+    f[14]=0x45;f[15]=0;udp6_put16(f+16,(uint16_t)(n+28));udp6_put16(f+18,id);udp6_put16(f+20,0x4000);
+    f[22]=64;f[23]=17;f[24]=0;f[25]=0;memcpy(f+26,src_ip4,4);memcpy(f+30,dst_ip4,4);
+    uint32_t sum=udp6_sum(0,f+14,20);while(sum>>16)sum=(sum&65535)+(sum>>16);
+    udp6_put16(f+24,(uint16_t)~sum);
+    udp6_put16(f+34,src_port);udp6_put16(f+36,dst_port);udp6_put16(f+38,(uint16_t)(n+8));udp6_put16(f+40,0);
+}
+static _Atomic uint16_t ip4_id_seq;
+struct raw_peer {uint64_t token; uint8_t mac[6],local_mac[6],local_ip[16]; wifi_interface_t interface; bool valid,ipv4;};
 static _Atomic bool raw_mode;
 void xip_quic_udp_raw_mode(bool enabled){atomic_store(&raw_mode,enabled);}
 struct udp_state {int fd,link;xip_io_registration watch;_Atomic unsigned refs; xip_udp_peers peers; struct raw_peer *raw;};
@@ -109,6 +138,15 @@ static int udp_tx(void *ctx,uint64_t dest,const xip_link_packet *pkt)
     xSemaphoreGive(mutex);
     if(!found){udp_release(s);return XIP_ERR_NOTFOUND;}
     if(raw.valid){
+        if(raw.ipv4){
+            if(pkt->headroom<XIP_UDP4_PREFIX || pkt->len>XIP_UDP4_PAYLOAD_MAX){udp_release(s);return XIP_ERR_SIZE;}
+            uint8_t *frame=pkt->data-XIP_UDP4_PREFIX;
+            uint16_t id=atomic_fetch_add_explicit(&ip4_id_seq,1,memory_order_relaxed);
+            udp4_prefix(frame,pkt->len,raw.local_mac,raw.mac,raw.local_ip+12,a.ip+12,CONFIG_XIP_QUIC_UDP_PORT,a.port,id);
+            int err=esp_wifi_internal_tx(raw.interface,frame,pkt->len+XIP_UDP4_PREFIX);
+            int rc=err==ESP_OK?XIP_LINK_TX_DONE:err==ESP_ERR_NO_MEM?XIP_ERR_BUSY:XIP_ERR_IO;
+            udp_release(s);return rc;
+        }
         if(pkt->headroom<XIP_UDP6_PREFIX || pkt->len>XIP_UDP6_PAYLOAD_MAX){udp_release(s);return XIP_ERR_SIZE;}
         uint8_t *frame=pkt->data-XIP_UDP6_PREFIX;
         udp6_prefix(frame,pkt->len,raw.local_mac,raw.mac,raw.local_ip,a.ip,CONFIG_XIP_QUIC_UDP_PORT,a.port);
@@ -167,6 +205,29 @@ bool xip_quic_udp_raw_rx(unsigned interface,const uint8_t *frame,size_t len)
      *    RX is unreliable under lwIP's poll on this composition, while the raw
      *    ingress is proven. The mc socket remains the TX reply path and its
      *    MLD join is what admits the group's frames to this callback. */
+    if(udp4_selected(frame,len,mac,CONFIG_XIP_QUIC_UDP_PORT)){
+        if(!udp4_valid(frame,len)){udp_release(s);return true;}
+        xip_link_rx_buf buf;
+        if(xip_link_native_rx_begin_cached(s->link,&buf)!=0){udp_release(s);return true;}
+        xip_udp_address a={.port=udp6_get16(frame+34),.scope=0};
+        memset(a.ip,0,10);a.ip[10]=0xff;a.ip[11]=0xff;memcpy(a.ip+12,frame+26,4);
+        uint64_t token=0;
+        if(xSemaphoreTake(mutex,0)==pdTRUE){
+            if(state==s)token=xip_udp_peer_note(&s->peers,&a,(uint64_t)esp_timer_get_time());
+            if(token){struct raw_peer *r=&s->raw[(token&255)-1];
+                memcpy(r->mac,frame+6,6);memcpy(r->local_mac,mac,6);
+                memset(r->local_ip,0,10);r->local_ip[10]=0xff;r->local_ip[11]=0xff;memcpy(r->local_ip+12,frame+30,4);
+                r->token=token;r->interface=(wifi_interface_t)interface;r->valid=true;r->ipv4=true;}
+            xSemaphoreGive(mutex);
+        }
+        if(!token)xip_link_native_rx_abort(&buf);
+        else {
+            size_t n=udp6_get16(frame+38)-8;
+            memcpy(buf.data,frame+XIP_UDP4_PREFIX,n);
+            xip_link_native_rx_commit(s->link,&buf,n,token,0);
+        }
+        udp_release(s);return true;
+    }
     if(!udp6_selected(frame,len,ip,CONFIG_XIP_QUIC_UDP_PORT)){
         udp_release(s);
         return mc_raw_rx(interface,frame,len);
@@ -180,7 +241,7 @@ bool xip_quic_udp_raw_rx(unsigned interface,const uint8_t *frame,size_t len)
         if(state==s)token=xip_udp_peer_note(&s->peers,&a,(uint64_t)esp_timer_get_time());
         if(token){struct raw_peer *r=&s->raw[(token&255)-1];
             memcpy(r->mac,frame+6,6);memcpy(r->local_mac,mac,6);memcpy(r->local_ip,ip,16);
-            r->token=token;r->interface=(wifi_interface_t)interface;r->valid=true;}
+            r->token=token;r->interface=(wifi_interface_t)interface;r->valid=true;r->ipv4=false;}
         xSemaphoreGive(mutex);
     }
     if(!token)xip_link_native_rx_abort(&buf);

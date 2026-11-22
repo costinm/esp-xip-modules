@@ -37,7 +37,7 @@ static struct {
 static void pkt_abort(void)
 {
     if (!ppp.pkt_open) return;
-    const xip_link_rx_buf b = {.slot = ppp.slot};
+    const xip_link_rx_buf b = {.data = ppp.buf_data, .capacity = ppp.buf_cap, .slot = ppp.slot};
     xip_serial_frame_finish(ppp.port, &b, 0, XIP_ERR_IO);
     ppp.pkt_open = false;
 }
@@ -65,7 +65,7 @@ static bool pkt_begin(uint32_t port)
 static void pkt_commit(size_t len)
 {
     if (!ppp.pkt_open) return;
-    const xip_link_rx_buf b = {.slot = ppp.slot};
+    const xip_link_rx_buf b = {.data = ppp.buf_data, .capacity = ppp.buf_cap, .slot = ppp.slot};
     xip_serial_frame_finish(ppp.port, &b, len, 0);
     ppp.pkt_open = false;
 }
@@ -142,7 +142,7 @@ static void push(const uint8_t *buf, size_t n)
 
 /* ---- the side that speaks : one framed record per port ---- */
 
-#define PPP_TX_CHUNK 64
+#define PPP_TX_CHUNK 256
 static int write_chunk(const uint8_t *data, size_t len)
 {
     for (size_t at = 0; at < len;) {

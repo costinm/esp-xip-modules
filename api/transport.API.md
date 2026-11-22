@@ -18,7 +18,7 @@ mode and wake_target fields are not part of this API.
 | 18 | `uart` | `uint` | 0/1 selects 115200, 6 selects 230400, 7 selects 460800, 8 off, 9 selects 921600. Serial on also restores a detached USB PHY; USB ignores baud. |
 | 26 | `ble` | `uint` | 0 default, 1 start, 2 stop. Sleep policy uses rendezvous while sleeping. |
 | 28 | `uart_mode` | `uint` | 0 default or 2 PPP. Other framing is unsupported. |
-| 29 | `uart_baud` | `uint` | Explicit supported physical baud; overrides selector 18. USB ignores it. |
+| 29 | `uart_baud` | `uint` | Explicit supported physical baud (115200..921600, 1000000..4000000); overrides selector 18. USB ignores it. |
 | 31 | `radio_mode` | `uint` | 0 off, 1 LoRa, 2 FSK. |
 | 32 | `radio_frequency` | `uint` | Radio frequency in Hz for this activation. |
 | 33 | `radio_bandwidth` | `uint` | Radio bandwidth in Hz. |

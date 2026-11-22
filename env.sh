@@ -1,5 +1,5 @@
 # Source from the repository root before building firmware. The nix tools are out-links under $ESP_DEV (default $HOME/opt/esp-dev); the
-# ESP-IDF and the toolchains are shared under $HOME/opt/esp-idf-6.0 (XIP_ESP_ROOT); build output stays under target/.
+# ESP-IDF and the toolchains are shared under $HOME/opt/esp-idf (XIP_ESP_ROOT, from flake `.#esp-idf`); build output stays under target/.
 
 if [ -n "${BASH_SOURCE:-}" ]; then
     _em_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,16 +11,18 @@ _em_target="$XIP_REPO/target"
 mkdir -p "$_em_target" 2>/dev/null || true
 
 export XIP_IDF_VERSION="v6.0.2"
-# ESP-IDF and its toolchains (scripts/esp-deps.sh): one installation shared by every workspace, $HOME/opt/esp-idf-6.0, like $ESP_DEV below.
-# XIP_ESP_ROOT selects another; an install under this checkout's target/ (older layout) is used when there is no shared one.
+# ESP-IDF and its toolchains (scripts/esp-deps.sh): one installation shared by every workspace under $HOME/opt/esp-idf, like $ESP_DEV below.
 if [ -z "${XIP_ESP_ROOT:-}" ]; then
-    if [ -d "$HOME/opt/esp-idf-6.0" ] || [ ! -d "$_em_target/esp-idf-6.0" ]; then
+    if [ -d "$HOME/opt/esp-idf" ]; then
+        XIP_ESP_ROOT="$HOME/opt/esp-idf"
+    elif [ -d "$HOME/opt/esp-idf-6.0" ]; then
         XIP_ESP_ROOT="$HOME/opt/esp-idf-6.0"
     else
-        XIP_ESP_ROOT="$_em_target/esp-idf-6.0"
+        XIP_ESP_ROOT="$HOME/opt/esp-idf"
     fi
 fi
 export XIP_ESP_ROOT
+export IDF_SKIP_CHECK_SUBMODULES="${IDF_SKIP_CHECK_SUBMODULES:-1}"
 export NIX_CONFIG="${NIX_CONFIG:-experimental-features = nix-command flakes}"
 export TMPDIR="${TMPDIR:-/tmp}"
 
@@ -30,9 +32,12 @@ export TMPDIR="${TMPDIR:-/tmp}"
 # development can be put in front with XIP_DEV_BIN (colon separated, for example /ws/dmesh/target/debug), so its own build output wins.
 # Older checkouts kept the out-links under target/nix/*: still used when present. A fresh clone with a shared ESP root can reuse the
 # profile that sits next to it (<root>/../nix/esp32-profile or <root>/../nix/profile).
+export SSH_MESH_DEV="${SSH_MESH_DEV:-$HOME/opt/ssh-mesh-dev}"
+export CARGO_HOME="${CARGO_HOME:-$([ -d "${SSH_MESH_DEV}/cargo" ] && echo "${SSH_MESH_DEV}/cargo" || ([ -d "${HOME:-}/opt/rust/cargo" ] && echo "${HOME}/opt/rust/cargo" || echo "$_em_target/cargo"))}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$([ -d "${HOME:-}/opt/rust/rustup" ] && echo "${HOME}/opt/rust/rustup" || echo "$XIP_ESP_ROOT/rustup")}"
 export ESP_DEV="${ESP_DEV:-$HOME/opt/esp-dev}"
 _em_path=""
-for _em_d in "$ESP_DEV/bin" "$ESP_DEV-dmesh/bin" "$_em_target"/nix/*/bin; do
+for _em_d in "$SSH_MESH_DEV/bin" "${HOME:-}/opt/rust/cargo/bin" "$CARGO_HOME/bin" "$RUSTUP_HOME/toolchains/stable-x86_64-unknown-linux-gnu/bin" "$ESP_DEV/bin" "$ESP_DEV-dmesh/bin" "$XIP_ESP_ROOT/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin" "$HOME/opt/wasm-dev/bin" "/nix/var/nix/profiles/default/bin" "$_em_target"/nix/*/bin; do
     [ -d "$_em_d" ] && _em_path="$_em_path:$_em_d"
 done
 if [ -z "$_em_path" ]; then
@@ -49,7 +54,11 @@ unset _em_path _em_d
 # Service catalogs (api.cbor / tools.json per service) for `mesh` and `dmesh-cli`: scripts/gen.sh publishes them under target/schemas/<service>/<VERSION>
 # (build artifact, not checked in), and the dmesh build installs them (flake.nix, dmesh-cli package) under `etc/schemas` of the package.
 if [ -z "${MESH_SCHEMA_DIR:-}" ] || [ "$MESH_SCHEMA_DIR" = "$_em_target/nix/dmesh/etc/schemas" ] || [ "$MESH_SCHEMA_DIR" = "$ESP_DEV-dmesh/etc/schemas" ]; then
-    if [ -d "$_em_target/schemas" ]; then
+    if [ -d "${SSH_MESH_DEV}/etc/schemas" ] && [ -f "${SSH_MESH_DEV}/etc/schemas/xip-flash/api.cbor" ]; then
+        export MESH_SCHEMA_DIR="${SSH_MESH_DEV}/etc/schemas"
+    elif [ -d "${HOME:-}/opt/rust/etc/schemas" ] && [ -f "${HOME:-}/opt/rust/etc/schemas/xip-flash/api.cbor" ]; then
+        export MESH_SCHEMA_DIR="${HOME}/opt/rust/etc/schemas"
+    elif [ -d "$_em_target/schemas" ]; then
         export MESH_SCHEMA_DIR="$_em_target/schemas"
     elif [ -d "$_em_target/local/dmesh-cli/etc/schemas" ] && [ -f "$_em_target/local/dmesh-cli/etc/schemas/xip-flash/api.cbor" ]; then
         export MESH_SCHEMA_DIR="$_em_target/local/dmesh-cli/etc/schemas"
@@ -89,6 +98,8 @@ export XIP_ENV_LOADED=1
 
 # Rust modules (tools/mkmod.py --cargo) need the esp toolchain (nightly + rust-src, Xtensa target): the one that
 # comes with the shared ESP-IDF install, if it has it.
-if [ -d "$XIP_ESP_ROOT/rustup/toolchains/esp/bin" ]; then
+if [ -d "$RUSTUP_HOME/toolchains/esp/bin" ]; then
+    export XIP_RUST_ESP_BIN="$RUSTUP_HOME/toolchains/esp/bin"
+elif [ -d "$XIP_ESP_ROOT/rustup/toolchains/esp/bin" ]; then
     export XIP_RUST_ESP_BIN="$XIP_ESP_ROOT/rustup/toolchains/esp/bin"
 fi

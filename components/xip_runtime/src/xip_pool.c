@@ -1,8 +1,38 @@
 /* SPDX-License-Identifier: Apache-2.0 */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200112L
+#endif
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#endif
 #include "xip_pool.h"
+
+/* Keep every packet slot 64-byte aligned in DMA-capable SRAM so AEAD/crypto
+ * peripherals can read/write packet slots directly without cache-line bounce buffers. */
+static uint8_t *slot_alloc(size_t slot_size)
+{
+    size_t aligned_sz = (slot_size + 63u) & ~(size_t)63u;
+#ifdef ESP_PLATFORM
+    return heap_caps_aligned_alloc(64u, aligned_sz, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+#else
+    void *ptr = NULL;
+    if (posix_memalign(&ptr, 64u, aligned_sz) != 0) return NULL;
+    return (uint8_t *)ptr;
+#endif
+}
+
+static void slot_free(uint8_t *m)
+{
+    if (!m) return;
+#ifdef ESP_PLATFORM
+    heap_caps_free(m);
+#else
+    free(m);
+#endif
+}
 
 struct xip_pool {
     const xip_pool_ops *ext;
@@ -56,7 +86,7 @@ xip_pool *xip_pool_external(const xip_pool_ops *ops)
 void xip_pool_destroy(xip_pool *p)
 {
     if (!p) return;
-    if (!p->ext && p->mem) for (uint16_t i = 0; i < p->slots; i++) free(p->mem[i]);
+    if (!p->ext && p->mem) for (uint16_t i = 0; i < p->slots; i++) slot_free(p->mem[i]);
     free(p->generations);free(p->packets);
     free(p->refs);
     free(p->mem);
@@ -83,7 +113,7 @@ void xip_pool_trim(xip_pool *p)
         if (atomic_load(&p->buffers) <= p->keep + (p->slots - atomic_load(&p->free_count))) return;
         unsigned zero = 0;
         if (!p->mem[i] || !atomic_compare_exchange_strong(&p->refs[i], &zero, 1)) continue;       /* idle: take it to free its storage */
-        free(p->mem[i]);
+        slot_free(p->mem[i]);
         p->mem[i] = NULL;
         atomic_fetch_sub(&p->buffers, 1);
         atomic_store(&p->refs[i], 0);
@@ -101,7 +131,7 @@ size_t xip_pool_reclaim(xip_pool *p, size_t bytes)
         if (!atomic_compare_exchange_strong(&p->refs[i], &zero, 1)) continue;
         uint8_t *mem = atomic_exchange(&p->mem[i], NULL);
         if (mem) {
-            free(mem);
+            slot_free(mem);
             atomic_fetch_sub(&p->buffers, 1);
             released += p->slot_size;
         }
@@ -121,8 +151,8 @@ static int claim(xip_pool *p, uint16_t i, int allocate)
     if (!p->mem[i]) {
         if (!allocate) { atomic_store(&p->refs[i], 0); return 0; }
         uint8_t *m = NULL;
-        if (!p->free_heap || p->free_heap() >= (size_t)p->slot_size + p->reserve_bytes) m = malloc(p->slot_size);
-        if (m && p->free_heap && p->free_heap() < p->reserve_bytes) { free(m); m=NULL; }
+        if (!p->free_heap || p->free_heap() >= (size_t)p->slot_size + p->reserve_bytes) m = slot_alloc(p->slot_size);
+        if (m && p->free_heap && p->free_heap() < p->reserve_bytes) { slot_free(m); m=NULL; }
         if (!m) { atomic_store(&p->refs[i], 0); return -1; }
         p->mem[i] = m;
         atomic_fetch_add(&p->buffers, 1);
@@ -201,7 +231,7 @@ void xip_pool_release(xip_pool *p, int slot)
          * slot (nobody can claim it before its count is 0, so nobody uses the storage meanwhile) */
         unsigned in_use = p->slots - atomic_load(&p->free_count), buffers = atomic_load(&p->buffers);
         if (buffers + 1 > in_use + p->keep && p->mem[slot]) {
-            free(p->mem[slot]);
+            slot_free(p->mem[slot]);
             p->mem[slot] = NULL;
             atomic_fetch_sub(&p->buffers, 1);
         }

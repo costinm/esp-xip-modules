@@ -86,10 +86,17 @@ for cpu in $cpus; do
     # modules.txt: name, the flash address esptool writes it at (the pages after the reserve, in list order), the slot.
     # XIP_MODULE_VERSIONS="mod_x=3 mod_y=2" overrides automatic module build versions.
     if [[ $part == all || $part == mod_* ]]; then
-        [[ $part != all ]] || : > $out/modules.list
+        if [[ $part == all ]]; then
+            rm -rf "$out/modules"
+            mkdir -p "$out/modules"
+            : > "$out/modules.list"
+        fi
         for dir in modules/mod_*/; do
             mod=$(basename $dir)
             [[ $part == all || $part == "$mod" ]] || continue
+            # Skip experimental single-layer transport alternatives unless explicitly targeted;
+            # mod_quic2 is the combined default QUIC module.
+            case "$mod" in mod_qlink|mod_mux) [[ $part == "$mod" ]] || continue ;; esac
             version_args=()
             for kv in ${XIP_MODULE_VERSIONS:-}; do [[ ${kv%%=*} == $mod ]] && version_args=(--version "${kv#*=}"); done
             if [ -f $dir/Cargo.toml ]; then

@@ -96,10 +96,10 @@ static bool install_uart(void)
     const uart_config_t cfg = {.baud_rate = s.baud, .data_bits = UART_DATA_8_BITS, .parity = UART_PARITY_DISABLE,
                                .stop_bits = UART_STOP_BITS_1, .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, .source_clk = UART_CLK};
     if (uart_param_config(UART_NUM_0, &cfg) != ESP_OK) return false;
-    esp_err_t rc = uart_driver_install(UART_NUM_0, 2048, 0, 16, &s.events, 0);
+    esp_err_t rc = uart_driver_install(UART_NUM_0, 4096, 2048, 32, &s.events, 0);
     if (rc == ESP_ERR_INVALID_STATE) {      /* the IDF console's own driver */
         uart_driver_delete(UART_NUM_0);
-        rc = uart_driver_install(UART_NUM_0, 2048, 0, 16, &s.events, 0);
+        rc = uart_driver_install(UART_NUM_0, 4096, 2048, 32, &s.events, 0);
     }
     if (rc != ESP_OK || !s.events) return false;
     uart_set_pin(UART_NUM_0, TX_PIN, RX_PIN, -1, -1);
@@ -319,7 +319,7 @@ int xip_serial_start_packets(const xip_serial_packet_client *client)
 
 static void drain(void)
 {
-    uint8_t buf[256];
+    uint8_t buf[512];
     int n;
     while ((n = read_bytes(buf, sizeof(buf), 0)) > 0)
         chunk(buf, n);
@@ -328,7 +328,7 @@ static void drain(void)
 static void serial_task(void *arg)
 {
     (void)arg;
-    uint8_t buf[256];
+    uint8_t buf[512];
     while (!s.stop) {
         if (s.usb) {
             int n = read_bytes(buf, sizeof(buf), pdMS_TO_TICKS(USB_WAKE_MS));
@@ -466,7 +466,11 @@ int xip_serial_buffered_bytes(size_t *bytes)
 int xip_serial_set_baud(uint32_t baud)
 {
     if (!s.opened || s.usb) return XIP_ERR_NOTFOUND;
-    if (uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(100)) != ESP_OK) return XIP_ERR_IO;
+    esp_err_t rc = uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(100));
+#ifdef ESP_ERR_TIMEOUT
+    if (rc == ESP_ERR_TIMEOUT) rc = uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(100));
+#endif
+    if (rc != ESP_OK) return XIP_ERR_IO;
     if (uart_set_baudrate(UART_NUM_0, baud) != ESP_OK) return XIP_ERR_IO;
     s.baud = (int)baud;
     return XIP_OK;
@@ -477,7 +481,9 @@ int xip_serial_set_baud(uint32_t baud)
 #define BAUD_ACK (1u << 31)
 static bool baud_valid(uint32_t baud)
 {
-    return baud == 115200 || baud == 230400 || baud == 460800 || baud == 921600;
+    return baud == 115200 || baud == 230400 || baud == 460800 || baud == 921600 ||
+           baud == 1000000 || baud == 1152000 || baud == 1500000 || baud == 2000000 ||
+           baud == 2500000 || baud == 3000000 || baud == 3500000 || baud == 4000000;
 }
 
 static void apply_pending_baud(void)
@@ -570,7 +576,7 @@ static int start_tasks(void)
     s.running = true;
     if (s.client.on_tx && xTaskCreate(serial_tx_task, "xip_serial_tx", CONFIG_XIP_SERIAL_STACK,
                                      NULL, 5, &s.tx_task) != pdPASS) goto failed;
-    unsigned priority = 4;
+    unsigned priority = s.usb ? 4 : 6; /* Physical UART RX stays above module worker priority to avoid high-baud RX overruns. */
     if (s.client.on_bytes) {
 #if CONFIG_IDF_TARGET_ESP32C6
         priority = 5; /* DMesh USB/fallback RX and TX share priority. */

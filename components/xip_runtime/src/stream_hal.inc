@@ -178,6 +178,7 @@ static int c_stream_write(void *ctx,uint32_t handle,uint32_t packet,uint32_t len
     if(!find(s->provider))return XIP_ERR_NOTFOUND;
     xip_packet_ref moved=packet_take(packet);
     s->output_slot=moved.slot;s->output_len=len;s->pending=true;s->out_fin=fin!=0;
+    quic_module_event(0,0,0,s->handle);
     return XIP_OK;
 }
 static int c_stream_take(void *ctx,uint32_t handle,xip_stream_packet *out)
