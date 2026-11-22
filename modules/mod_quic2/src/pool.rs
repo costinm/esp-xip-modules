@@ -37,6 +37,40 @@ impl core::fmt::Debug for XipPacket {
 }
 
 impl XipPacket {
+    /// Wrap an owned runtime TX packet handle at a 64-byte-aligned start offset (when slot capacity allows).
+    pub fn from_owned_tx(hw: Hw, handle: u32) -> Result<Self, i32> {
+        match hw.pkt_span(handle) {
+            Ok((base, cap)) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                let start = {
+                    let aligned = (PKT_HEADROOM as usize + 63) & !63;
+                    if cap >= aligned + PKT_MAX as usize {
+                        aligned
+                    } else {
+                        PKT_HEADROOM as usize
+                    }
+                };
+                #[cfg(target_arch = "wasm32")]
+                let start = PKT_HEADROOM as usize;
+                if start > cap {
+                    hw.pkt_free(handle);
+                    return Err(xip_abi::ERR_ARG);
+                }
+                Ok(Self {
+                    hw,
+                    handle,
+                    base,
+                    cap,
+                    range: start..start,
+                })
+            }
+            Err(rc) => {
+                hw.pkt_free(handle);
+                Err(rc)
+            }
+        }
+    }
+
     /// Wrap an owned runtime packet handle; frees `handle` if `pkt_span` or `range` is invalid.
     pub fn from_owned(hw: Hw, handle: u32, range: Range<usize>) -> Result<Self, i32> {
         match hw.pkt_span(handle) {
@@ -161,6 +195,28 @@ impl PoolPacket for XipPacket {
             range: self.range.clone(),
         })
     }
+
+    #[inline]
+    fn native_packet_handle(&self) -> Option<u32> {
+        (self.handle != 0).then_some(self.handle)
+    }
+
+    #[inline]
+    fn swap_native_packet(&mut self, handle: u32, range: Range<usize>) -> Result<(), PoolError> {
+        let (new_base, new_cap) = self.hw.pkt_span(handle).map_err(|_| PoolError::InvalidRange)?;
+        if range.start > range.end || range.end > new_cap {
+            self.hw.pkt_free(handle);
+            return Err(PoolError::InvalidRange);
+        }
+        if self.handle != 0 {
+            self.hw.pkt_free(self.handle);
+        }
+        self.handle = handle;
+        self.base = new_base;
+        self.cap = new_cap;
+        self.range = range;
+        Ok(())
+    }
 }
 
 impl PacketPool for XipPool {
@@ -182,8 +238,7 @@ impl PacketPool for XipPool {
 
     fn alloc(&self) -> Result<Self::Packet, PoolError> {
         let handle = self.hw.pkt_alloc().map_err(|_| PoolError::Exhausted)?;
-        let h = self.headroom();
-        XipPacket::from_owned(self.hw, handle, h..h).map_err(|_| PoolError::Exhausted)
+        XipPacket::from_owned_tx(self.hw, handle).map_err(|_| PoolError::Exhausted)
     }
 
     fn alloc_reserving(&self, reserved: usize) -> Result<Self::Packet, PoolError> {
@@ -192,8 +247,7 @@ impl PacketPool for XipPool {
             let res_u32 = u32::try_from(reserved).map_err(|_| PoolError::Exhausted)?;
             match self.hw.pkt_acquire(res_u32) {
                 Ok(handle) => {
-                    let h = self.headroom();
-                    return XipPacket::from_owned(self.hw, handle, h..h)
+                    return XipPacket::from_owned_tx(self.hw, handle)
                         .map_err(|_| PoolError::Exhausted);
                 }
                 Err(xip_abi::ERR_UNSUPPORTED) => {}

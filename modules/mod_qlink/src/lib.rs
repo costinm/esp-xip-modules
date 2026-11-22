@@ -66,6 +66,7 @@ fn udp_link_profile() -> LinkProfile {
         },
         framing: LinkFraming::Datagram { peer_cid: cid },
         initial_rtt_us: 25_000,
+        encrypt: false,
     }
 }
 
@@ -81,6 +82,7 @@ fn serial_link_profile() -> LinkProfile {
         },
         framing: LinkFraming::Datagram { peer_cid: cid },
         initial_rtt_us: 150_000,
+        encrypt: false,
     }
 }
 

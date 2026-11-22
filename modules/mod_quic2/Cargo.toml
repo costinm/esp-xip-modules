@@ -34,6 +34,7 @@ strip = "none"
 
 [dev-dependencies]
 quic-base = { git = "https://github.com/costinm/ssh-mesh", default-features = false, features = ["host-pools"] }
+xip-psa = { path = "../../crates/xip-psa" }
 
 [patch."https://github.com/costinm/ssh-mesh"]
 mesh-api = { path = "../../../rust/ssh-mesh/crates/mesh-api" }

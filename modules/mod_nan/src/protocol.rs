@@ -358,6 +358,9 @@ impl Engine {
     }
     /// The publication sender encodes a NAN service frame for the current window.
     pub fn publish(&self, out: &mut [u8]) -> Option<usize> {
+        if self.info.is_empty() {
+            return None;
+        }
         let cluster = self.nan.cluster()?.0;
         let n = 43 + self.info.len();
         if out.len() < n {
@@ -779,8 +782,9 @@ mod tests {
         let local = [2, 0, 0, 0, 0, 1];
         let mut e = engine(local, 1);
         e.tick(ACQUIRE_US + 1);
-        e.set_publication(b"abc").unwrap();
         let mut out = [0; 512];
+        assert_eq!(e.publish(&mut out), None);
+        e.set_publication(b"abc").unwrap();
         let n = e.now_body(ACQUIRE_US + 2, &mut out).unwrap();
         let f = e.nan.now_sync_outgoing(ACQUIRE_US + 2).unwrap();
         assert_eq!(

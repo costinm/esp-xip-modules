@@ -2,12 +2,10 @@
 
 use alloc::vec::Vec;
 use quic_link::{
-    wire::plan_short_header_stream_packet, CongestionMode, ConnectionId, LinkFraming, LinkId,
-    LinkProfile, LinkTxOutcome, QuicLinkAssoc,
+    decode_tls_record_header, encode_tls_record_header, CongestionMode, ConnectionId, LinkFraming,
+    LinkId, LinkProfile, LinkTxOutcome, QuicLinkAssoc, TLS_RECORD_HEADER_LEN,
 };
-use quic_mux::{
-    wire::StreamPacketPlan, PacketPool, PoolPacket, StreamPriority,
-};
+use quic_mux::{PacketPool, PoolPacket, StreamPriority};
 pub use quic_mux::OWNER_ASSOC;
 use xip_abi::{Hw, ERR_AGAIN, ERR_ARG, ERR_BUSY, PKT_HEADROOM, PKT_MAX};
 
@@ -22,20 +20,28 @@ pub const LINK_SERIAL: LinkId = LinkId(2);
 /// Base Link ID (`LinkId(10 + idx)`) for TCP stream sockets on `--stream 6`.
 pub const LINK_TCP_BASE: u16 = 10;
 
-/// Maximum packet bytes over PPP serial (`1500 == PKT_MAX`).
-pub const SERIAL_FRAME_MTU: usize = PKT_MAX as usize;
-/// Maximum packet bytes over TCP (`1500 == PKT_MAX` so cross-link failover fits serial/UDP).
-pub const TCP_FRAME_MTU: usize = PKT_MAX as usize;
+/// Maximum datagram/stream QUIC packet bytes across UDP, PPP serial, TCP, and NOW (`1472`, fitting `PKT_MAX = 1500` and unfragmented IPv4 UDP).
+pub const UNIFIED_LINK_MTU: usize = 1472;
+/// Maximum packet bytes over UDP (`1472`, unfragmented IPv4 UDP payload within Ethernet 1500 MTU).
+pub const UDP_FRAME_MTU: usize = UNIFIED_LINK_MTU;
+/// Maximum packet bytes over PPP serial (matches [`UDP_FRAME_MTU`] so cross-link failover fits UDP/NOW/TCP).
+pub const SERIAL_FRAME_MTU: usize = UNIFIED_LINK_MTU;
+/// Maximum packet bytes over TCP (matches [`UDP_FRAME_MTU`] so cross-link failover fits serial/UDP/NOW).
+pub const TCP_FRAME_MTU: usize = UNIFIED_LINK_MTU;
 /// Maximum concurrent TCP bearer sockets retained by `mod_quic2`.
 pub const MAX_TCP_SOCKETS: usize = 4;
 const PEEK_CAP: usize = 64;
 const RX_POOL_RESERVE: usize = 2;
 
 pub fn udp_link_profile() -> LinkProfile {
+    udp_link_profile_with_encrypt(true)
+}
+
+pub fn udp_link_profile_with_encrypt(encrypt: bool) -> LinkProfile {
     let cid = ConnectionId::new(1).unwrap();
     LinkProfile {
         tier: 0,
-        mtu: 1472,
+        mtu: UDP_FRAME_MTU,
         max_priority: StreamPriority::BULK,
         congestion_mode: CongestionMode::FlowControlled {
             max_inflight_packets: 4,
@@ -43,10 +49,15 @@ pub fn udp_link_profile() -> LinkProfile {
         },
         framing: LinkFraming::Datagram { peer_cid: cid },
         initial_rtt_us: 25_000,
+        encrypt,
     }
 }
 
 pub fn tcp_link_profile() -> LinkProfile {
+    tcp_link_profile_with_encrypt(false)
+}
+
+pub fn tcp_link_profile_with_encrypt(encrypt: bool) -> LinkProfile {
     let cid = ConnectionId::new(1).unwrap();
     LinkProfile {
         tier: 0,
@@ -56,12 +67,17 @@ pub fn tcp_link_profile() -> LinkProfile {
             max_inflight_packets: 6,
             max_inflight_bytes: 9 * 1024,
         },
-        framing: LinkFraming::SelfDelimitingStream { peer_cid: cid },
+        framing: LinkFraming::TlsRecord { peer_cid: cid },
         initial_rtt_us: 20_000,
+        encrypt,
     }
 }
 
 pub fn serial_link_profile() -> LinkProfile {
+    serial_link_profile_with_encrypt(false)
+}
+
+pub fn serial_link_profile_with_encrypt(encrypt: bool) -> LinkProfile {
     let cid = ConnectionId::new(1).unwrap();
     LinkProfile {
         tier: 1,
@@ -73,6 +89,7 @@ pub fn serial_link_profile() -> LinkProfile {
         },
         framing: LinkFraming::Datagram { peer_cid: cid },
         initial_rtt_us: 150_000,
+        encrypt,
     }
 }
 
@@ -158,7 +175,12 @@ impl Quic2Drivers {
         self.tcp.len() as u64
     }
 
-    pub fn add_tcp_socket(&mut self, socket: u32, assoc: &mut QuicLinkAssoc<XipPacket>) -> Option<LinkId> {
+    pub fn add_tcp_socket(
+        &mut self,
+        socket: u32,
+        encrypt: bool,
+        assoc: &mut QuicLinkAssoc<XipPacket>,
+    ) -> Option<LinkId> {
         if let Some(existing) = self.tcp.iter().find(|t| t.socket == socket) {
             return Some(existing.link_id);
         }
@@ -168,7 +190,7 @@ impl Quic2Drivers {
         }
         let link_id = LinkId(LINK_TCP_BASE + (self.next_tcp_slot % 16));
         self.next_tcp_slot = self.next_tcp_slot.wrapping_add(1);
-        assoc.upsert_link(link_id, tcp_link_profile());
+        assoc.upsert_link(link_id, tcp_link_profile_with_encrypt(encrypt));
         self.tcp.push(TcpSocketBearer::new(socket, link_id));
         Some(link_id)
     }
@@ -265,6 +287,13 @@ impl Quic2Drivers {
                 }
             }
         }
+        let orig_range = pkt.range();
+        let Some(tls_hdr) = encode_tls_record_header(orig_range.len()) else {
+            return Err((ERR_ARG, pkt));
+        };
+        if pkt.prepend(&tls_hdr).is_err() {
+            return Err((ERR_ARG, pkt));
+        }
         let wire_range = pkt.range();
         let (handle, base, cap, _) = pkt.into_raw_parts();
         let rc = hw.socket_write_pkt(
@@ -276,7 +305,7 @@ impl Quic2Drivers {
         if rc == 0 {
             Ok(())
         } else {
-            let restored = unsafe { XipPacket::from_raw_parts(hw, handle, base, cap, wire_range) };
+            let restored = unsafe { XipPacket::from_raw_parts(hw, handle, base, cap, orig_range) };
             Err((rc, restored))
         }
     }
@@ -297,9 +326,8 @@ impl Quic2Drivers {
             };
             while self.tcp[idx].rx_pkt.is_none() {
                 let peek_len = self.tcp[idx].peek_len;
-                match plan_short_header_stream_packet(&self.tcp[idx].peek[..peek_len], TCP_FRAME_MTU)
-                {
-                    Ok(StreamPacketPlan::Ready { total_len }) => {
+                match decode_tls_record_header(&self.tcp[idx].peek[..peek_len], PKT_MAX as usize) {
+                    Ok(Some(total_len)) => {
                         let pkt = match pool.alloc_reserving(RX_POOL_RESERVE) {
                             Ok(p) => p,
                             Err(_) => match pool.alloc() {
@@ -307,12 +335,17 @@ impl Quic2Drivers {
                                 Err(_) => return Ok(false),
                             },
                         };
+                        let rem = peek_len - TLS_RECORD_HEADER_LEN;
+                        self.tcp[idx]
+                            .peek
+                            .copy_within(TLS_RECORD_HEADER_LEN..peek_len, 0);
+                        self.tcp[idx].peek_len = rem;
                         self.tcp[idx].rx_pkt = Some(pkt);
                         self.tcp[idx].rx_target = total_len;
                         self.tcp[idx].rx_at = 0;
                         break;
                     }
-                    Ok(StreamPacketPlan::NeedMoreHeader) => {
+                    Ok(None) => {
                         let n = self
                             .hw
                             .socket_read(socket, &mut self.tcp[idx].peek[peek_len..]);
@@ -393,54 +426,63 @@ impl Quic2Drivers {
         }
     }
 
-    pub fn flush_outbound(&mut self, assoc: &mut QuicLinkAssoc<XipPacket>, now_us: u64) {
+    pub fn flush_outbound_for_slot(
+        &mut self,
+        assoc: &mut QuicLinkAssoc<XipPacket>,
+        udp_peer: PeerRoute,
+        serial_peer: PeerRoute,
+        allow_tcp: bool,
+        now_us: u64,
+    ) {
         while let Some(out) = assoc.pop_outbound_packet() {
-            if let Some(idx) = self.tcp.iter().position(|t| t.link_id == out.link_id) {
-                if self.tcp[idx].tx_inflight_pkt_num.is_none()
-                    && self.tcp[idx].pending_tx.is_empty()
-                {
-                    let socket = self.tcp[idx].socket;
-                    match Self::submit_tcp_pkt(self.hw, socket, out.packet) {
-                        Ok(()) => {
-                            self.tcp[idx].tx_inflight_pkt_num = Some(out.packet_number);
-                            self.sent_packets += 1;
+            if allow_tcp {
+                if let Some(idx) = self.tcp.iter().position(|t| t.link_id == out.link_id) {
+                    if self.tcp[idx].tx_inflight_pkt_num.is_none()
+                        && self.tcp[idx].pending_tx.is_empty()
+                    {
+                        let socket = self.tcp[idx].socket;
+                        match Self::submit_tcp_pkt(self.hw, socket, out.packet) {
+                            Ok(()) => {
+                                self.tcp[idx].tx_inflight_pkt_num = Some(out.packet_number);
+                                self.sent_packets += 1;
+                            }
+                            Err((ERR_BUSY, returned)) => {
+                                self.tcp[idx]
+                                    .pending_tx
+                                    .push((out.packet_number, returned));
+                            }
+                            Err((_rc, _dropped)) => {
+                                let dead = self.tcp[idx].socket;
+                                assoc.on_driver_complete(
+                                    out.link_id,
+                                    out.packet_number,
+                                    LinkTxOutcome::Failed,
+                                    now_us,
+                                );
+                                self.remove_tcp_socket(dead, assoc, now_us);
+                            }
                         }
-                        Err((ERR_BUSY, returned)) => {
-                            self.tcp[idx]
-                                .pending_tx
-                                .push((out.packet_number, returned));
-                        }
-                        Err((_rc, _dropped)) => {
-                            let dead = self.tcp[idx].socket;
-                            assoc.on_driver_complete(
-                                out.link_id,
-                                out.packet_number,
-                                LinkTxOutcome::Failed,
-                                now_us,
-                            );
-                            self.remove_tcp_socket(dead, assoc, now_us);
-                        }
+                    } else if self.tcp[idx].pending_tx.len() < 16 {
+                        self.tcp[idx]
+                            .pending_tx
+                            .push((out.packet_number, out.packet));
+                    } else {
+                        assoc.on_driver_complete(
+                            out.link_id,
+                            out.packet_number,
+                            LinkTxOutcome::Failed,
+                            now_us,
+                        );
                     }
-                } else if self.tcp[idx].pending_tx.len() < 16 {
-                    self.tcp[idx]
-                        .pending_tx
-                        .push((out.packet_number, out.packet));
-                } else {
-                    assoc.on_driver_complete(
-                        out.link_id,
-                        out.packet_number,
-                        LinkTxOutcome::Failed,
-                        now_us,
-                    );
+                    continue;
                 }
-                continue;
             }
 
             let peer = match out.link_id {
-                LINK_UDP if self.udp_peer.active => self.udp_peer,
-                LINK_SERIAL if self.serial_peer.active => self.serial_peer,
-                _ if self.udp_peer.active => self.udp_peer,
-                _ if self.serial_peer.active => self.serial_peer,
+                LINK_UDP if udp_peer.active => udp_peer,
+                LINK_SERIAL if serial_peer.active => serial_peer,
+                _ if udp_peer.active => udp_peer,
+                _ if serial_peer.active => serial_peer,
                 _ => {
                     assoc.on_driver_complete(
                         out.link_id,

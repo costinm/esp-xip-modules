@@ -36,3 +36,32 @@ PPP serial (`--port 243` / `0xf3`), and TCP sockets (`--stream 6`, TCP port `523
 
 No arguments. Closes active stream sessions, closes connected TCP bearer sockets,
 and resets `QuicMux` and `QuicLinkAssoc`. Returns an empty map.
+
+## 3. `config` — configure optional encryption and keys
+
+All fields are optional; omitted fields preserve their current value. Uses native
+runtime PSA Crypto (`xip_crypto`), with per-link granularity: by default Wi-Fi/UDP/NOW
+encryption (`encrypt`) is enabled while PPP serial (`serial_encrypt`) and TCP
+(`tcp_encrypt`) are disabled, and any bearer can be toggled independently for
+testing.
+
+### Request
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `encrypt` | `bool` | Enable (`true`) or disable (`false`) encryption on the Wi-Fi/UDP/NOW link (`LINK_UDP`). |
+| 2 | `node_secret` | `bytes` | 32-byte device secret (`empty` clears it). |
+| 3 | `api_key` | `bytes` | 32-byte shared key (`empty` clears it). |
+| 4 | `serial_encrypt` | `bool` | Enable (`true`) or disable (`false`) encryption on the PPP serial link (`LINK_SERIAL`, default `false`). |
+| 5 | `tcp_encrypt` | `bool` | Enable (`true`) or disable (`false`) encryption on TCP bearer links (`LINK_TCP_BASE+idx`, default `false`). |
+| 6 | `cipher` | `uint` | Select AEAD cipher (`0 = AES-128-GCM` default, `1 = AES-128-CCM`). |
+
+### Response
+
+| Tag | Field | Type | Description |
+|---:|---|---|---|
+| 1 | `encrypt` | `bool` | Current Wi-Fi/UDP/NOW encryption setting. |
+| 2 | `keys_active` | `bool` | Whether association AEAD keys or `node_secret` are configured. |
+| 3 | `serial_encrypt` | `bool` | Current PPP serial encryption setting. |
+| 4 | `tcp_encrypt` | `bool` | Current TCP bearer encryption setting. |
+| 5 | `cipher` | `uint` | Active AEAD cipher (`0 = AES-128-GCM`, `1 = AES-128-CCM`). |

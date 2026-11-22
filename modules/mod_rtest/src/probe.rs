@@ -197,7 +197,17 @@ impl Connection {
             hw.pkt_free(self.packet);
             self.packet = 0;
         }
-        if !self.quic {
+        if self.quic {
+            if !self.packet_final {
+                if let Ok(t) = stream(hw) {
+                    if let Some(close) = t.close {
+                        unsafe {
+                            let _ = close(hw.ctx(), self.handle);
+                        }
+                    }
+                }
+            }
+        } else {
             hw.socket_close(self.handle);
         }
     }
@@ -205,55 +215,62 @@ impl Connection {
         if hw.now_ms().saturating_sub(self.last) > 30_000 {
             return Err(ERR_AGAIN);
         }
-        if !self.ended || self.done || self.tcp_pending {
-            return Ok(());
-        }
-        if self.packet == 0 {
-            self.packet = hw.pkt_alloc()?;
-            let (p, cap) = hw.pkt_buf(self.packet)?;
-            let out = unsafe { core::slice::from_raw_parts_mut(p, cap) };
-            let mut n = self.response_len;
-            out.get_mut(..n)
-                .ok_or(ERR_SIZE)?
-                .copy_from_slice(&self.response[..n]);
-            self.response_len = 0;
-            if let Some(payload) = self.download.as_mut() {
-                n += payload.fill(&mut out[n..]);
+        for _ in 0..8 {
+            if !self.ended || self.done || self.tcp_pending {
+                return Ok(());
             }
-            self.packet_len = n;
-            self.packet_final = self.download.as_ref().is_none_or(ProbePayload::is_complete);
-        }
-        let rc = if self.quic {
-            let t = stream(hw)?;
-            unsafe {
-                t.write_pkt.ok_or(ERR_UNSUPPORTED)?(
-                    hw.ctx(),
+            if self.packet == 0 {
+                self.packet = match hw.pkt_alloc() {
+                    Ok(p) => p,
+                    Err(ERR_NOMEM | ERR_BUSY | ERR_AGAIN) => return Ok(()),
+                    Err(e) => return Err(e),
+                };
+                let (p, cap) = hw.pkt_buf(self.packet)?;
+                let max_chunk = if self.quic { cap.min(1380) } else { cap };
+                let out = unsafe { core::slice::from_raw_parts_mut(p, max_chunk) };
+                let mut n = self.response_len;
+                out.get_mut(..n)
+                    .ok_or(ERR_SIZE)?
+                    .copy_from_slice(&self.response[..n]);
+                self.response_len = 0;
+                if let Some(payload) = self.download.as_mut() {
+                    n += payload.fill(&mut out[n..]);
+                }
+                self.packet_len = n;
+                self.packet_final = self.download.as_ref().is_none_or(ProbePayload::is_complete);
+            }
+            let rc = if self.quic {
+                let t = stream(hw)?;
+                unsafe {
+                    t.write_pkt.ok_or(ERR_UNSUPPORTED)?(
+                        hw.ctx(),
+                        self.handle,
+                        self.packet,
+                        self.packet_len as u32,
+                        self.packet_final as u32,
+                    )
+                }
+            } else {
+                hw.socket_write_pkt(
                     self.handle,
                     self.packet,
+                    PKT_HEADROOM,
                     self.packet_len as u32,
-                    self.packet_final as u32,
                 )
+            };
+            if rc == ERR_BUSY || rc == ERR_AGAIN || rc == ERR_NOMEM {
+                return Ok(());
             }
-        } else {
-            hw.socket_write_pkt(
-                self.handle,
-                self.packet,
-                PKT_HEADROOM,
-                self.packet_len as u32,
-            )
-        };
-        if rc == ERR_BUSY || rc == ERR_AGAIN || rc == ERR_NOMEM {
-            return Ok(());
-        }
-        if rc < 0 {
-            return Err(rc);
-        }
-        self.packet = 0;
-        self.last = hw.now_ms();
-        if self.quic {
-            self.done = self.packet_final;
-        } else {
-            self.tcp_pending = true;
+            if rc < 0 {
+                return Err(rc);
+            }
+            self.packet = 0;
+            self.last = hw.now_ms();
+            if self.quic {
+                self.done = self.packet_final;
+            } else {
+                self.tcp_pending = true;
+            }
         }
         Ok(())
     }

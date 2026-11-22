@@ -128,6 +128,9 @@ static TABLE: Crypto = Crypto {
     hash_abort: Some(hash_abort),
     verify: Some(verify),
     random: Some(random),
+    aead_seal: None,
+    aead_open: None,
+    aead_pkt: None,
 };
 pub(super) unsafe extern "C" fn get_component(_: *mut c_void, name: *const c_char) -> *const c_void {
     if !name.is_null() && CStr::from_ptr(name).to_bytes() == b"crypto" {
