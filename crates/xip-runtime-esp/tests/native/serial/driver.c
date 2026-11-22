@@ -173,6 +173,11 @@ static void control_and_activity(void) {
     atomic_store(&s.pending_baud,115200);assert(xip_serial_request_baud(230400)==XIP_ERR_BUSY);
     assert(atomic_load(&s.pending_baud)==115200);atomic_store(&s.pending_baud,0);
     physical_rate=115200;tx_drains=0;assert(xip_serial_request_baud(230400)==0);assert(physical_rate==230400);
+    const uint8_t req_2m[]={0,0,0x1e,0x84,0x80}; /* 2000000 */
+    physical_rate=115200;fail_write=false;fail_drain=false;ack_len=0;tx_drains=0;
+    assert(xip_serial_control(0xf9,req_2m,5)==0);
+    assert(physical_rate==2000000u);
+    { const uint8_t expected_2m[]={0x7e,0xf9,1,0,0x1e,0x84,0x80,0x7e};assert(ack_len==sizeof(expected_2m));assert(!memcmp(ack_wire,expected_2m,ack_len)); }
     s.usb=true; /* Restore driver identity before teardown. */
 }
 

@@ -93,7 +93,7 @@ impl Via {
                     baud.or(p.uart_baud),
                 )
             };
-            let mut port = XipPort::open_baud(path, baud).map_err(|e| e.to_string())?;
+            let mut port = XipPort::open_ensuring_baud(path, baud)?;
             port.wake()?;
             Ok(Io::Uart(port, Reader::default()))
         }
@@ -107,7 +107,7 @@ impl Via {
     ) -> Result<(), String> {
         let io = Arc::new(Mutex::new(self.open(baud)?));
         let via = self.clone();
-        let profile = LinkProfile::udp_datagram(1, 1100, peer_cid);
+        let profile = circuit_profile(&io.lock().unwrap(), peer_cid);
         driver.add_link_with(id, PeerL2Address::new(1).unwrap(), profile, |pool, ingress| {
             let task_io = io.clone();
             let task_via = via.clone();
@@ -156,6 +156,13 @@ impl Via {
         }
         Err("explicit circuit response timed out".into())
     }
+}
+pub(crate) fn circuit_profile(io: &Io, peer_cid: ConnectionId) -> LinkProfile {
+    let mut profile = LinkProfile::udp_datagram(1, 1100, peer_cid);
+    if matches!(io, Io::Uart(_, _)) {
+        profile.encrypt = false;
+    }
+    profile
 }
 pub(crate) enum Io {
     Udp(std::net::UdpSocket),
@@ -341,5 +348,39 @@ mod tests {
             assert_eq!(v.unwrap(&[0x40, 7, 0, 0xc0, 9]), Some(&[0xc0, 9][..]));
             assert!(v.unwrap(&[0x40, 1, 0]).is_none());
         }
+    }
+
+    #[test]
+    fn uart_circuit_defaults_encryption_off_while_udp_defaults_on() {
+        use std::os::fd::FromRawFd;
+        let (mut master, mut slave) = (0, 0);
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    core::ptr::null_mut(),
+                    core::ptr::null(),
+                    core::ptr::null(),
+                )
+            },
+            0
+        );
+        let _master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave_file = unsafe { std::fs::File::from_raw_fd(slave) };
+        let path = std::fs::read_link(format!(
+            "/proc/self/fd/{}",
+            std::os::fd::AsRawFd::as_raw_fd(&slave_file)
+        ))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+        let port = XipPort::open_baud(path, Some(115_200)).unwrap();
+        let uart_io = Io::Uart(port, Reader::default());
+        let udp_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let udp_io = Io::Udp(udp_socket);
+        let cid = ConnectionId::new(1).unwrap();
+        assert!(!circuit_profile(&uart_io, cid).encrypt);
+        assert!(circuit_profile(&udp_io, cid).encrypt);
     }
 }

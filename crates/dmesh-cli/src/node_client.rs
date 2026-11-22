@@ -1,13 +1,24 @@
 //! Host client adapter over `quic-link` (`TokioAssocDriver`) and `quic-mux` (`TokioMux`).
 
-use std::{future::Future, net::SocketAddr, time::Duration};
+use std::{
+    future::Future,
+    io::{Read, Write},
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use quic_base::{DEFAULT_HEADROOM, DEFAULT_MAX_PAYLOAD};
+use quic_base::DEFAULT_HEADROOM;
 use quic_link::{
     AssocConfig, ConnectionId, LinkId, LinkName, LinkProfile, PeerL2Address, TokioAssocDriver,
     TokioUdpLink, wildcard_bind,
 };
-use quic_mux::{TokioMux, TokioMuxConfig};
+use quic_mux::{MuxStream, TokioMux, TokioMuxConfig};
+
+/// Maximum QUIC packet size accepted by `xip_runtime` (`XIP_QUIC_MAX_PACKET = 1448`).
+const XIP_QUIC_LINK_MTU: usize = 1448;
+/// Maximum inner `quic-mux` frame size leaving headroom for `ShortHeader` and piggybacked `ACK`s.
+const XIP_QUIC_MUX_MTU: usize = 1380;
 
 pub(crate) struct Response {
     pub bytes: Vec<u8>,
@@ -24,7 +35,7 @@ where
 {
     let (tx, rx, driver_task) = driver.spawn();
     let (mux, _acceptor) = TokioMux::spawn(true, TokioMuxConfig::default());
-    mux.add_packet_link(tx, rx, DEFAULT_MAX_PAYLOAD, 10);
+    mux.add_packet_link(tx, rx, XIP_QUIC_MUX_MTU, 10);
     let op_mux = mux.clone();
     let operation = async move {
         let result = operation(op_mux).await;
@@ -47,7 +58,9 @@ fn attach_uart(
     path: &str,
     baud: Option<u32>,
 ) -> Result<(), String> {
-    let port = uart_codec::host::UartPort::open(path, baud).map_err(|error| error.to_string())?;
+    crate::xip_wire::XipPort::ensure_baud(path, baud)?;
+    let mut port = uart_codec::host::UartPort::open(path, baud).map_err(|error| error.to_string())?;
+    let _ = port.discard_input_blocking(Duration::ZERO);
     let mut bearer = port
         .into_tokio(LinkName::new("uart").unwrap())
         .map_err(|error| error.to_string())?;
@@ -67,7 +80,13 @@ fn attach_uart(
             eprintln!("dmesh_uart_log_drop pool={}", received.pool_drops);
         }
     });
-    let profile = LinkProfile::udp_datagram(1, DEFAULT_MAX_PAYLOAD, peer_cid);
+    let mut profile =
+        LinkProfile::udp_datagram(1, XIP_QUIC_LINK_MTU, peer_cid).with_encryption(false);
+    profile.congestion_mode = quic_link::CongestionMode::FlowControlled {
+        max_inflight_bytes: 6 * 1024,
+        max_inflight_packets: 4,
+    };
+    profile.initial_rtt_us = 150_000;
     driver
         .add_link_with(
             id,
@@ -103,7 +122,7 @@ fn attach_udp(
         id,
         udp_link,
         peer,
-        LinkProfile::udp_datagram(1, DEFAULT_MAX_PAYLOAD, peer_cid),
+        LinkProfile::udp_datagram(1, XIP_QUIC_LINK_MTU, peer_cid),
     );
     Ok(())
 }
@@ -519,6 +538,223 @@ async fn read_nan_stream(
     } else {
         Ok(())
     }
+}
+
+struct CachedQuicSession {
+    endpoint: String,
+    rt: Arc<tokio::runtime::Runtime>,
+    mux: TokioMux,
+    driver_task: tokio::task::JoinHandle<()>,
+}
+
+static CACHED_QUIC_SESSION: Mutex<Option<CachedQuicSession>> = Mutex::new(None);
+
+pub(crate) fn clear_cached_flash_session(endpoint: &str) {
+    if let Ok(mut guard) = CACHED_QUIC_SESSION.lock() {
+        if guard.as_ref().is_some_and(|s| s.endpoint == endpoint) {
+            if let Some(session) = guard.take() {
+                session.mux.close();
+                session.driver_task.abort();
+                let _ = session.rt.block_on(session.driver_task);
+            }
+        }
+    }
+}
+
+fn get_flash_session(endpoint: &str) -> Result<(Arc<tokio::runtime::Runtime>, TokioMux), String> {
+    let mut guard = CACHED_QUIC_SESSION
+        .lock()
+        .map_err(|_| "QUIC session mutex poisoned".to_owned())?;
+    if let Some(session) = guard.as_ref() {
+        if session.endpoint == endpoint && !session.driver_task.is_finished() {
+            return Ok((session.rt.clone(), session.mux.clone()));
+        }
+    }
+    *guard = None;
+
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?,
+    );
+    let target = endpoint.to_owned();
+    let (mux, driver_task) = rt.block_on(async move {
+        let mut driver = new_driver();
+        let peer_cid = ConnectionId::new(1).unwrap();
+        if target.starts_with("udp://") {
+            let peer = crate::client::parse_udp_peer(&target)?;
+            attach_udp(&mut driver, LinkId(1), peer_cid, wildcard_bind(peer, 0), peer)?;
+        } else {
+            attach_uart(&mut driver, LinkId(1), peer_cid, &target, None)?;
+        }
+        let (tx, rx, driver_task) = driver.spawn();
+        let (mux, _acceptor) = TokioMux::spawn(true, TokioMuxConfig::default());
+        mux.add_packet_link(tx, rx, XIP_QUIC_MUX_MTU, 10);
+        Ok::<_, String>((mux, driver_task))
+    })?;
+    *guard = Some(CachedQuicSession {
+        endpoint: endpoint.to_owned(),
+        rt: rt.clone(),
+        mux: mux.clone(),
+        driver_task,
+    });
+    Ok((rt, mux))
+}
+
+pub(crate) struct QuicFlashStream {
+    endpoint: String,
+    rt: Arc<tokio::runtime::Runtime>,
+    stream: Option<MuxStream>,
+    write_shutdown: bool,
+    errored: bool,
+}
+
+impl QuicFlashStream {
+    pub(crate) fn shutdown_write(&mut self) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+        if self.write_shutdown {
+            return Ok(());
+        }
+        let Some(stream) = self.stream.as_mut() else {
+            return Err("QUIC flash stream is closed".to_owned());
+        };
+        let res = self
+            .rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(60), stream.shutdown()).await });
+        match res {
+            Ok(Ok(())) => {
+                self.write_shutdown = true;
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                self.errored = true;
+                Err(format!("QUIC stream shutdown: {e}"))
+            }
+            Err(_) => {
+                self.errored = true;
+                Err("QUIC stream shutdown timed out".to_owned())
+            }
+        }
+    }
+}
+
+impl Read for QuicFlashStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use tokio::io::AsyncReadExt;
+        if let Err(err) = self.shutdown_write() {
+            return Err(std::io::Error::other(err));
+        }
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(0);
+        };
+        let res = self
+            .rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(60), stream.read(buf)).await });
+        match res {
+            Ok(Ok(n)) => Ok(n),
+            Ok(Err(e)) => {
+                self.errored = true;
+                Err(e)
+            }
+            Err(_) => {
+                self.errored = true;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "QUIC stream read timed out",
+                ))
+            }
+        }
+    }
+}
+
+impl Write for QuicFlashStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use tokio::io::AsyncWriteExt;
+        let Some(stream) = self.stream.as_mut() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "QUIC flash stream is closed",
+            ));
+        };
+        let res = self
+            .rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(60), stream.write(buf)).await });
+        match res {
+            Ok(Ok(n)) => Ok(n),
+            Ok(Err(e)) => {
+                self.errored = true;
+                Err(e)
+            }
+            Err(_) => {
+                self.errored = true;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "QUIC stream write timed out",
+                ))
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(());
+        };
+        let res = self
+            .rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(60), stream.flush()).await });
+        match res {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => {
+                self.errored = true;
+                Err(e)
+            }
+            Err(_) => {
+                self.errored = true;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "QUIC stream flush timed out",
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for QuicFlashStream {
+    fn drop(&mut self) {
+        drop(self.stream.take());
+        self.rt
+            .block_on(async { tokio::time::sleep(Duration::from_millis(5)).await });
+        if self.errored {
+            clear_cached_flash_session(&self.endpoint);
+        }
+    }
+}
+
+pub(crate) fn open_flash_stream(endpoint: &str) -> Result<QuicFlashStream, String> {
+    let (rt, mux) = get_flash_session(endpoint)?;
+    let stream = match rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(15), mux.open_bidi()).await
+    }) {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => {
+            clear_cached_flash_session(endpoint);
+            return Err(format!("open QUIC flash stream: {e}"));
+        }
+        Err(_) => {
+            clear_cached_flash_session(endpoint);
+            return Err("open QUIC flash stream timed out".to_owned());
+        }
+    };
+    Ok(QuicFlashStream {
+        endpoint: endpoint.to_owned(),
+        rt,
+        stream: Some(stream),
+        write_shutdown: false,
+        errored: false,
+    })
 }
 
 #[cfg(test)]

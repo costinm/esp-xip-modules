@@ -436,6 +436,7 @@ impl QlinkDeviceClient {
                 },
                 framing: LinkFraming::Datagram { peer_cid: cid },
                 initial_rtt_us: if is_serial { 120_000 } else { 20_000 },
+                encrypt: false,
             },
         );
         Self {
@@ -745,6 +746,7 @@ impl Quic2DatagramDeviceClient {
                 },
                 framing: LinkFraming::Datagram { peer_cid: cid },
                 initial_rtt_us: if is_serial { 120_000 } else { 20_000 },
+                encrypt: false,
             },
         );
         Self {
@@ -1069,6 +1071,7 @@ impl Quic2TcpDeviceClient {
                 },
                 framing: LinkFraming::SelfDelimitingStream { peer_cid: cid },
                 initial_rtt_us: 10_000,
+                encrypt: false,
             },
         );
 

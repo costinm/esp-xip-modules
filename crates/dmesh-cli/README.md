@@ -226,9 +226,17 @@ dmesh-cli DEVICE --reset                            # Pulse the local serial RTS
 log.watch is a service request and can use Wi-Fi. --watch and
 --reset require a local serial path or a catalog entry with serial_id; they
 cannot reset a remote device through lmesh. --watch --interactive also accepts
-terminal input. A physical UART bridge starts at 115200 and the QUIC handshake upgrades it to
-921600 (`transport.set uart=9`); a catalog uart_baud or an explicit --baud is a legacy override for devices
-with a persisted `uart.baud`; packetized USB/JTAG needs no nominal baud. A reset or
+terminal input. A physical UART bridge starts at 115200; RISC-V devices (`esp32c2`/`c3`/`c5`/`c6`/`h2`/`p4`)
+default to `uart_baud = 2000000` in device config (`device.toml`, configurable via
+`dmesh-cli devices baud DEVICE RATE|default` so slower bridges or classic `esp32`
+boards can keep `115200` or pick an intermediate rate). Opening a configured serial
+target automatically ensures the volatile `0xf9` switch when needed, or switch manually
+with `dmesh-cli SERIAL|DEVICE baud 2000000` (supported rates: `115200..921600`,
+`1000000`, `1152000`, `1500000`, `2000000`, `2500000`, `3000000`, `3500000`, `4000000`,
+returning with `dmesh-cli SERIAL|DEVICE baud 115200`). Alternatively
+`transport.set uart=9` selects `921600` and `--uart_baud=N` selects an explicit rate;
+a configured `uart_baud` or an explicit `--baud` is an override for subsequent commands;
+packetized USB/JTAG needs no nominal baud. A reset or
 boot line alone is not proof of Main health: follow it with firmware.identity
 and status.
 

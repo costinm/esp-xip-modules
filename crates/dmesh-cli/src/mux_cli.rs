@@ -3,12 +3,9 @@
 //! including multipath sessions combining TCP/UDS with PPP serial.
 
 use crate::{
-    client::{fresh_request_id, is_fatal_diagnostic, parse_udp_peer},
+    client::{fresh_request_id, is_fatal_diagnostic, parse_udp_peer, render_stream_response},
     device::load_device,
-    schema::{
-        encode_stream_argv_with_id, is_stream_command_name, load_tagged_schema,
-        render_device_record,
-    },
+    schema::{encode_stream_argv_with_id, is_stream_command_name},
     xip_wire::{Event, PORT_MUX, Reader, XipPort, encode_record},
 };
 pub use quic_mux::{AssociationId, TokioMux, TokioMuxAcceptor, TokioMuxConfig};
@@ -223,7 +220,7 @@ pub async fn connect_mux_client(
     }
     let mut serial_guard = None;
     if let Some(serial_path) = &target.serial {
-        let port = XipPort::open_baud(serial_path.clone(), target.baud)
+        let port = XipPort::open_ensuring_baud(serial_path.clone(), target.baud)
             .map_err(|e| format!("open serial {serial_path}: {e}"))?;
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
         let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -237,6 +234,19 @@ pub async fn connect_mux_client(
 pub async fn mux_exchange(mux: &TokioMux, request: &[u8]) -> Result<Vec<u8>, String> {
     let mut stream = mux.open_bidi().await.map_err(|e| e.to_string())?;
     quic_tools::exchange(&mut stream, &[request])
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Execute a `mesh::wire` self-delimiting CBOR record + optional raw body exchange
+/// over an open `TokioMux` client session (`mesh-cli` wire compatible).
+pub async fn mux_exchange_cbor_stream(
+    mux: &TokioMux,
+    request: &mesh::tagged::TaggedRecord,
+    body: &[u8],
+) -> Result<mesh::wire::CborStreamFrame, String> {
+    let mut stream = mux.open_bidi().await.map_err(|e| e.to_string())?;
+    mesh::wire::exchange_cbor_stream(&mut stream, request, body)
         .await
         .map_err(|e| e.to_string())
 }
@@ -266,11 +276,25 @@ impl MuxServerHandler {
         use mesh::mesh_api::envelope::{Name, encode_numeric_error, encode_numeric_response};
         use tokio::io::AsyncWriteExt;
 
+        async fn finish_unary<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+            stream: &mut S,
+        ) -> std::io::Result<()> {
+            stream.shutdown().await?;
+            // Wait briefly for the peer's FIN so dropping `MuxStream` does not
+            // emit an unnecessary `STOP_SENDING(0)` while `writer.shutdown()` is in flight.
+            let _ = tokio::time::timeout(
+                Duration::from_millis(50),
+                tokio::io::copy(stream, &mut tokio::io::sink()),
+            )
+            .await;
+            Ok(())
+        }
+
         let (envelope, mut framed) = mesh::read_envelope_prefix(stream)
             .await
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         let Some(record) = envelope.record() else {
-            return framed.shutdown().await;
+            return finish_unary(&mut framed).await;
         };
         let id = record.id.unwrap_or(0);
         let (comp, meth, fields, valid_stream) = (
@@ -285,7 +309,10 @@ impl MuxServerHandler {
             {
                 quic_tools::serve_framed_probe_stream(id, fields.as_deref(), &mut framed).await
             }
-            (Some(Name::Tag(9)), Some(Name::Tag(1)) | Some(Name::Text(b"status"))) => {
+            (
+                Some(Name::Tag(9)) | Some(Name::Text(b"diagnostic")),
+                Some(Name::Tag(1)) | Some(Name::Text(b"status")),
+            ) => {
                 let mut out = [0u8; 64];
                 if let Some(used) = encode_numeric_response(
                     9,
@@ -296,7 +323,7 @@ impl MuxServerHandler {
                 ) {
                     framed.write_all(&out[..used]).await?;
                 }
-                framed.shutdown().await
+                finish_unary(&mut framed).await
             }
             _ => {
                 let comp_id = match comp {
@@ -313,7 +340,7 @@ impl MuxServerHandler {
                 {
                     framed.write_all(&out[..used]).await?;
                 }
-                framed.shutdown().await
+                finish_unary(&mut framed).await
             }
         }
     }
@@ -422,7 +449,7 @@ pub async fn start_mux_server(
         let mut shared_server_mux: Option<TokioMux> = None;
 
         if let Some(serial_path) = serial_cfg {
-            let port = XipPort::open_baud(serial_path.clone(), serial_baud)
+            let port = XipPort::open_ensuring_baud(serial_path.clone(), serial_baud)
                 .map_err(|e| format!("open serial {serial_path}: {e}"))?;
             let (mux, acceptor) = TokioMux::spawn(false, mux_cfg.clone());
             let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -705,7 +732,7 @@ pub fn run_client_cli(arguments: &[String]) -> Result<(), String> {
                             "dmesh_cli_stream_command bearer={bearer} target={label} method={method_name} fin=true bytes={} elapsed_us={} {}",
                             response.len(),
                             started.elapsed().as_micros(),
-                            render_device_record(&load_tagged_schema(), &response),
+                            render_stream_response(&request, &response),
                         );
                         Ok(())
                     }
@@ -830,80 +857,81 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cli_mux_over_ppp_serial_and_multipath_tcp_plus_serial() {
-        // `openpty`'s master `/proc/self/fd/N` symlink resolves to `/dev/ptmx` (which opens a fresh
-        // unrelated pty!), so bridge two real slave `/dev/pts/X` endpoints in-memory to emulate a
-        // full-duplex UART cable with interleaved device boot text.
-        fn spawn_pty_cable() -> (String, String, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
-            let (_, slave_a, mut master_a, keep_a) = open_pty_pair();
-            let (_, slave_b, mut master_b, keep_b) = open_pty_pair();
-            for f in [&master_a, &master_b] {
-                unsafe {
-                    let flags = libc::fcntl(f.as_raw_fd(), libc::F_GETFL);
-                    libc::fcntl(f.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+    // `openpty`'s master `/proc/self/fd/N` symlink resolves to `/dev/ptmx` (which opens a fresh
+    // unrelated pty!), so bridge two real slave `/dev/pts/X` endpoints in-memory to emulate a
+    // full-duplex UART cable with interleaved device boot text.
+    fn spawn_pty_cable() -> (String, String, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let (_, slave_a, mut master_a, keep_a) = open_pty_pair();
+        let (_, slave_b, mut master_b, keep_b) = open_pty_pair();
+        for f in [&master_a, &master_b] {
+            unsafe {
+                let flags = libc::fcntl(f.as_raw_fd(), libc::F_GETFL);
+                libc::fcntl(f.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+        let wire_stop = Arc::new(AtomicBool::new(false));
+        let wire_stop_bg = wire_stop.clone();
+        let wire = std::thread::spawn(move || {
+            let _keep = (keep_a, keep_b);
+            use std::collections::VecDeque;
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 4096];
+            let mut a_to_b = VecDeque::<u8>::new();
+            let mut b_to_a = VecDeque::<u8>::new();
+            // Inject an ESP_LOG line before any PPP records to verify sideband log preservation.
+            b_to_a.extend(b"I (120) main: mod_mux ready\r\n");
+            while !wire_stop_bg.load(Ordering::Acquire) {
+                let mut moved = false;
+                if a_to_b.len() < 64 * 1024 {
+                    if let Ok(n) = master_a.read(&mut buf) {
+                        if n > 0 {
+                            a_to_b.extend(&buf[..n]);
+                            moved = true;
+                        }
+                    }
+                }
+                if b_to_a.len() < 64 * 1024 {
+                    if let Ok(n) = master_b.read(&mut buf) {
+                        if n > 0 {
+                            b_to_a.extend(&buf[..n]);
+                            moved = true;
+                        }
+                    }
+                }
+                if !a_to_b.is_empty() {
+                    let (front, _) = a_to_b.as_slices();
+                    match master_b.write(front) {
+                        Ok(n) if n > 0 => {
+                            a_to_b.drain(..n);
+                            moved = true;
+                        }
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(e) => panic!("master_b write failed: {e}"),
+                    }
+                }
+                if !b_to_a.is_empty() {
+                    let (front, _) = b_to_a.as_slices();
+                    match master_a.write(front) {
+                        Ok(n) if n > 0 => {
+                            b_to_a.drain(..n);
+                            moved = true;
+                        }
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(e) => panic!("master_a write failed: {e}"),
+                    }
+                }
+                if !moved {
+                    std::thread::sleep(Duration::from_micros(250));
                 }
             }
-            let wire_stop = Arc::new(AtomicBool::new(false));
-            let wire_stop_bg = wire_stop.clone();
-            let wire = std::thread::spawn(move || {
-                let _keep = (keep_a, keep_b);
-                use std::collections::VecDeque;
-                use std::io::{Read, Write};
-                let mut buf = [0u8; 4096];
-                let mut a_to_b = VecDeque::<u8>::new();
-                let mut b_to_a = VecDeque::<u8>::new();
-                // Inject an ESP_LOG line before any PPP records to verify sideband log preservation.
-                b_to_a.extend(b"I (120) main: mod_mux ready\r\n");
-                while !wire_stop_bg.load(Ordering::Acquire) {
-                    let mut moved = false;
-                    if a_to_b.len() < 64 * 1024 {
-                        if let Ok(n) = master_a.read(&mut buf) {
-                            if n > 0 {
-                                a_to_b.extend(&buf[..n]);
-                                moved = true;
-                            }
-                        }
-                    }
-                    if b_to_a.len() < 64 * 1024 {
-                        if let Ok(n) = master_b.read(&mut buf) {
-                            if n > 0 {
-                                b_to_a.extend(&buf[..n]);
-                                moved = true;
-                            }
-                        }
-                    }
-                    if !a_to_b.is_empty() {
-                        let (front, _) = a_to_b.as_slices();
-                        match master_b.write(front) {
-                            Ok(n) if n > 0 => {
-                                a_to_b.drain(..n);
-                                moved = true;
-                            }
-                            Ok(_) => {}
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                            Err(e) => panic!("master_b write failed: {e}"),
-                        }
-                    }
-                    if !b_to_a.is_empty() {
-                        let (front, _) = b_to_a.as_slices();
-                        match master_a.write(front) {
-                            Ok(n) if n > 0 => {
-                                b_to_a.drain(..n);
-                                moved = true;
-                            }
-                            Ok(_) => {}
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                            Err(e) => panic!("master_a write failed: {e}"),
-                        }
-                    }
-                    if !moved {
-                        std::thread::sleep(Duration::from_micros(250));
-                    }
-                }
-            });
-            (slave_a, slave_b, wire_stop, wire)
-        }
+        });
+        (slave_a, slave_b, wire_stop, wire)
+    }
+
+    #[test]
+    fn cli_mux_over_ppp_serial_and_multipath_tcp_plus_serial() {
 
         // 1. Pure PPP serial (`mux+serial://`) bidirectional probe (also verifies `XipPort` Drop
         // clears `TIOCEXCL` so reopening the same `/dev/pts/X` for a second CLI invocation works!).
@@ -988,5 +1016,107 @@ mod tests {
         server_thread2.join().unwrap().unwrap();
         wire_stop2.store(true, Ordering::Release);
         wire2.join().unwrap();
+    }
+
+    #[test]
+    fn mesh_cli_cbor_stream_interoperates_with_dmesh_cli_mux_and_ppp() {
+        let dir = tempfile::tempdir().unwrap();
+        let uds_path = dir.path().join("mesh-interop.sock");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // 1. TCP & UDS (`TokioMux` per accepted client connection)
+        let tcp_uds_server = rt
+            .block_on(start_mux_server(
+                MuxServerConfig {
+                    tcp: Some("127.0.0.1:0".parse().unwrap()),
+                    uds: Some(uds_path.clone()),
+                    ..Default::default()
+                },
+                default_mux_server_handler(),
+            ))
+            .unwrap();
+        let tcp_addr = tcp_uds_server.tcp_addr.unwrap();
+
+        let check_client = |mux: TokioMux| async move {
+            for req in [
+                mesh::tagged::TaggedRecord {
+                    component: mesh::tagged::NameOrTag::Tag(9),
+                    method: mesh::tagged::NameOrTag::Tag(1),
+                    id: Some(serde_json::json!(101)),
+                    ..Default::default()
+                },
+                mesh::tagged::TaggedRecord {
+                    component: mesh::tagged::NameOrTag::Name("diagnostic".to_owned()),
+                    method: mesh::tagged::NameOrTag::Name("status".to_owned()),
+                    id: Some(serde_json::json!(102)),
+                    ..Default::default()
+                },
+            ] {
+                let expected_id = req.id.clone();
+                let frame = mux_exchange_cbor_stream(&mux, &req, &[]).await.unwrap();
+                assert_eq!(frame.record.id, expected_id);
+                assert_eq!(frame.record.result, Some(serde_json::json!({"1": "dmesh-cli"})));
+                assert!(frame.body.is_empty());
+            }
+        };
+
+        rt.block_on(async {
+            for target in [
+                MuxClientTarget {
+                    tcp: Some(tcp_addr),
+                    ..Default::default()
+                },
+                MuxClientTarget {
+                    uds: Some(uds_path.clone()),
+                    ..Default::default()
+                },
+            ] {
+                let (mux, _acc, _) =
+                    connect_mux_client(&target, TokioMuxConfig::default())
+                        .await
+                        .unwrap();
+                check_client(mux.clone()).await;
+                mux.close();
+            }
+        });
+        rt.block_on(tcp_uds_server.stop()).unwrap();
+
+        // 2. PPP serial (`PORT_MUX = 245`) over a PTY UART pair
+        let (slave_a, slave_b, wire_stop, wire) = spawn_pty_cable();
+        let ppp_server = rt
+            .block_on(start_mux_server(
+                MuxServerConfig {
+                    serial: Some(slave_b),
+                    baud: Some(921600),
+                    ..Default::default()
+                },
+                default_mux_server_handler(),
+            ))
+            .unwrap();
+        rt.block_on(async {
+            let (mux, _acc, mut serial_guard) = connect_mux_client(
+                &MuxClientTarget {
+                    serial: Some(slave_a),
+                    baud: Some(921600),
+                    ..Default::default()
+                },
+                TokioMuxConfig::default(),
+            )
+            .await
+            .unwrap();
+            check_client(mux.clone()).await;
+            mux.send_connection_close(0);
+            for _ in 0..50 {
+                if mux.is_flushed() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            mux.close();
+            serial_guard.take().unwrap().shutdown().unwrap();
+        });
+        rt.block_on(ppp_server.stop()).unwrap();
+        wire_stop.store(true, Ordering::Release);
+        wire.join().unwrap();
     }
 }

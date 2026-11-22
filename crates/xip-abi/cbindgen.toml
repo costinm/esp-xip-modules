@@ -49,7 +49,7 @@ _Static_assert(sizeof(xip_quic) == 44, "xip_quic layout");
 _Static_assert(sizeof(xip_stream_packet) == 12, "xip_stream_packet layout");
 _Static_assert(sizeof(xip_call) == 88, "xip_call layout");
 _Static_assert(sizeof(xip_identity) == 16, "xip_identity layout");
-_Static_assert(sizeof(xip_crypto) == 36, "xip_crypto layout");
+_Static_assert(sizeof(xip_crypto) == 48, "xip_crypto layout");
 _Static_assert(sizeof(xip_native) == 132, "xip_native layout");
 _Static_assert(sizeof(xip_power) == 44, "xip_power layout");
 _Static_assert(sizeof(xip_host) == 180, "xip_host layout");

@@ -19,6 +19,8 @@ pub const PORT_MUX: u32 = 245;
 pub const PORT_QUIC: u32 = 247;
 /// Local byte-triggered wake acknowledgement; payload 01 means the worker is awake.
 pub const PORT_WAKE: u32 = 248;
+/// Volatile physical-UART baud exchange control port (`uart_codec::BAUD_MARKER = 0xf9`).
+pub const PORT_BAUD: u32 = uart_codec::BAUD_MARKER as u32;
 /// Live NAN reports; kept separate from module ports, wake and diagnostic trace.
 pub const PORT_NAN_REPORT: u32 = 251;
 /// The version of the CBOR datagram: after the SCID comes the envelope `{1: component, 2: method, 3: id, 5: fields}`.
@@ -208,9 +210,30 @@ impl XipPort {
         tio.c_cflag |= libc::CREAD | libc::CLOCAL;
         // Closing the CLI must not drop modem lines and reset a CP210x board.
         tio.c_cflag &= !libc::HUPCL;
-        let speed=match baud {9600=>libc::B9600,19200=>libc::B19200,38400=>libc::B38400,
-            57600=>libc::B57600,115200=>libc::B115200,230400=>libc::B230400,
-            460800=>libc::B460800,921600=>libc::B921600,_=>return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,"unsupported UART baud"))};
+        let speed = match baud {
+            9600 => libc::B9600,
+            19200 => libc::B19200,
+            38400 => libc::B38400,
+            57600 => libc::B57600,
+            115200 => libc::B115200,
+            230400 => libc::B230400,
+            460800 => libc::B460800,
+            921600 => libc::B921600,
+            1_000_000 => libc::B1000000,
+            1_152_000 => libc::B1152000,
+            1_500_000 => libc::B1500000,
+            2_000_000 => libc::B2000000,
+            2_500_000 => libc::B2500000,
+            3_000_000 => libc::B3000000,
+            3_500_000 => libc::B3500000,
+            4_000_000 => libc::B4000000,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "unsupported UART baud",
+                ));
+            }
+        };
         unsafe {libc::cfsetispeed(&mut tio,speed);libc::cfsetospeed(&mut tio,speed);}
         if unsafe {libc::tcsetattr(fd,libc::TCSANOW,&tio)}<0 {return Err(std::io::Error::last_os_error());}
         Ok(())
@@ -254,30 +277,144 @@ impl XipPort {
         Ok(())
     }
 
+    /// Update host line speed on an already-open port.
+    pub fn set_baud(&self, baud: u32) -> std::io::Result<()> {
+        Self::set_raw(self.file.as_raw_fd(), baud)
+    }
+
+    /// Probe whether the peer responds to an idempotent `PORT_WAKE` within `timeout`.
+    pub fn try_wake(&mut self, timeout: std::time::Duration) -> Result<bool, String> {
+        self.flush_input().map_err(|e| e.to_string())?;
+        let mut reader = Reader::default();
+        let deadline = std::time::Instant::now() + timeout;
+        let mut next = std::time::Instant::now();
+        while std::time::Instant::now() < deadline {
+            if std::time::Instant::now() >= next {
+                self.write_all(&[FLAG, FLAG])
+                    .and_then(|_| self.write_all(&encode_record(PORT_WAKE, &[])))
+                    .map_err(|e| e.to_string())?;
+                next = std::time::Instant::now() + std::time::Duration::from_millis(80);
+            }
+            let bytes = self.read().map_err(|e| e.to_string())?;
+            for event in reader.feed(&bytes) {
+                if event == Event::Record(PORT_WAKE, vec![1]) {
+                    return Ok(true);
+                }
+            }
+            let text = reader.take_text();
+            if crate::client::is_fatal_diagnostic(&String::from_utf8_lossy(&text)) {
+                return Err(format!(
+                    "device reported a fatal diagnostic while waking: {}",
+                    String::from_utf8_lossy(&text)
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Ok(false)
+    }
+
+    /// Exchange the shared volatile `0xf9` baud control frame, wait for ACK at
+    /// the current rate, then switch local host line speed to `baud`.
+    pub fn negotiate_baud(&mut self, baud: u32) -> Result<(), String> {
+        let request = uart_codec::BaudHandshake {
+            acknowledged: false,
+            baud,
+        }
+        .record()
+        .ok_or_else(|| format!("unsupported UART baud {baud}"))?;
+        let frame = encode_record(PORT_BAUD, &request[1..]);
+        let mut wire = Vec::with_capacity(frame.len() + 2);
+        wire.extend_from_slice(&[FLAG, FLAG]);
+        wire.extend_from_slice(&frame);
+
+        let _ = self.flush_input();
+        let mut reader = Reader::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut next_tx = std::time::Instant::now();
+        let expected_payload = {
+            let ack = uart_codec::BaudHandshake {
+                acknowledged: true,
+                baud,
+            }
+            .record()
+            .expect("validated above");
+            ack[1..].to_vec()
+        };
+        while std::time::Instant::now() < deadline {
+            if std::time::Instant::now() >= next_tx {
+                self.write_all(&wire).map_err(|e| e.to_string())?;
+                next_tx = std::time::Instant::now() + std::time::Duration::from_millis(150);
+            }
+            let bytes = self.read().map_err(|e| e.to_string())?;
+            for event in reader.feed(&bytes) {
+                if let Event::Record(PORT_BAUD, payload) = event {
+                    if payload == expected_payload {
+                        Self::set_raw(self.file.as_raw_fd(), baud).map_err(|e| e.to_string())?;
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        let _ = self.flush_input();
+                        return Ok(());
+                    }
+                }
+            }
+            let text = reader.take_text();
+            if crate::client::is_fatal_diagnostic(&String::from_utf8_lossy(&text)) {
+                return Err(format!(
+                    "device reported a fatal diagnostic during baud switch: {}",
+                    String::from_utf8_lossy(&text)
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Err(format!(
+            "baud ACK timeout negotiating {baud} on {}; device may still be at previous rate or reset needed",
+            self.path
+        ))
+    }
+
     /// Request wake immediately, then retry only the idempotent wake record.
     /// Any surviving byte is enough for the device to ACK after restoring active
     /// roles. Keep this same exclusive owner for the subsequent real command.
     pub fn wake(&mut self) -> Result<(),String> {
-        self.flush_input().map_err(|e|e.to_string())?;
-        let mut reader=Reader::default();
-        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(12);
-        let mut next=std::time::Instant::now();
-        while std::time::Instant::now()<deadline {
-            if std::time::Instant::now()>=next {
-                self.write_all(&encode_record(PORT_WAKE,&[])).map_err(|e|e.to_string())?;
-                next=std::time::Instant::now()+std::time::Duration::from_millis(100);
-            }
-            let bytes=self.read().map_err(|e|e.to_string())?;
-            for event in reader.feed(&bytes) {
-                if event==Event::Record(PORT_WAKE,vec![1]) {return Ok(());}
-            }
-            let text=reader.take_text();
-            if crate::client::is_fatal_diagnostic(&String::from_utf8_lossy(&text)) {
-                return Err(format!("device reported a fatal diagnostic while waking: {}", String::from_utf8_lossy(&text)));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
+        if self.try_wake(std::time::Duration::from_secs(12))? {
+            return Ok(());
         }
         Err(format!("no awake acknowledgement from {}; check firmware and serial selection",self.path))
+    }
+
+    /// Open `path` ensuring physical UART speed matches `baud` when `baud` differs
+    /// from the 115200 boot default: if an initial wake probe at `target` gets no
+    /// reply, check 115200 and perform the volatile `0xf9` baud exchange.
+    pub fn open_ensuring_baud(path: impl Into<String>, baud: Option<u32>) -> Result<Self, String> {
+        let mut port = Self::open_baud(path, baud).map_err(|e| e.to_string())?;
+        let Some(target) = baud.filter(|&rate| rate != 115_200) else {
+            return Ok(port);
+        };
+        if port.try_wake(std::time::Duration::from_millis(120))? {
+            return Ok(port);
+        }
+        port.set_baud(115_200).map_err(|e| e.to_string())?;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        if port.try_wake(std::time::Duration::from_millis(200))? {
+            port.negotiate_baud(target)?;
+            if !port.try_wake(std::time::Duration::from_millis(500))? {
+                return Err(format!(
+                    "device acknowledged {target} on {} but did not wake at the new rate",
+                    port.path
+                ));
+            }
+        } else {
+            port.set_baud(target).map_err(|e| e.to_string())?;
+        }
+        Ok(port)
+    }
+
+    /// Ensure the peer on `path` is switched to `baud` when `baud` differs from 115200,
+    /// releasing the temporary lock before handing off to another session owner.
+    pub fn ensure_baud(path: &str, baud: Option<u32>) -> Result<(), String> {
+        if baud.is_some_and(|rate| rate != 115_200) {
+            let _ = Self::open_ensuring_baud(path, baud)?;
+        }
+        Ok(())
     }
 
     /// Drop what accumulated before the first operation (a boot still streaming).
@@ -393,6 +530,113 @@ mod tests {
         let wire: Vec<u8> = [FLAG, FLAG].iter().copied().chain(encode_record(2, b"ok")).collect();
         let (events, _) = decode(&wire);
         assert_eq!(events, vec![Event::Record(2, Vec::from(b"ok"))]);
+    }
+
+    #[test]
+    fn xip_port_negotiates_high_baud_over_pty() {
+        use std::{fs::File, io::{Read, Write}, os::fd::{AsRawFd, FromRawFd}};
+        let (mut master, mut slave) = (0, 0);
+        assert_eq!(unsafe { libc::openpty(&mut master, &mut slave, core::ptr::null_mut(), core::ptr::null(), core::ptr::null()) }, 0);
+        let mut master = unsafe { File::from_raw_fd(master) };
+        let slave = unsafe { File::from_raw_fd(slave) };
+        let path = std::fs::read_link(format!("/proc/self/fd/{}", slave.as_raw_fd())).unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut r = Reader::default();
+            let mut buf = [0u8; 64];
+            loop {
+                let n = master.read(&mut buf).unwrap();
+                assert!(n > 0);
+                for ev in r.feed(&buf[..n]) {
+                    if let Event::Record(PORT_BAUD, payload) = ev {
+                        assert_eq!(payload, [0, 0, 0x1e, 0x84, 0x80]); // 2_000_000
+                        let ack = encode_record(PORT_BAUD, &[1, 0, 0x1e, 0x84, 0x80]);
+                        master.write_all(&ack).unwrap();
+                        return (master, slave);
+                    }
+                }
+            }
+        });
+        let mut port = XipPort::open_baud(path.to_string_lossy().into_owned(), Some(115200)).unwrap();
+        port.negotiate_baud(2_000_000).unwrap();
+        let (_m, _s) = peer.join().unwrap();
+        let mut tio: libc::termios = unsafe { core::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(port.file.as_raw_fd(), &mut tio) }, 0);
+        assert_eq!(unsafe { libc::cfgetispeed(&tio) }, libc::B2000000);
+    }
+
+    #[test]
+    fn open_ensuring_baud_switches_from_boot_115200_and_skips_when_already_at_target() {
+        use std::{fs::File, io::{Read, Write}, os::fd::{AsRawFd, FromRawFd}};
+        let (mut master, mut slave) = (0, 0);
+        assert_eq!(unsafe { libc::openpty(&mut master, &mut slave, core::ptr::null_mut(), core::ptr::null(), core::ptr::null()) }, 0);
+        let mut master = unsafe { File::from_raw_fd(master) };
+        let slave = unsafe { File::from_raw_fd(slave) };
+        let path = std::fs::read_link(format!("/proc/self/fd/{}", slave.as_raw_fd()))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let peer = std::thread::spawn(move || {
+            let mut r = Reader::default();
+            let mut buf = [0u8; 64];
+            let mut switched = false;
+            loop {
+                let n = master.read(&mut buf).unwrap();
+                assert!(n > 0);
+                for ev in r.feed(&buf[..n]) {
+                    match ev {
+                        Event::Record(PORT_WAKE, data) if data.is_empty() => {
+                            let mut tio: libc::termios = unsafe { core::mem::zeroed() };
+                            assert_eq!(unsafe { libc::tcgetattr(master.as_raw_fd(), &mut tio) }, 0);
+                            let speed = unsafe { libc::cfgetispeed(&tio) };
+                            if (!switched && speed == libc::B115200)
+                                || (switched && speed == libc::B2000000)
+                            {
+                                master.write_all(&encode_record(PORT_WAKE, &[1])).unwrap();
+                            }
+                        }
+                        Event::Record(PORT_BAUD, payload) => {
+                            assert!(!switched);
+                            assert_eq!(payload, [0, 0, 0x1e, 0x84, 0x80]);
+                            master
+                                .write_all(&encode_record(PORT_BAUD, &[1, 0, 0x1e, 0x84, 0x80]))
+                                .unwrap();
+                            switched = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if switched {
+                    // Wait for the post-switch wake confirmation plus a second open_ensuring_baud call.
+                    let mut wakes_at_2m = 0;
+                    while wakes_at_2m < 2 {
+                        let n = master.read(&mut buf).unwrap();
+                        assert!(n > 0);
+                        for ev in r.feed(&buf[..n]) {
+                            if matches!(ev, Event::Record(PORT_WAKE, ref d) if d.is_empty()) {
+                                master.write_all(&encode_record(PORT_WAKE, &[1])).unwrap();
+                                wakes_at_2m += 1;
+                            } else if matches!(ev, Event::Record(PORT_BAUD, _)) {
+                                panic!("unexpected 0xf9 renegotiation once already at 2_000_000");
+                            }
+                        }
+                    }
+                    return (master, slave);
+                }
+            }
+        });
+        let port1 = XipPort::open_ensuring_baud(&path, Some(2_000_000)).unwrap();
+        let mut tio: libc::termios = unsafe { core::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(port1.file.as_raw_fd(), &mut tio) }, 0);
+        assert_eq!(unsafe { libc::cfgetispeed(&tio) }, libc::B2000000);
+        drop(port1);
+
+        let port2 = XipPort::open_ensuring_baud(&path, Some(2_000_000)).unwrap();
+        assert_eq!(unsafe { libc::tcgetattr(port2.file.as_raw_fd(), &mut tio) }, 0);
+        assert_eq!(unsafe { libc::cfgetispeed(&tio) }, libc::B2000000);
+        drop(port2);
+
+        let (_m, _s) = peer.join().unwrap();
     }
 
     #[test]

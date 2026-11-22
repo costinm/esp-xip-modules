@@ -86,7 +86,10 @@ shim!(crypto_hash_finish, H_CRYPTO, 3, (handle: u32, out_packet: u32, out_offset
 shim!(crypto_hash_abort, H_CRYPTO, 4, (handle: u32));
 shim!(crypto_verify, H_CRYPTO, 5, (alg: u32, packet: u32, offset: u32, key_len: u32, message_len: u32, signature_len: u32));
 shim!(crypto_random, H_CRYPTO, 6, (packet: u32, offset: u32, len: u32));
-static CRYPTO: Crypto = Crypto { version: CRYPTO_VERSION, size: size_of::<Crypto>() as u32, hash: Some(crypto_hash), hash_start: Some(crypto_hash_start), hash_update: Some(crypto_hash_update), hash_finish: Some(crypto_hash_finish), hash_abort: Some(crypto_hash_abort), verify: Some(crypto_verify), random: Some(crypto_random) };
+shim!(crypto_aead_seal, H_CRYPTO, 7, (alg: u32, packet: u32, offset: u32, key_len: u32, aad_len: u32, text_len: u32));
+shim!(crypto_aead_open, H_CRYPTO, 8, (alg: u32, packet: u32, offset: u32, key_len: u32, aad_len: u32, text_len: u32));
+shim!(crypto_aead_pkt, H_CRYPTO, 9, (spec: u32, src_pkt: u32, src_off: u32, dst_pkt: u32, dst_off: u32, text_len: u32));
+static CRYPTO: Crypto = Crypto { version: CRYPTO_VERSION, size: size_of::<Crypto>() as u32, hash: Some(crypto_hash), hash_start: Some(crypto_hash_start), hash_update: Some(crypto_hash_update), hash_finish: Some(crypto_hash_finish), hash_abort: Some(crypto_hash_abort), verify: Some(crypto_verify), random: Some(crypto_random), aead_seal: Some(crypto_aead_seal), aead_open: Some(crypto_aead_open), aead_pkt: Some(crypto_aead_pkt) };
 
 static H_IDENTITY: AtomicI32 = AtomicI32::new(0);
 shim!(identity_public_key, H_IDENTITY, 0, (packet: u32, offset: u32));

@@ -54,6 +54,7 @@ fn master(root: &Path) -> (Inventory, Intended) {
         files: BTreeMap::new(),
         runtime: None,
         prune: false,
+        uart_baud: None,
     };
     inventory.save_intended(&intended).unwrap();
     (inventory, intended)

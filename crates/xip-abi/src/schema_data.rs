@@ -21,8 +21,8 @@ pub static SCHEMA_STREAM: &[u8] = b"listen\x00\x00\x02vvopen\x00\x00\x02b\x01vfe
 /// The schema of `quic` (9 methods, in table order).
 pub static SCHEMA_QUIC: &[u8] = b"attach\x00\x00\x01vdetach\x00\x00\x00relay_set\x00\x00\x02i\x18\x01vrelay_get\x00\x00\x02vo\x18\x01relay_remove\x00\x00\x02b\x01vrelay_create\x00\x00\x03o\x18\x01vvrelay_stats\x00\x00\x03b\x01vo\x10\x00relay_expire\x00\x00\x00relay_idle\x00\x00\x03b\x01vv\x00";
 
-/// The schema of `crypto` (7 methods, in table order).
-pub static SCHEMA_CRYPTO: &[u8] = b"hash\x00\x00\x06vvvvvvhash_start\x00\x00\x01vhash_update\x00\x00\x04vvvvhash_finish\x00\x00\x03vvvhash_abort\x00\x00\x01vverify\x00\x00\x06vvvvvvrandom\x00\x00\x03vvv\x00";
+/// The schema of `crypto` (10 methods, in table order).
+pub static SCHEMA_CRYPTO: &[u8] = b"hash\x00\x00\x06vvvvvvhash_start\x00\x00\x01vhash_update\x00\x00\x04vvvvhash_finish\x00\x00\x03vvvhash_abort\x00\x00\x01vverify\x00\x00\x06vvvvvvrandom\x00\x00\x03vvvaead_seal\x00\x00\x06vvvvvvaead_open\x00\x00\x06vvvvvvaead_pkt\x00\x00\x06vvvvvv\x00";
 
 /// The schema of `identity` (2 methods, in table order).
 pub static SCHEMA_IDENTITY: &[u8] = b"public_key\x00\x00\x02vvsign\x00\x00\x05vvvvv\x00";

@@ -174,6 +174,31 @@ pub struct Intended {
     /// Only remove extra modules when explicitly requested in desired configuration.
     #[serde(default)]
     pub prune: bool,
+    /// Optional physical UART baud rate override for serial sessions; unspecified RISC-V
+    /// targets default to 2_000_000, while ESP32 classic targets remain configurable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uart_baud: Option<u32>,
+}
+
+impl Intended {
+    pub fn effective_uart_baud(&self) -> Option<u32> {
+        dmesh_discovery::device_record::effective_uart_baud(
+            self.uart_baud,
+            self.identity.device_type.as_deref(),
+        )
+    }
+}
+
+fn validate_uart_baud(baud: Option<u32>) -> Result<(), String> {
+    if let Some(rate) = baud {
+        if !uart_codec::is_supported_baud(rate) {
+            return Err(format!(
+                "unsupported UART baud {rate}; supported rates: {:?}",
+                uart_codec::SUPPORTED_BAUDS
+            ));
+        }
+    }
+    Ok(())
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImageStatus {
@@ -365,6 +390,7 @@ impl Inventory {
             if c.generation == 0 {
                 return Err("configuration generation must be positive".into());
             }
+            validate_uart_baud(c.uart_baud)?;
             if index > 0 && configs[index - 1].0 == *id {
                 return Err(format!("duplicate intended configuration for {id}"));
             }
@@ -375,6 +401,7 @@ impl Inventory {
         if c.generation == 0 {
             return Err("configuration generation must be positive".into());
         }
+        validate_uart_baud(c.uart_baud)?;
         let path = self.config_path(c)?;
         atomic(
             &path,
@@ -448,9 +475,14 @@ impl Inventory {
             let mut merged = records
                 .remove(&id)
                 .unwrap_or(c.identity.record(BTreeMap::new())?);
+            let prior_baud = merged.uart_baud;
             let mut endpoints = merged.endpoints;
             endpoints.extend(c.endpoints);
             merged = c.identity.record(endpoints)?;
+            merged.uart_baud = dmesh_discovery::device_record::effective_uart_baud(
+                c.uart_baud.or(prior_baud),
+                merged.device_type.as_deref(),
+            );
             records.insert(id, merged);
         }
         Ok(records.into_values().collect())
@@ -480,8 +512,9 @@ impl Inventory {
                 continue;
             };
             let id = identity.id()?;
-            if identity_matches(&id, &identity, target) && !matches.iter().any(|(k, _)| k == &id) {
-                matches.push((id, identity));
+            if identity_matches(&id, &identity, target) && !matches.iter().any(|(k, _, _)| k == &id)
+            {
+                matches.push((id, identity, r.uart_baud));
             }
         }
         if matches.len() != 1 {
@@ -490,7 +523,7 @@ impl Inventory {
                     .into(),
             );
         }
-        let (id, identity) = matches.pop().unwrap();
+        let (id, identity, adopted_baud) = matches.pop().unwrap();
         let path = self.paths.intended.join(&id).join("device.toml");
         if path.exists() || self.paths.intended.join(format!("{id}.toml")).exists() {
             return Err("intended configuration already exists; it was not overwritten".into());
@@ -504,6 +537,7 @@ impl Inventory {
             files: BTreeMap::new(),
             runtime: None,
             prune: false,
+            uart_baud: None,
         };
         let mut status = if let Some(endpoint) = endpoint {
             Some(self.read_status(&c, endpoint)?)
@@ -514,6 +548,9 @@ impl Inventory {
                 .map(|(_, s)| s)
         };
         if let Some(s) = &status {
+            if c.identity.device_type.is_none() {
+                c.identity.device_type = s.identity.device_type.clone();
+            }
             for mac in &s.identity.macs {
                 if !c.identity.macs.contains(mac) {
                     c.identity.macs.push(mac.clone());
@@ -526,12 +563,29 @@ impl Inventory {
                 }
             }
         }
+        c.uart_baud = dmesh_discovery::device_record::effective_uart_baud(
+            adopted_baud,
+            c.identity.device_type.as_deref(),
+        );
         self.save_intended(&c)?;
         if let Some(s) = &mut status {
             s.intended_digest = Some(config_digest(&c)?);
             self.save_status(s)?;
         }
         Ok(path)
+    }
+    pub fn set_uart_baud(
+        &self,
+        target: &str,
+        baud: Option<u32>,
+    ) -> Result<(PathBuf, Option<u32>, Option<u32>), String> {
+        validate_uart_baud(baud)?;
+        let (id, _) = self.resolve(target)?;
+        let _lock = self.lock(&id)?;
+        let (_, mut c) = self.resolve(&id)?;
+        c.uart_baud = baud;
+        self.save_intended(&c)?;
+        Ok((self.config_path(&c)?, c.uart_baud, c.effective_uart_baud()))
     }
 }
 fn identity_matches(id: &str, i: &Identity, target: &str) -> bool {
@@ -1436,7 +1490,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         "show"|"refresh"|"reconcile"|"plan"=>{
             let target=args.get(1).ok_or("devices show|refresh|plan|reconcile DEVICE [--endpoint=tcp://HOST:5227] [--apply]")?;
             let (id,c)=inventory.resolve(target)?;
-            if command=="show" {serde_json::json!({"id":id,"files_dir":inventory.files_dir(&c)?,"status_dir":inventory.status_dir(&c.identity)?,"status_files_dir":inventory.status_files_dir(&c.identity)?,"files":inventory.managed_files(&c)?,"intended":c,"status":inventory.statuses()?.into_iter().find(|(k,_)|*k==id).map(|(_,s)|s)})}
+            if command=="show" {serde_json::json!({"id":id,"files_dir":inventory.files_dir(&c)?,"status_dir":inventory.status_dir(&c.identity)?,"status_files_dir":inventory.status_files_dir(&c.identity)?,"files":inventory.managed_files(&c)?,"effective_uart_baud":c.effective_uart_baud(),"intended":c,"status":inventory.statuses()?.into_iter().find(|(k,_)|*k==id).map(|(_,s)|s)})}
             else {
                 let endpoint=match option(args,"endpoint"){Some(e)=>e.to_owned(),None=>inventory.endpoint(&c)?};
                 if command=="refresh"{
@@ -1455,7 +1509,22 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             let serial=option(args,"serial").filter(|s|s.starts_with("/dev/")).ok_or("USB provisioning requires --serial=/dev/...")?;
             provision_usb(&inventory,&c,serial)?;serde_json::json!({"provisioned":c.identity.vip6})
         },
-        _=>return Err("devices paths|list|adopt|show|bump|refresh|sample|plan|reconcile|compact|key-init|provision (also check|sync)".into()),
+        "baud" | "set-baud" => {
+            let target = args.get(1).ok_or("devices baud DEVICE RATE|default")?;
+            let raw = args.get(2).ok_or("devices baud DEVICE RATE|default")?;
+            let baud = if matches!(raw.as_str(), "default" | "unset" | "clear") {
+                None
+            } else {
+                Some(
+                    raw.parse::<u32>()
+                        .map_err(|e| format!("invalid UART baud {raw:?}: {e}"))?,
+                )
+            };
+            let (config, uart_baud, effective_uart_baud) =
+                inventory.set_uart_baud(target, baud)?;
+            serde_json::json!({"config":config,"uart_baud":uart_baud,"effective_uart_baud":effective_uart_baud})
+        }
+        _=>return Err("devices paths|list|adopt|show|baud|bump|refresh|sample|plan|reconcile|compact|key-init|provision (also check|sync)".into()),
     };
     println!(
         "{}",
@@ -1565,6 +1634,7 @@ mod tests {
             files: BTreeMap::new(),
             runtime: None,
             prune: false,
+            uart_baud: None,
         }
     }
     pub(super) fn status() -> Status {
@@ -1894,5 +1964,96 @@ mod tests {
             hex(&key.device_secret(&identity(7)).unwrap()),
             "9215c0f28872e40d3f7d6c369580664a5a078d80c8937763d7622b1d42f6590f"
         );
+    }
+
+    #[test]
+    fn intended_uart_baud_defaults_riscv_to_2mbps_and_keeps_classic_configurable() {
+        let t = tempfile::tempdir().unwrap();
+        let i = inventory(t.path());
+
+        // Legacy/minimal RISC-V config without explicit uart_baud resolves to 2_000_000.
+        let c_riscv = config();
+        i.save_intended(&c_riscv).unwrap();
+        assert_eq!(c_riscv.uart_baud, None);
+        assert_eq!(c_riscv.effective_uart_baud(), Some(2_000_000));
+        let rec_riscv = i.records().unwrap().into_iter().next().unwrap();
+        assert_eq!(rec_riscv.uart_baud, Some(2_000_000));
+        assert_eq!(crate::device::profile_from_node(&rec_riscv).unwrap().uart_baud, Some(2_000_000));
+
+        // Explicit uart_baud overrides RISC-V default (e.g., slow serial bridge).
+        let id = c_riscv.identity.id().unwrap();
+        i.set_uart_baud(&id, Some(921_600)).unwrap();
+        let (_, updated) = i.resolve(&id).unwrap();
+        assert_eq!(updated.uart_baud, Some(921_600));
+        assert_eq!(updated.effective_uart_baud(), Some(921_600));
+        let toml_text = fs::read_to_string(i.config_path(&updated).unwrap()).unwrap();
+        assert!(toml_text.contains("uart_baud = 921600"));
+
+        // Clearing override restores 2_000_000 default for RISC-V.
+        i.set_uart_baud(&id, None).unwrap();
+        let (_, cleared) = i.resolve(&id).unwrap();
+        assert_eq!(cleared.uart_baud, None);
+        assert_eq!(cleared.effective_uart_baud(), Some(2_000_000));
+
+        // Unsupported baud is rejected on save and load.
+        assert!(i.set_uart_baud(&id, Some(123_456)).is_err());
+
+        // ESP32 classic stays None unless explicitly configured (cannot always handle >=1 Mbps).
+        let mut classic_id = identity(8);
+        classic_id.device_type = Some("esp32".into());
+        let mut c_classic = Intended {
+            generation: 1,
+            identity: classic_id,
+            hardware: vec![],
+            endpoints: BTreeMap::new(),
+            modules: BTreeMap::new(),
+            files: BTreeMap::new(),
+            runtime: None,
+            prune: false,
+            uart_baud: None,
+        };
+        assert_eq!(c_classic.effective_uart_baud(), None);
+        i.save_intended(&c_classic).unwrap();
+        let rec_classic = i
+            .records()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.device_type.as_deref() == Some("esp32"))
+            .unwrap();
+        assert_eq!(rec_classic.uart_baud, None);
+
+        c_classic.uart_baud = Some(460_800);
+        i.save_intended(&c_classic).unwrap();
+        let rec_classic_set = i
+            .records()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.device_type.as_deref() == Some("esp32"))
+            .unwrap();
+        assert_eq!(rec_classic_set.uart_baud, Some(460_800));
+    }
+
+    #[test]
+    fn adopt_sets_riscv_default_baud_and_leaves_classic_unset() {
+        let t = tempfile::tempdir().unwrap();
+        let i = inventory(t.path());
+
+        let mut id_c3 = identity(9);
+        id_c3.device_type = Some("esp32c3".into());
+        let mut s_c3 = status();
+        s_c3.identity = id_c3.clone();
+        i.save_status(&s_c3).unwrap();
+        let path_c3 = i.adopt(&id_c3.id().unwrap(), None).unwrap();
+        let adopted_c3: Intended = toml::from_str(&fs::read_to_string(&path_c3).unwrap()).unwrap();
+        assert_eq!(adopted_c3.uart_baud, Some(2_000_000));
+
+        let mut id_esp32 = identity(10);
+        id_esp32.device_type = Some("esp32".into());
+        let mut s_esp32 = status();
+        s_esp32.identity = id_esp32.clone();
+        i.save_status(&s_esp32).unwrap();
+        let path_esp32 = i.adopt(&id_esp32.id().unwrap(), None).unwrap();
+        let adopted_esp32: Intended = toml::from_str(&fs::read_to_string(&path_esp32).unwrap()).unwrap();
+        assert_eq!(adopted_esp32.uart_baud, None);
     }
 }

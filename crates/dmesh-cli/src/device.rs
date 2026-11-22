@@ -156,7 +156,7 @@ fn node_is_target(node: &DeviceRecord, target: &str) -> bool {
         && (node.vip6.is_some() || node.mac.is_some())
 }
 
-fn profile_from_node(node: &DeviceRecord) -> Result<DeviceProfile, String> {
+pub(crate) fn profile_from_node(node: &DeviceRecord) -> Result<DeviceProfile, String> {
     let name = node.name.clone().unwrap_or_else(|| node.device_id.clone());
     let static_ipv4 = node
         .ipv4
@@ -183,7 +183,7 @@ fn profile_from_node(node: &DeviceRecord) -> Result<DeviceProfile, String> {
         udp6_iface: node.endpoints.get("udp6_iface").cloned(),
         mac: node.mac,
         serial_id: node.endpoints.get("uart").cloned(),
-        uart_baud: node.uart_baud,
+        uart_baud: node.effective_uart_baud(),
         udp_port: node.udp_port.unwrap_or(DEFAULT_UDP_PORT),
     })
 }
@@ -277,5 +277,25 @@ mod tests {
         anonymous.vip6 = None;
         anonymous.mac = None;
         assert!(!node_is_target(&anonymous, "e6"));
+    }
+
+    #[test]
+    fn profile_defaults_riscv_baud_to_2mbps_and_keeps_classic_configurable() {
+        let mut riscv = node();
+        riscv.device_type = Some("esp32c6".into());
+        assert_eq!(profile_from_node(&riscv).unwrap().uart_baud, Some(2_000_000));
+
+        riscv.device_type = Some("esp32c3".into());
+        assert_eq!(profile_from_node(&riscv).unwrap().uart_baud, Some(2_000_000));
+
+        riscv.uart_baud = Some(921_600);
+        assert_eq!(profile_from_node(&riscv).unwrap().uart_baud, Some(921_600));
+
+        let mut classic = node();
+        classic.device_type = Some("esp32".into());
+        assert_eq!(profile_from_node(&classic).unwrap().uart_baud, None);
+
+        classic.uart_baud = Some(460_800);
+        assert_eq!(profile_from_node(&classic).unwrap().uart_baud, Some(460_800));
     }
 }

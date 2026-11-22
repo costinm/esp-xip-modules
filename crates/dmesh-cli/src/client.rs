@@ -51,7 +51,7 @@ pub(crate) fn is_fatal_diagnostic(line: &str) -> bool {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: dmesh-cli SERIAL|DEVICE --reset\n       dmesh-cli SERIAL|DEVICE --wake [--baud PHYSICAL_UART_BAUD]\n       dmesh-cli SERIAL|DEVICE --watch [--reset] [--interactive] [--baud PHYSICAL_UART_BAUD] [--timeout-secs N]\n       dmesh-cli DEVICE METHOD [--field=value ...] [--bearer udp[,uart]]\n       dmesh-cli SERIAL METHOD [--baud PHYSICAL_UART_BAUD] [--timeout-secs N] [--linger-secs N] [--repeat-secs N] [--field=value ...]\n       dmesh-cli devices check|sync [--dry-run]\n       dmesh-cli discover\n       dmesh-cli tcp://HOST:5227 flash.METHOD [--input=PATH] [--output=PATH] [--field=value ...]\n       dmesh-cli SERIAL flash.wifi.join --ssid=NAME [--psk=PASSPHRASE] [-- flash.module.write|flash.runtime.write ...]\n       dmesh-cli SERIAL flash.wifi.info [-- flash.module.write|flash.runtime.write ...]\n       dmesh-cli flash-discover INTERFACE|HOST:PORT|SERIAL\n       dmesh-cli flash-listen INTERFACE\n       dmesh-cli DEVICE wake|sleep|nv KEY[=VALUE]\n       dmesh-cli DEVICE nan.METHOD|power.METHOD [--field=value ...]\n       dmesh-cli lmesh METHOD [--field=value ...]\n       dmesh-cli NODE check\n       dmesh-cli udp://HOST:PORT --socket PATH\n       dmesh-cli http://HOST:PORT SERVICE.METHOD [--field=value ...]"
+        "usage: dmesh-cli SERIAL|DEVICE --reset\n       dmesh-cli SERIAL|DEVICE --wake [--baud PHYSICAL_UART_BAUD]\n       dmesh-cli SERIAL|DEVICE baud RATE [--from OLD_BAUD]\n       dmesh-cli SERIAL|DEVICE --watch [--reset] [--interactive] [--baud PHYSICAL_UART_BAUD] [--timeout-secs N]\n       dmesh-cli DEVICE METHOD [--field=value ...] [--bearer udp[,uart]]\n       dmesh-cli SERIAL METHOD [--baud PHYSICAL_UART_BAUD] [--timeout-secs N] [--linger-secs N] [--repeat-secs N] [--field=value ...]\n       dmesh-cli devices check|sync [--dry-run]\n       dmesh-cli discover\n       dmesh-cli tcp://HOST:5227 flash.METHOD [--input=PATH] [--output=PATH] [--field=value ...]\n       dmesh-cli SERIAL flash.wifi.join --ssid=NAME [--psk=PASSPHRASE] [-- flash.module.write|flash.runtime.write ...]\n       dmesh-cli SERIAL flash.wifi.info [-- flash.module.write|flash.runtime.write ...]\n       dmesh-cli flash-discover INTERFACE|HOST:PORT|SERIAL\n       dmesh-cli flash-listen INTERFACE\n       dmesh-cli DEVICE wake|sleep|nv KEY[=VALUE]\n       dmesh-cli DEVICE nan.METHOD|power.METHOD [--field=value ...]\n       dmesh-cli lmesh METHOD [--field=value ...]\n       dmesh-cli NODE check\n       dmesh-cli udp://HOST:PORT --socket PATH\n       dmesh-cli http://HOST:PORT SERVICE.METHOD [--field=value ...]"
     );
     std::process::exit(2)
 }
@@ -98,7 +98,14 @@ pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), 
     if arguments.get(1).is_some_and(|s| matches!(s.as_str(), "flash.wifi.join" | "flash.wifi.info")) {
         return crate::tcp::wifi(&arguments);
     }
-    if arguments.first().is_some_and(|s|s.starts_with("tcp://")) {return crate::tcp::run(&arguments);}
+    if arguments.first().is_some_and(|s| s.starts_with("tcp://"))
+        || (arguments
+            .first()
+            .is_some_and(|s| s.starts_with("/dev/") || s.starts_with("udp://"))
+            && arguments.get(1).is_some_and(|s| s.starts_with("flash.")))
+    {
+        return crate::tcp::run(&arguments);
+    }
     if arguments.first().is_some_and(|s|s=="flash-listen") {return crate::tcp::listen(arguments.get(1).ok_or("flash-listen INTERFACE [MAC]")?,arguments.get(2).map(String::as_str));}
     if arguments.first().is_some_and(|s|s=="flash-discover") {return crate::tcp::discover(arguments.get(1).ok_or("flash-discover INTERFACE|HOST:PORT|SERIAL")?);}
     if arguments.iter().any(|a|a=="--via-now" || a.starts_with("--via-now=")) {return Err("--via-now was removed; install explicit disc relay routes and use --via FIRST_HOP:DCID".into());}
@@ -198,10 +205,13 @@ pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), 
                 return Err("--wake accepts only --baud PHYSICAL_UART_BAUD".into());
             }
         }
-        let mut session=crate::xip_wire::XipPort::open_baud(arguments[0].clone(),baud).map_err(|e|e.to_string())?;
+        let mut session=crate::xip_wire::XipPort::open_ensuring_baud(arguments[0].clone(),baud)?;
         session.wake()?;
         println!("{}",serde_json::json!({"awake":true}));
         return Ok(());
+    }
+    if arguments.get(1).is_some_and(|argument| argument == "baud") {
+        return run_baud_command(&arguments);
     }
     if matches!(arguments.as_slice(),[_,method] if method=="--watch") {
         return crate::console::run_native(&[arguments[0].clone(),"watch".into()]);
@@ -275,6 +285,110 @@ pub fn run_dmesh_cli_args(args: impl IntoIterator<Item = String>) -> Result<(), 
         return run_serial_stream_command(&arguments);
     }
     Err("unsupported command form; select a UART path, UDP endpoint, named device, or lmesh service".into())
+}
+
+fn parse_supported_baud(raw: &str, flag: &str) -> Result<u32, String> {
+    let rate = raw
+        .parse::<u32>()
+        .map_err(|error| format!("invalid {flag} baud {raw:?}: {error}"))?;
+    if !uart_codec::is_supported_baud(rate) {
+        return Err(format!(
+            "unsupported UART baud {rate}; supported rates: {:?}",
+            uart_codec::SUPPORTED_BAUDS
+        ));
+    }
+    Ok(rate)
+}
+
+fn run_baud_command(arguments: &[String]) -> Result<(), String> {
+    let target = arguments
+        .first()
+        .ok_or("usage: dmesh-cli SERIAL|DEVICE baud RATE [--from OLD_BAUD]")?;
+    let rate_raw = arguments
+        .get(2)
+        .ok_or("usage: dmesh-cli SERIAL|DEVICE baud RATE [--from OLD_BAUD]")?;
+    let target_baud = parse_supported_baud(rate_raw, "target")?;
+    let mut from_baud = None;
+    match arguments.get(3..) {
+        None | Some([]) => {}
+        Some([flag, val]) if flag == "--from" => {
+            from_baud = Some(parse_supported_baud(val, "--from")?);
+        }
+        Some(rest) if rest.len() == 1 && rest[0].starts_with("--from=") => {
+            from_baud = Some(parse_supported_baud(&rest[0]["--from=".len()..], "--from")?);
+        }
+        _ => return Err("usage: dmesh-cli SERIAL|DEVICE baud RATE [--from OLD_BAUD]".into()),
+    }
+    let (serial_path, catalog_baud) = if target.starts_with('/') {
+        (target.clone(), None)
+    } else if !target.contains("://") && !target.contains(':') {
+        let profile = load_device(target)?;
+        let serial = profile
+            .serial_path()?
+            .ok_or_else(|| format!("device {target:?} has no serial_id for baud"))?;
+        (serial.display().to_string(), profile.uart_baud)
+    } else {
+        return Err("baud requires a serial path or device profile".into());
+    };
+
+    let mut candidates = Vec::new();
+    if let Some(explicit) = from_baud {
+        candidates.push(explicit);
+    } else {
+        if let Some(b) = catalog_baud {
+            candidates.push(b);
+        }
+        for &b in &[
+            115_200, 921_600, 1_000_000, 2_000_000, 1_500_000, 3_000_000, 4_000_000, 460_800,
+            230_400,
+        ] {
+            if !candidates.contains(&b) {
+                candidates.push(b);
+            }
+        }
+    }
+
+    let first_baud = candidates[0];
+    let mut port = crate::xip_wire::XipPort::open_baud(serial_path.clone(), Some(first_baud))
+        .map_err(|e| e.to_string())?;
+    let probe_window = if from_baud.is_some() {
+        Duration::from_secs(3)
+    } else {
+        Duration::from_millis(220)
+    };
+    let mut active_baud = None;
+    for (idx, &cand) in candidates.iter().enumerate() {
+        if idx > 0 {
+            port.set_baud(cand).map_err(|e| e.to_string())?;
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if port.try_wake(probe_window)? {
+            active_baud = Some(cand);
+            break;
+        }
+    }
+    let previous_baud = active_baud.ok_or_else(|| {
+        format!(
+            "no wake response on {serial_path} at any candidate baud ({candidates:?}); pass --from OLD_BAUD or reset"
+        )
+    })?;
+    if previous_baud != target_baud {
+        port.negotiate_baud(target_baud)?;
+        if !port.try_wake(Duration::from_secs(2))? {
+            return Err(format!(
+                "device acknowledged {target_baud} on {serial_path} but did not wake at the new rate"
+            ));
+        }
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "serial": serial_path,
+            "previous_baud": previous_baud,
+            "baud": target_baud,
+        })
+    );
+    Ok(())
 }
 
 fn run_check_command(arguments: &[String]) -> Result<(), String> {
@@ -1007,7 +1121,7 @@ fn split_uart_bearer_arguments(
     Ok((retained, uart_path, uart_baud))
 }
 
-fn render_stream_response(request: &[u8], response: &[u8]) -> String {
+pub(crate) fn render_stream_response(request: &[u8], response: &[u8]) -> String {
     let discovery = mesh::mesh_api::envelope::decode(request).is_some_and(|r|
         r.component == Some(mesh::mesh_api::envelope::Name::Tag(6))
             && r.method == Some(mesh::mesh_api::envelope::Name::Tag(9)));
@@ -1128,6 +1242,7 @@ fn run_catalog_target_service(arguments: &[String], profile: &DeviceProfile) -> 
                 // Extend Main's CPU-awake lease without replacing its radio
                 // profile or persistent policy. Use the shared UART record,
                 // not a probe-specific transport.set workaround.
+                crate::xip_wire::XipPort::ensure_baud(&path.display().to_string(), profile.uart_baud)?;
                 let mut session =
                     DeviceSession::open(&path.display().to_string(), profile.uart_baud)?;
                 session.send_wake()
@@ -2089,5 +2204,13 @@ mod live_observation_tests {
         assert_eq!(nodes[0].peer_mac, Some([2;6]));
         let request = [0xa4,1,6,2,9,3,1,5,0xa0];
         assert_eq!(stream_request_timeout(&request).unwrap(), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn parse_supported_baud_accepts_one_megabit_and_rejects_invalid() {
+        for &rate in &[115_200, 921_600, 1_000_000, 1_500_000, 2_000_000, 4_000_000] {
+            assert_eq!(parse_supported_baud(&rate.to_string(), "target"), Ok(rate));
+        }
+        assert!(parse_supported_baud("123456", "target").is_err());
     }
 }

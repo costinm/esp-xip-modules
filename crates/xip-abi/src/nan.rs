@@ -75,7 +75,21 @@ impl NanTransport {
             || !matches!(self.ble,0|1|2|255) || !matches!(self.uart_mode,0|2|255)
             || !matches!(self.radio_mode,0|1|2|255) || !matches!(self.now,0|1|2|255)
             || !matches!(self.ap,0|1|255) || !matches!(self.uart,0..=9|255) || self.reserved!=[0;8]
-            || !matches!(self.uart_baud,0|115200|230400|460800|921600)
+            || !matches!(
+                self.uart_baud,
+                0 | 115200
+                    | 230400
+                    | 460800
+                    | 921600
+                    | 1_000_000
+                    | 1_152_000
+                    | 1_500_000
+                    | 2_000_000
+                    | 2_500_000
+                    | 3_000_000
+                    | 3_500_000
+                    | 4_000_000
+            )
             || !(self.radio_sf==0 || (5..=12).contains(&self.radio_sf))
             || !(self.radio_cr==0 || (5..=8).contains(&self.radio_cr))
             || !(self.radio_power==127 || (-40..=30).contains(&self.radio_power)) {

@@ -136,6 +136,87 @@ pub(crate) fn discover(target: &str) -> Result<(), String> {
     Err("no flash discovery reply within 5 seconds".into())
 }
 
+pub(crate) enum FlashStream {
+    Tcp(TcpStream),
+    Quic(crate::node_client::QuicFlashStream),
+}
+impl FlashStream {
+    pub(crate) fn connect(endpoint: &str, wait: Duration) -> Result<Self, String> {
+        if endpoint.starts_with("/dev/") || endpoint.starts_with("udp://") {
+            return Ok(Self::Quic(crate::node_client::open_flash_stream(endpoint)?));
+        }
+        let address = endpoint
+            .strip_prefix("tcp://")
+            .ok_or("expected tcp://HOST:PORT or /dev/...")?;
+        let mut last = None;
+        let mut connected = None;
+        let peers = address
+            .to_socket_addrs()
+            .map_err(|e| e.to_string())?
+            .collect::<Vec<_>>();
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            for peer in &peers {
+                match TcpStream::connect_timeout(peer, Duration::from_secs(5)) {
+                    Ok(stream) => {
+                        connected = Some(stream);
+                        break;
+                    }
+                    Err(error) => last = Some(error),
+                }
+            }
+            if connected.is_some() || peers.is_empty() || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let stream = connected.ok_or_else(|| {
+            format!(
+                "TCP {address}: {}",
+                last.map_or_else(|| "no resolved address".into(), |e| e.to_string())
+            )
+        })?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .map_err(|e| e.to_string())?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(60)))
+            .map_err(|e| e.to_string())?;
+        stream.set_nodelay(true).map_err(|e| e.to_string())?;
+        Ok(Self::Tcp(stream))
+    }
+    pub(crate) fn shutdown_write(&mut self) -> Result<(), String> {
+        match self {
+            Self::Tcp(stream) => stream
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|e| e.to_string()),
+            Self::Quic(stream) => stream.shutdown_write(),
+        }
+    }
+}
+impl Read for FlashStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(s) => s.read(buf),
+            Self::Quic(s) => s.read(buf),
+        }
+    }
+}
+impl Write for FlashStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(s) => s.write(buf),
+            Self::Quic(s) => s.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(s) => s.flush(),
+            Self::Quic(s) => s.flush(),
+        }
+    }
+}
+
 pub(crate) fn run(args: &[String]) -> Result<(), String> { run_mode(args,true) }
 pub(crate) fn run_quiet(args: &[String]) -> Result<(), String> { run_mode(args,false) }
 fn run_mode(args: &[String], report: bool) -> Result<(), String> {
@@ -159,9 +240,15 @@ fn run_image(args: &[String], wait: Duration, report: bool) -> Result<(), String
                     || error.starts_with("response header:")
                     || error.contains("Broken pipe")
                     || error.contains("Connection reset")
+                    || error.contains("peer reset stream")
+                    || error.contains("peer stopped reading stream")
+                    || error.contains("open QUIC flash stream")
                     || error.contains("timed out");
                 if !transport || attempt == 3 {
                     return Err(error);
+                }
+                if let Some(target) = args.first() {
+                    crate::node_client::clear_cached_flash_session(target);
                 }
                 eprintln!(
                     "image transfer interrupted; retrying the same image operation ({attempt}/3)"
@@ -293,44 +380,15 @@ fn run_wait(args: &[String], wait: Duration, report: bool) -> Result<(), String>
     if add_size {
         e.u8(2).unwrap().u64(auto_size.unwrap()).unwrap();
     }
-    let address = target.strip_prefix("tcp://").ok_or("expected tcp://")?;
-    let mut last = None;
-    let mut connected = None;
-    let peers = address
-        .to_socket_addrs()
-        .map_err(|e| e.to_string())?
-        .collect::<Vec<_>>();
-    let deadline = std::time::Instant::now() + wait;
-    loop {
-        for peer in &peers {
-            match TcpStream::connect_timeout(peer, Duration::from_secs(5)) {
-                Ok(stream) => {
-                    connected = Some(stream);
-                    break;
-                }
-                Err(error) => last = Some(error),
-            }
-        }
-        if connected.is_some() || peers.is_empty() || std::time::Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    let mut stream = connected.ok_or_else(|| {
-        format!(
-            "TCP {address}: {}",
-            last.map_or_else(|| "no resolved address".into(), |e| e.to_string())
-        )
-    })?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(60)))
-        .map_err(|e| e.to_string())?;
-    stream.set_nodelay(true).map_err(|e| e.to_string())?;
+    let mut stream = FlashStream::connect(target, wait)?;
     for b in e.into_writer().chunks(chunk) {
         stream.write_all(b).map_err(|e| e.to_string())?;
+    }
+    if matches!(stream, FlashStream::Quic(_)) && matches!(method, 13 | 14) && file.is_some() {
+        stream.flush().map_err(|e| e.to_string())?;
+        let pages = auto_size.unwrap_or(65536).div_ceil(65536).max(1);
+        let erase_wait_ms = (pages * 550 + 250).min(15_000);
+        std::thread::sleep(Duration::from_millis(erase_wait_ms));
     }
     let mut buf = vec![0; chunk];
     let mut sent = 0u64;
@@ -345,20 +403,11 @@ fn run_wait(args: &[String], wait: Duration, report: bool) -> Result<(), String>
             if chunk_delay_ms!=0 {std::thread::sleep(Duration::from_millis(chunk_delay_ms));}
         }
     }
-    let mut header = Vec::new();
-    loop {
-        let mut b = [0];
-        stream
-            .read_exact(&mut b)
-            .map_err(|e| format!("response header: {e}"))?;
-        header.push(b[0]);
-        let mut d = minicbor::Decoder::new(&header);
-        if d.skip().is_ok() && d.position() == header.len() {
-            break;
-        }
-        if header.len() == 4096 {
-            return Err("response metadata exceeds 4096 bytes".into());
-        }
+    let header = mesh::wire::read_cbor_header_bytes_sync(&mut stream)
+        .map_err(|e| format!("response header: {e}"))?
+        .ok_or_else(|| "response header: unexpected eof".to_owned())?;
+    if header.len() > 4096 {
+        return Err("response metadata exceeds 4096 bytes".into());
     }
     let meta = crate::console::decode(&header)?;
     if let Some(error) = meta.get("7").and_then(|v| v.as_i64()).filter(|e| *e < 0) {
@@ -374,6 +423,9 @@ fn run_wait(args: &[String], wait: Duration, report: bool) -> Result<(), String>
         std::io::copy(&mut stream, &mut std::io::sink())
     }
     .map_err(|e| e.to_string())?;
+    if method == 14 {
+        crate::node_client::clear_cached_flash_session(target);
+    }
     if method == 3 && meta.get("5").and_then(|v| v.as_u64()) != Some(received) {
         return Err(format!("truncated read: received {received}"));
     }
@@ -551,7 +603,7 @@ pub(crate) fn wifi(args: &[String]) -> Result<(), String> {
             profile.uart_baud,
         )
     };
-    let mut port = XipPort::open_baud(serial, baud).map_err(|e| e.to_string())?;
+    let mut port = XipPort::open_ensuring_baud(serial, baud)?;
     port.wake()?;
     let mut reader = Reader::default();
     let deadline = std::time::Instant::now() + Duration::from_secs(75);
@@ -782,16 +834,9 @@ mod image_retry_tests {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let mut byte = [0];
-                    stream.read_exact(&mut byte).unwrap();
-                    request.push(byte[0]);
-                    let mut d = minicbor::Decoder::new(&request);
-                    if d.skip().is_ok() && d.position() == request.len() {
-                        break;
-                    }
-                }
+                let mut request = mesh::wire::read_cbor_header_bytes_sync(&mut stream)
+                    .unwrap()
+                    .unwrap();
                 let fields = crate::console::decode(&request).unwrap();
                 assert_eq!(fields["5"]["8"], 7);
                 let mut body = vec![0; expected.len()];

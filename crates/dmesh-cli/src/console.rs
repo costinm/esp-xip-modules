@@ -346,7 +346,11 @@ pub(crate) fn run_native(arguments: &[String]) -> Result<(),String> {
     let words=native_words(&words)?;
     // Encode/validate before touching the physical port.
     let req=if waking || watching {None} else {Some(request(&words,crate::client::fresh_request_id())?)};
-    let mut owner=XipPort::open_baud(&path,baud).map_err(|e|e.to_string())?;
+    let mut owner = if watching {
+        XipPort::open_baud(&path, baud).map_err(|e| e.to_string())?
+    } else {
+        XipPort::open_ensuring_baud(&path, baud)?
+    };
     if watching {return watch(&mut owner,None);}
     owner.wake()?;
     let Some(req)=req else {println!("{}",json!({"awake":true}));return Ok(());};

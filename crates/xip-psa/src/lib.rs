@@ -1,6 +1,14 @@
 //! The runtime's cryptography in pure Rust (RustCrypto), as plain byte functions. The runtimes adapt packets to it (`crypto` and `identity`
 //! tables): modules never see keys, contexts or a crypto library, and the runtime itself (QUIC protection, discovery signatures) calls it
 //! directly. Hash algorithms are the PSA numbers so a C provider (`psa_hash_*`) answers the same calls.
+use aes_gcm::{
+    aead::AeadInPlace,
+    aes::{
+        cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit as _},
+        Aes128, Aes256,
+    },
+    Aes128Gcm, Aes256Gcm, Nonce, Tag,
+};
 use p256::ecdsa::signature::hazmat::PrehashVerifier;
 use p256::ecdsa::{signature::Signer, signature::Verifier, Signature, SigningKey, VerifyingKey};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
@@ -13,6 +21,10 @@ pub const ALG_SHA_384: u32 = 0x0200_000a;
 pub const ALG_SHA_512: u32 = 0x0200_000b;
 /// ECDSA over P-256 with SHA-256 (message signed or verified, raw r||s).
 pub const ALG_ECDSA_SHA_256: u32 = 0x0600_0609;
+/// AES-GCM AEAD (12-byte nonce, 16-byte tag).
+pub const ALG_GCM: u32 = 0x0550_0200;
+/// AES-CCM AEAD (12-byte nonce, 16-byte tag; `PSA_ALG_CCM`).
+pub const ALG_CCM: u32 = 0x0550_0100;
 
 /// A multipart hash.
 pub enum Hasher {
@@ -92,6 +104,165 @@ impl Agreement {
 
 pub fn random(out: &mut [u8]) {
     OsRng.fill_bytes(out);
+}
+
+fn ccm_encrypt_block<C: BlockEncrypt>(cipher: &C, block: &mut [u8; 16]) {
+    cipher.encrypt_block(GenericArray::from_mut_slice(block));
+}
+
+fn ccm_cbc_mac<C: BlockEncrypt>(cipher: &C, nonce: &[u8; 12], aad: &[u8], pt: &[u8]) -> Option<[u8; 16]> {
+    if pt.len() > 0x00ff_ffff || aad.len() >= 0xff00 {
+        return None;
+    }
+    let mut mac = [0u8; 16];
+    mac[0] = (if aad.is_empty() { 0x00 } else { 0x40 }) | 0x38 | 0x02;
+    mac[1..13].copy_from_slice(nonce);
+    let len_u = pt.len() as u32;
+    mac[13] = ((len_u >> 16) & 0xff) as u8;
+    mac[14] = ((len_u >> 8) & 0xff) as u8;
+    mac[15] = (len_u & 0xff) as u8;
+    ccm_encrypt_block(cipher, &mut mac);
+
+    if !aad.is_empty() {
+        let mut blk = [0u8; 16];
+        let aad_len = aad.len() as u16;
+        blk[0] = (aad_len >> 8) as u8;
+        blk[1] = (aad_len & 0xff) as u8;
+        let mut pos = 2usize;
+        for &b in aad {
+            blk[pos] = b;
+            pos += 1;
+            if pos == 16 {
+                for (m, &x) in mac.iter_mut().zip(blk.iter()) {
+                    *m ^= x;
+                }
+                ccm_encrypt_block(cipher, &mut mac);
+                blk = [0u8; 16];
+                pos = 0;
+            }
+        }
+        if pos > 0 {
+            for (m, &x) in mac.iter_mut().zip(blk.iter()) {
+                *m ^= x;
+            }
+            ccm_encrypt_block(cipher, &mut mac);
+        }
+    }
+
+    let mut chunks = pt.chunks_exact(16);
+    for chunk in &mut chunks {
+        for (m, &x) in mac.iter_mut().zip(chunk.iter()) {
+            *m ^= x;
+        }
+        ccm_encrypt_block(cipher, &mut mac);
+    }
+    let rem = chunks.remainder();
+    if !rem.is_empty() {
+        for (m, &x) in mac.iter_mut().zip(rem.iter()) {
+            *m ^= x;
+        }
+        ccm_encrypt_block(cipher, &mut mac);
+    }
+    Some(mac)
+}
+
+fn ccm_ctr_xor<C: BlockEncrypt>(cipher: &C, nonce: &[u8; 12], body: &mut [u8]) {
+    let mut ctr = [0u8; 16];
+    ctr[0] = 0x02;
+    ctr[1..13].copy_from_slice(nonce);
+    let mut block_idx = 1u32;
+    for chunk in body.chunks_mut(16) {
+        ctr[13] = ((block_idx >> 16) & 0xff) as u8;
+        ctr[14] = ((block_idx >> 8) & 0xff) as u8;
+        ctr[15] = (block_idx & 0xff) as u8;
+        let mut ks = ctr;
+        ccm_encrypt_block(cipher, &mut ks);
+        for (b, k) in chunk.iter_mut().zip(ks.iter()) {
+            *b ^= *k;
+        }
+        block_idx = block_idx.wrapping_add(1);
+    }
+}
+
+fn ccm_s0<C: BlockEncrypt>(cipher: &C, nonce: &[u8; 12]) -> [u8; 16] {
+    let mut s0 = [0u8; 16];
+    s0[0] = 0x02;
+    s0[1..13].copy_from_slice(nonce);
+    ccm_encrypt_block(cipher, &mut s0);
+    s0
+}
+
+fn ccm_seal_with_cipher<C: BlockEncrypt>(cipher: &C, nonce: &[u8; 12], aad: &[u8], body: &mut [u8]) -> Option<[u8; 16]> {
+    let mut tag = ccm_cbc_mac(cipher, nonce, aad, body)?;
+    ccm_ctr_xor(cipher, nonce, body);
+    let s0 = ccm_s0(cipher, nonce);
+    for (t, &s) in tag.iter_mut().zip(s0.iter()) {
+        *t ^= s;
+    }
+    Some(tag)
+}
+
+fn ccm_open_with_cipher<C: BlockEncrypt>(cipher: &C, nonce: &[u8; 12], aad: &[u8], body: &mut [u8], tag: &[u8; 16]) -> bool {
+    ccm_ctr_xor(cipher, nonce, body);
+    let Some(mac) = ccm_cbc_mac(cipher, nonce, aad, body) else {
+        body.fill(0);
+        return false;
+    };
+    let s0 = ccm_s0(cipher, nonce);
+    let mut diff = 0u8;
+    for i in 0..16 {
+        diff |= (mac[i] ^ s0[i]) ^ tag[i];
+    }
+    if diff == 0 {
+        true
+    } else {
+        body.fill(0);
+        false
+    }
+}
+
+/// In-place AES-128/256-GCM or AES-128/256-CCM authenticated encryption matching `psa_aead_encrypt`.
+pub fn aead_seal_in_place(alg: u32, key: &[u8], nonce: &[u8; 12], aad: &[u8], body: &mut [u8]) -> Option<[u8; 16]> {
+    match alg {
+        ALG_GCM => {
+            let nonce = Nonce::from_slice(nonce);
+            let tag = match key.len() {
+                16 => Aes128Gcm::new_from_slice(key).ok()?.encrypt_in_place_detached(nonce, aad, body).ok()?,
+                32 => Aes256Gcm::new_from_slice(key).ok()?.encrypt_in_place_detached(nonce, aad, body).ok()?,
+                _ => return None,
+            };
+            let mut out = [0u8; 16];
+            out.copy_from_slice(&tag);
+            Some(out)
+        }
+        ALG_CCM => match key.len() {
+            16 => ccm_seal_with_cipher(&Aes128::new_from_slice(key).ok()?, nonce, aad, body),
+            32 => ccm_seal_with_cipher(&Aes256::new_from_slice(key).ok()?, nonce, aad, body),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// In-place AES-128/256-GCM or AES-128/256-CCM authenticated decryption matching `psa_aead_decrypt`.
+pub fn aead_open_in_place(alg: u32, key: &[u8], nonce: &[u8; 12], aad: &[u8], body: &mut [u8], tag: &[u8; 16]) -> bool {
+    match alg {
+        ALG_GCM => {
+            let nonce = Nonce::from_slice(nonce);
+            let tag = Tag::from_slice(tag);
+            match key.len() {
+                16 => Aes128Gcm::new_from_slice(key).is_ok_and(|c| c.decrypt_in_place_detached(nonce, aad, body, tag).is_ok()),
+                32 => Aes256Gcm::new_from_slice(key).is_ok_and(|c| c.decrypt_in_place_detached(nonce, aad, body, tag).is_ok()),
+                _ => false,
+            }
+        }
+        ALG_CCM => match key.len() {
+            16 => Aes128::new_from_slice(key).is_ok_and(|c| ccm_open_with_cipher(&c, nonce, aad, body, tag)),
+            32 => Aes256::new_from_slice(key).is_ok_and(|c| ccm_open_with_cipher(&c, nonce, aad, body, tag)),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 // ---- identity: the device key of this process (P-256) ----
